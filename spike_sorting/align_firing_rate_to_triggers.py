@@ -56,7 +56,12 @@ except ModuleNotFoundError:
 
 
 REFERENCE_OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
-REFERENCE_INPUT_BASE = Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4")
+REFERENCE_RECORDING_PATHS: Dict[str, Path] = {
+    # Keep aligned with spikesort_mountainsort4_v2.py MERGED_RECORDINGS.
+    "session2": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session2"),
+    "session3": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session3"),
+    "session5": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session5"),
+}
 
 DEFAULT_SESSION_DIRS: Dict[str, Path] = {
     s: REFERENCE_OUTPUT_ROOT / f"sorting_results_{s}_v2"
@@ -64,18 +69,9 @@ DEFAULT_SESSION_DIRS: Dict[str, Path] = {
 }
 
 DEFAULT_MAT_SEARCH_ROOTS: Dict[str, List[Path]] = {
-    "session2": [
-        REFERENCE_INPUT_BASE / "bistable_sub4_session2",
-        REFERENCE_INPUT_BASE,
-    ],
-    "session3": [
-        REFERENCE_INPUT_BASE / "bistable_sub4_session3",
-        REFERENCE_INPUT_BASE,
-    ],
-    "session5": [
-        REFERENCE_INPUT_BASE / "bistable_sub4_session5",
-        REFERENCE_INPUT_BASE,
-    ],
+    "session2": [REFERENCE_RECORDING_PATHS["session2"]],
+    "session3": [REFERENCE_RECORDING_PATHS["session3"]],
+    "session5": [REFERENCE_RECORDING_PATHS["session5"]],
 }
 
 
@@ -165,36 +161,59 @@ def is_valid_trigger_mat(path: Path) -> bool:
         return False
 
 
+def pick_best_mat_under_root(root: Path, session_name: str) -> Path | None:
+    if root.is_file():
+        return root if is_valid_trigger_mat(root) else None
+    if not root.exists():
+        return None
+    if not root.is_dir():
+        return None
+
+    candidates: List[Path] = []
+    for p in root.rglob("*.mat"):
+        if is_valid_trigger_mat(p):
+            candidates.append(p)
+    if not candidates:
+        return None
+
+    session_token = session_name.lower()
+
+    def rank(p: Path) -> Tuple[int, int, int, str]:
+        try:
+            rel_depth = len(p.relative_to(root).parts)
+        except ValueError:
+            rel_depth = len(p.parts)
+        name_lower = p.name.lower()
+        contains_session = 0 if session_token in name_lower else 1
+        return (rel_depth, contains_session, len(name_lower), name_lower)
+
+    candidates.sort(key=rank)
+    return candidates[0]
+
+
 def discover_mat_file(session_name: str, session_dir: Path, explicit: Dict[str, Path]) -> Path:
     if session_name in explicit:
         candidate = explicit[session_name]
-        if not is_valid_trigger_mat(candidate):
+        picked = pick_best_mat_under_root(candidate, session_name)
+        if picked is None:
             raise FileNotFoundError(
-                f"Provided MAT file for {session_name} is missing or invalid: {candidate}"
+                f"Provided MAT file/root for {session_name} is missing or invalid: {candidate}"
             )
-        return candidate
+        return picked
 
-    search_roots: List[Path] = [session_dir, session_dir.parent]
-    search_roots.extend(DEFAULT_MAT_SEARCH_ROOTS.get(session_name, []))
-
-    session_pattern = f"*{session_name}*.mat"
-    patterns = (session_pattern, "Temp*.mat", "*.mat")
-
-    tested: List[Path] = []
+    # Intentionally keep discovery constrained to session-specific recording roots
+    # (aligned with spikesort_mountainsort4_v2.py MERGED_RECORDINGS) to avoid
+    # accidentally selecting unrelated Temp_*.mat files from broader directories.
+    search_roots: List[Path] = list(DEFAULT_MAT_SEARCH_ROOTS.get(session_name, []))
     for root in search_roots:
-        if not root.exists():
-            continue
-        for pattern in patterns:
-            for p in root.rglob(pattern):
-                if p in tested:
-                    continue
-                tested.append(p)
-                if is_valid_trigger_mat(p):
-                    return p
+        picked = pick_best_mat_under_root(root, session_name)
+        if picked is not None:
+            return picked
 
     hint = (
         f"Could not auto-discover MAT file for {session_name}. "
-        f"Use --mat {session_name}=/path/to/file.mat"
+        f"Use --mat {session_name}=/path/to/file.mat "
+        f"or --mat {session_name}=/path/to/session_dir"
     )
     raise FileNotFoundError(hint)
 
