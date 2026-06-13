@@ -9,7 +9,7 @@
 # Sorter: mountainsort4
 # SORTER_DETECT_THRESHOLD = 7.0
 # Quality metrics: num_spikes, snr, isi_violation, firing_rate, presence_ratio
-# QC thresholds: snr>=7.0, isi<0.01, n_spikes>300, fr>=0.5, presence>=0.95
+# QC thresholds: snr>=5.0, isi<=0.02, n_spikes>=100, fr>=0.2, presence>=0.8
 # QC pass: all metrics pass
 # QC fail: any metric fails (see auto_qc_fail_reasons)
 
