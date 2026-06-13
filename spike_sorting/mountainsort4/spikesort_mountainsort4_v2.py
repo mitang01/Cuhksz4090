@@ -45,7 +45,7 @@ MERGED_RECORDINGS = {
 }
 
 # Output directory requested by user
-OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting")
+OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
 
 # Recording metadata
 SAMPLING_RATE = 30000.0
