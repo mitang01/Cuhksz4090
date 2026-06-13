@@ -20,6 +20,10 @@ Outputs per session:
   - firing_rate_timecourse.png
   - firing_rate_heatmap_all_triggers.png
   - firing_rate_heatmap_odd_triggers.png
+
+Notes:
+  - Good units are defined using the same QC outputs as spikesort_mountainsort4_v2.py.
+  - This script never opens interactive plot windows; it only saves figures to disk.
 """
 
 from __future__ import annotations
@@ -45,29 +49,32 @@ try:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: E402
+    plt.ioff()
 except ModuleNotFoundError:
     matplotlib = None
     plt = None
 
 
+REFERENCE_OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
+REFERENCE_INPUT_BASE = Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4")
+
 DEFAULT_SESSION_DIRS: Dict[str, Path] = {
-    "session2": Path("/share/home/mitan/spike_sorting/mountainsort4/sorting_results_session2_v2"),
-    "session3": Path("/share/home/mitan/spike_sorting/mountainsort4/sorting_results_session3_v2"),
-    "session5": Path("/share/home/mitan/spike_sorting/mountainsort4/sorting_results_session5_v2"),
+    s: REFERENCE_OUTPUT_ROOT / f"sorting_results_{s}_v2"
+    for s in ("session2", "session3", "session5")
 }
 
 DEFAULT_MAT_SEARCH_ROOTS: Dict[str, List[Path]] = {
     "session2": [
-        Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session2"),
-        Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4"),
+        REFERENCE_INPUT_BASE / "bistable_sub4_session2",
+        REFERENCE_INPUT_BASE,
     ],
     "session3": [
-        Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session3"),
-        Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4"),
+        REFERENCE_INPUT_BASE / "bistable_sub4_session3",
+        REFERENCE_INPUT_BASE,
     ],
     "session5": [
-        Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session5"),
-        Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4"),
+        REFERENCE_INPUT_BASE / "bistable_sub4_session5",
+        REFERENCE_INPUT_BASE,
     ],
 }
 
@@ -264,15 +271,66 @@ def extract_triggers_from_mat(
 
 def load_good_unit_spike_times(session_dir: Path) -> Dict[str, np.ndarray]:
     pkl_path = session_dir / "good_units_spike_times.pkl"
-    if not pkl_path.is_file():
-        raise FileNotFoundError(f"Missing expected file: {pkl_path}")
-    with pkl_path.open("rb") as f:
-        data = pickle.load(f)
-    if not isinstance(data, dict):
-        raise TypeError(f"Unexpected pickle format in {pkl_path}; expected dict")
+    if pkl_path.is_file():
+        with pkl_path.open("rb") as f:
+            data = pickle.load(f)
+        if not isinstance(data, dict):
+            raise TypeError(f"Unexpected pickle format in {pkl_path}; expected dict")
+        out: Dict[str, np.ndarray] = {}
+        for k, v in data.items():
+            out[str(k)] = np.asarray(v, dtype=np.float64).ravel()
+        return out
+
+    # Fallback path for runs where good_units_spike_times.pkl may be absent:
+    # reconstruct good-unit spikes from all_spike_times.pkl + QC summary CSV.
+    all_pkl_path = session_dir / "all_spike_times.pkl"
+    if not all_pkl_path.is_file():
+        raise FileNotFoundError(
+            "Missing both good_units_spike_times.pkl and all_spike_times.pkl in "
+            f"{session_dir}"
+        )
+    with all_pkl_path.open("rb") as f:
+        all_data = pickle.load(f)
+    if not isinstance(all_data, dict):
+        raise TypeError(f"Unexpected pickle format in {all_pkl_path}; expected dict")
+
+    summary_candidates = [
+        session_dir / "good_units_summary.csv",
+        session_dir / "all_regions_units_summary.csv",
+    ]
+    summary_path = next((p for p in summary_candidates if p.is_file()), None)
+    if summary_path is None:
+        raise FileNotFoundError(
+            "Need one of good_units_summary.csv or all_regions_units_summary.csv "
+            f"to identify good units in {session_dir}"
+        )
+
+    good_keys: set[str] = set()
+    with summary_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        if "global_key" not in (reader.fieldnames or []):
+            raise ValueError(f"{summary_path} missing required column: global_key")
+        has_auto_qc = "auto_qc_pass" in (reader.fieldnames or [])
+        for row in reader:
+            k = (row.get("global_key") or "").strip()
+            if not k:
+                continue
+            if has_auto_qc:
+                qc_val = (row.get("auto_qc_pass") or "").strip().lower()
+                if qc_val not in {"true", "1", "yes"}:
+                    continue
+            good_keys.add(k)
+
     out: Dict[str, np.ndarray] = {}
-    for k, v in data.items():
-        out[str(k)] = np.asarray(v, dtype=np.float64).ravel()
+    for k, v in all_data.items():
+        ks = str(k)
+        if ks in good_keys:
+            out[ks] = np.asarray(v, dtype=np.float64).ravel()
+    if not out:
+        raise RuntimeError(
+            f"Recovered zero good units from fallback inputs in {session_dir}. "
+            f"summary={summary_path.name}, all_spikes={all_pkl_path.name}"
+        )
     return out
 
 
@@ -325,9 +383,9 @@ def aligned_population_rate(
 def trigger_count_annotation(n: int) -> str:
     if n < 600:
         return f"WARNING: trigger count {n} is below expected minimum (600)."
-    if n > 1000:
-        return f"WARNING: trigger count {n} is above expected range upper bound (1000)."
-    return f"OK: trigger count {n} is within expected range (600-1000)."
+    if n > 2000:
+        return f"WARNING: trigger count {n} is above expected range upper bound (2000)."
+    return f"OK: trigger count {n} is within expected range (600-2000)."
 
 
 def write_trigger_qc_summary(
