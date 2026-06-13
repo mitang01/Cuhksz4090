@@ -60,13 +60,13 @@ REGION_CHANNEL_MAP = {
     "Amygdala": (0, 16)    # channels 0-15
 }
 
-# Sorting/QC thresholds (stricter defaults for single-unit quality)
+# Sorting/QC thresholds (moderate defaults for including more QC-passing units)
 SORTER_DETECT_THRESHOLD = 7.0
-QC_MIN_SNR = 7.0
-QC_MAX_ISI_VIOLATION = 0.01
-QC_MIN_NUM_SPIKES = 300
-QC_MIN_FIRING_RATE_HZ = 0.5
-QC_MIN_PRESENCE_RATIO = 0.95
+QC_MIN_SNR = 5.0
+QC_MAX_ISI_VIOLATION = 0.02
+QC_MIN_NUM_SPIKES = 100
+QC_MIN_FIRING_RATE_HZ = 0.2
+QC_MIN_PRESENCE_RATIO = 0.8
 MAX_SPIKEINTERFACE_JOBS = 4
 
 
