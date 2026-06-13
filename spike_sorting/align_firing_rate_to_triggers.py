@@ -11,6 +11,8 @@ It follows the same board_dig_in_data extraction logic used in
 spike_sorting/plot_board_dig_in_data.py:
   - board_dig_in_data is sampled digital state matrix (0/1)
   - trigger timestamps are rising edges (0 -> 1) mapped through t_dig
+If MAT trigger files are unavailable, it can also extract trigger-like pulse
+times directly from merged raw binary recordings.
 
 Outputs per session:
   - trigger_qc_summary.csv
@@ -62,6 +64,9 @@ REFERENCE_RECORDING_PATHS: Dict[str, Path] = {
     "session3": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session3"),
     "session5": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session5"),
 }
+BINARY_NUM_CHANNELS_DEFAULT = 128
+BINARY_SAMPLING_RATE_HZ_DEFAULT = 30000.0
+BINARY_MIN_PULSE_MS_DEFAULT = 0.5
 
 DEFAULT_SESSION_DIRS: Dict[str, Path] = {
     s: REFERENCE_OUTPUT_ROOT / f"sorting_results_{s}_v2"
@@ -77,7 +82,8 @@ DEFAULT_MAT_SEARCH_ROOTS: Dict[str, List[Path]] = {
 
 @dataclass
 class TriggerInfo:
-    mat_path: Path
+    source_path: Path
+    source_kind: str  # "mat" or "binary"
     sample_rate_hz: float
     trigger_channel_index_0based: int
     trigger_channel_label: str
@@ -194,12 +200,17 @@ def pick_best_mat_under_root(root: Path, session_name: str) -> Path | None:
 def discover_mat_file(session_name: str, session_dir: Path, explicit: Dict[str, Path]) -> Path:
     if session_name in explicit:
         candidate = explicit[session_name]
+        if is_valid_trigger_mat(candidate):
+            return candidate
         picked = pick_best_mat_under_root(candidate, session_name)
-        if picked is None:
-            raise FileNotFoundError(
-                f"Provided MAT file/root for {session_name} is missing or invalid: {candidate}"
-            )
-        return picked
+        if picked is not None:
+            return picked
+        # Also allow passing raw merged binary recording file paths directly.
+        if candidate.is_file():
+            return candidate
+        raise FileNotFoundError(
+            f"Provided MAT file/root for {session_name} is missing or invalid: {candidate}"
+        )
 
     # Intentionally keep discovery constrained to session-specific recording roots
     # (aligned with spikesort_mountainsort4_v2.py MERGED_RECORDINGS) to avoid
@@ -210,27 +221,26 @@ def discover_mat_file(session_name: str, session_dir: Path, explicit: Dict[str, 
         if picked is not None:
             return picked
 
+    # Final fallback: if MAT is unavailable, use merged binary recording path
+    # from the sorter script mapping and extract trigger-like edges directly.
+    binary_path = REFERENCE_RECORDING_PATHS.get(session_name)
+    if binary_path is not None and binary_path.is_file():
+        return binary_path
+
     hint = (
-        f"Could not auto-discover MAT file for {session_name}. "
-        f"Use --mat {session_name}=/path/to/file.mat "
-        f"or --mat {session_name}=/path/to/session_dir"
+        f"Could not auto-discover trigger source for {session_name}. "
+        f"Use --mat {session_name}=/path/to/file.mat, "
+        f"--mat {session_name}=/path/to/session_dir, "
+        f"or --mat {session_name}=/path/to/merged_binary"
     )
     raise FileNotFoundError(hint)
 
 
-def choose_trigger_channel(
-    dig: np.ndarray, t_full: np.ndarray, labels: List[str], force_channel_0based: int | None = None
+def choose_trigger_channel_from_rising(
+    per_ch_rising: List[np.ndarray], force_channel_0based: int | None = None
 ) -> Tuple[int, np.ndarray, List[int]]:
-    n_ch = dig.shape[1]
-    per_ch_rising: List[np.ndarray] = []
-    counts: List[int] = []
-
-    for ch in range(n_ch):
-        rising_idx, _ = event_indices(dig[:, ch])
-        rising_ts = t_full[rising_idx] if rising_idx.size else np.array([], dtype=np.float64)
-        per_ch_rising.append(rising_ts)
-        counts.append(int(rising_ts.size))
-
+    n_ch = len(per_ch_rising)
+    counts: List[int] = [int(ts.size) for ts in per_ch_rising]
     if force_channel_0based is not None:
         if force_channel_0based < 0 or force_channel_0based >= n_ch:
             raise ValueError(
@@ -263,6 +273,42 @@ def choose_trigger_channel(
     return best_idx, per_ch_rising[best_idx], counts
 
 
+def choose_trigger_channel(
+    dig: np.ndarray, t_full: np.ndarray, labels: List[str], force_channel_0based: int | None = None
+) -> Tuple[int, np.ndarray, List[int]]:
+    per_ch_rising: List[np.ndarray] = []
+    for ch in range(dig.shape[1]):
+        rising_idx, _ = event_indices(dig[:, ch])
+        rising_ts = t_full[rising_idx] if rising_idx.size else np.array([], dtype=np.float64)
+        per_ch_rising.append(rising_ts)
+    return choose_trigger_channel_from_rising(
+        per_ch_rising=per_ch_rising,
+        force_channel_0based=force_channel_0based,
+    )
+
+
+def rising_edges_with_min_high(binary_signal: np.ndarray, min_high_samples: int) -> np.ndarray:
+    b = np.asarray(binary_signal, dtype=bool)
+    if b.size == 0:
+        return np.array([], dtype=np.int64)
+
+    rising = np.flatnonzero((~b[:-1]) & b[1:]) + 1
+    falling = np.flatnonzero(b[:-1] & (~b[1:])) + 1
+    if rising.size == 0 or falling.size == 0:
+        return np.array([], dtype=np.int64)
+
+    valid: List[int] = []
+    j = 0
+    for r in rising:
+        while j < falling.size and falling[j] <= r:
+            j += 1
+        if j >= falling.size:
+            break
+        if (falling[j] - r) >= min_high_samples:
+            valid.append(int(r))
+    return np.asarray(valid, dtype=np.int64)
+
+
 def extract_triggers_from_mat(
     mat_path: Path, force_channel_0based: int | None = None
 ) -> TriggerInfo:
@@ -279,12 +325,92 @@ def extract_triggers_from_mat(
     ch_idx, trigger_ts, counts = choose_trigger_channel(dig, t_full, labels, force_channel_0based)
     label = labels[ch_idx] if ch_idx < len(labels) else f"DIG {ch_idx + 1}"
     return TriggerInfo(
-        mat_path=mat_path,
+        source_path=mat_path,
+        source_kind="mat",
         sample_rate_hz=sr,
         trigger_channel_index_0based=ch_idx,
         trigger_channel_label=label,
         all_trigger_times_s=np.asarray(trigger_ts, dtype=np.float64),
         all_counts_per_channel=counts,
+    )
+
+
+def extract_triggers_from_binary(
+    binary_path: Path,
+    force_channel_0based: int | None = None,
+    num_channels: int = BINARY_NUM_CHANNELS_DEFAULT,
+    sampling_rate_hz: float = BINARY_SAMPLING_RATE_HZ_DEFAULT,
+    min_pulse_ms: float = BINARY_MIN_PULSE_MS_DEFAULT,
+) -> TriggerInfo:
+    if not binary_path.is_file():
+        raise FileNotFoundError(f"Binary trigger source not found: {binary_path}")
+
+    flat = np.memmap(binary_path, dtype=np.int16, mode="r")
+    if flat.size == 0:
+        raise RuntimeError(f"Binary file is empty: {binary_path}")
+    if flat.size % int(num_channels) != 0:
+        raise RuntimeError(
+            f"Binary file size {flat.size} is not divisible by num_channels={num_channels}: "
+            f"{binary_path}"
+        )
+    n_samples = int(flat.size // int(num_channels))
+    data = flat.reshape((n_samples, int(num_channels)))
+    t_full = np.arange(n_samples, dtype=np.float64) / float(sampling_rate_hz)
+    min_high_samples = max(1, int(round((float(min_pulse_ms) / 1000.0) * float(sampling_rate_hz))))
+
+    per_ch_rising: List[np.ndarray] = []
+    labels: List[str] = [f"RAW_CH_{i + 1}" for i in range(int(num_channels))]
+    max_probe_points = 1_000_000
+    stride = max(1, n_samples // max_probe_points)
+
+    for ch in range(int(num_channels)):
+        ch_view = data[:, ch]
+        probe = np.asarray(ch_view[::stride], dtype=np.float32)
+        lo = float(np.percentile(probe, 1.0))
+        hi = float(np.percentile(probe, 99.0))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            per_ch_rising.append(np.array([], dtype=np.float64))
+            continue
+        thr = 0.5 * (lo + hi)
+        binary = np.asarray(ch_view > thr, dtype=bool)
+        rising_idx = rising_edges_with_min_high(binary, min_high_samples=min_high_samples)
+        rising_ts = t_full[rising_idx] if rising_idx.size else np.array([], dtype=np.float64)
+        per_ch_rising.append(rising_ts)
+
+    ch_idx, trigger_ts, counts = choose_trigger_channel_from_rising(
+        per_ch_rising=per_ch_rising,
+        force_channel_0based=force_channel_0based,
+    )
+    label = labels[ch_idx] if ch_idx < len(labels) else f"RAW_CH_{ch_idx + 1}"
+    return TriggerInfo(
+        source_path=binary_path,
+        source_kind="binary",
+        sample_rate_hz=float(sampling_rate_hz),
+        trigger_channel_index_0based=ch_idx,
+        trigger_channel_label=label,
+        all_trigger_times_s=np.asarray(trigger_ts, dtype=np.float64),
+        all_counts_per_channel=counts,
+    )
+
+
+def extract_triggers_from_source(
+    source_path: Path,
+    force_channel_0based: int | None = None,
+    binary_num_channels: int = BINARY_NUM_CHANNELS_DEFAULT,
+    binary_sampling_rate_hz: float = BINARY_SAMPLING_RATE_HZ_DEFAULT,
+    binary_min_pulse_ms: float = BINARY_MIN_PULSE_MS_DEFAULT,
+) -> TriggerInfo:
+    if is_valid_trigger_mat(source_path):
+        return extract_triggers_from_mat(
+            mat_path=source_path,
+            force_channel_0based=force_channel_0based,
+        )
+    return extract_triggers_from_binary(
+        binary_path=source_path,
+        force_channel_0based=force_channel_0based,
+        num_channels=int(binary_num_channels),
+        sampling_rate_hz=float(binary_sampling_rate_hz),
+        min_pulse_ms=float(binary_min_pulse_ms),
     )
 
 
@@ -423,7 +549,8 @@ def write_trigger_qc_summary(
         w.writerow(
             [
                 "session",
-                "mat_file",
+                "trigger_source_path",
+                "trigger_source_kind",
                 "trigger_channel_index_1based",
                 "trigger_channel_label",
                 "sample_rate_hz",
@@ -435,7 +562,8 @@ def write_trigger_qc_summary(
         w.writerow(
             [
                 session_name,
-                str(trigger_info.mat_path),
+                str(trigger_info.source_path),
+                trigger_info.source_kind,
                 trigger_info.trigger_channel_index_0based + 1,
                 trigger_info.trigger_channel_label,
                 f"{trigger_info.sample_rate_hz:.6f}",
@@ -452,10 +580,11 @@ def write_trigger_qc_summary(
     text = "\n".join(
         [
             f"Session: {session_name}",
-            f"MAT file: {trigger_info.mat_path}",
+            f"Trigger source: {trigger_info.source_path}",
+            f"Trigger source kind: {trigger_info.source_kind}",
             f"Selected trigger channel: {trigger_info.trigger_channel_index_0based + 1} "
             f"({trigger_info.trigger_channel_label})",
-            f"Sampling rate (board_dig_in): {trigger_info.sample_rate_hz:.6f} Hz",
+            f"Sampling rate: {trigger_info.sample_rate_hz:.6f} Hz",
             f"Total rising triggers on selected channel: {trigger_info.all_trigger_times_s.size}",
             f"Selected equivalent trigger count (first N<=600): {first_600_count}",
             f"Count note: {note}",
@@ -603,17 +732,20 @@ def plot_heatmap(
 def process_one_session(
     session_name: str,
     session_dir: Path,
-    mat_path: Path,
+    trigger_source_path: Path,
     output_subdir: str,
     t_before_s: float,
     t_after_s: float,
     bin_size_s: float,
     trigger_channel_0based: int | None,
+    binary_num_channels: int,
+    binary_sampling_rate_hz: float,
+    binary_min_pulse_ms: float,
 ) -> None:
     print("=" * 88)
     print(f"[SESSION] {session_name}")
     print(f"  sorting dir: {session_dir}")
-    print(f"  MAT file:    {mat_path}")
+    print(f"  trigger source: {trigger_source_path}")
 
     output_dir = session_dir / output_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -624,7 +756,13 @@ def process_one_session(
         raise RuntimeError(f"No non-empty good unit spike trains found in {session_dir}")
     print(f"  good units loaded: {len(unit_spikes)}")
 
-    trigger_info = extract_triggers_from_mat(mat_path, force_channel_0based=trigger_channel_0based)
+    trigger_info = extract_triggers_from_source(
+        source_path=trigger_source_path,
+        force_channel_0based=trigger_channel_0based,
+        binary_num_channels=int(binary_num_channels),
+        binary_sampling_rate_hz=float(binary_sampling_rate_hz),
+        binary_min_pulse_ms=float(binary_min_pulse_ms),
+    )
     n_total = int(trigger_info.all_trigger_times_s.size)
     note = trigger_count_annotation(n_total)
     first_n = min(600, n_total)
@@ -723,8 +861,10 @@ def main() -> int:
         default=[],
         metavar="SESSION=PATH",
         help=(
-            "Provide MAT file path per session. Repeatable. "
-            "Example: --mat session2=/share/.../session2_triggers.mat"
+            "Provide trigger source path per session. Repeatable. "
+            "PATH can be a MAT file, a directory containing MAT files, or "
+            "a merged raw binary recording file. "
+            "Example: --mat session2=/share/.../bistable_sub4_session2"
         ),
     )
     parser.add_argument(
@@ -765,6 +905,33 @@ def main() -> int:
             "If omitted, auto-select by count/regularity."
         ),
     )
+    parser.add_argument(
+        "--binary-num-channels",
+        type=int,
+        default=BINARY_NUM_CHANNELS_DEFAULT,
+        help=(
+            "Channel count for merged raw binary trigger extraction "
+            f"(default: {BINARY_NUM_CHANNELS_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--binary-sampling-rate",
+        type=float,
+        default=BINARY_SAMPLING_RATE_HZ_DEFAULT,
+        help=(
+            "Sampling rate (Hz) for merged raw binary trigger extraction "
+            f"(default: {BINARY_SAMPLING_RATE_HZ_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--binary-min-pulse-ms",
+        type=float,
+        default=BINARY_MIN_PULSE_MS_DEFAULT,
+        help=(
+            "Minimum high-pulse width in milliseconds when detecting trigger-like "
+            f"events from merged raw binary (default: {BINARY_MIN_PULSE_MS_DEFAULT})."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -794,6 +961,15 @@ def main() -> int:
             print("--trigger-channel must be >=1", file=sys.stderr)
             return 2
         trigger_channel_0based = args.trigger_channel - 1
+    if args.binary_num_channels < 1:
+        print("--binary-num-channels must be >=1", file=sys.stderr)
+        return 2
+    if args.binary_sampling_rate <= 0:
+        print("--binary-sampling-rate must be >0", file=sys.stderr)
+        return 2
+    if args.binary_min_pulse_ms <= 0:
+        print("--binary-min-pulse-ms must be >0", file=sys.stderr)
+        return 2
 
     requested_sessions = list(dict.fromkeys(args.sessions))
     if not requested_sessions:
@@ -818,7 +994,7 @@ def main() -> int:
             )
             return 2
 
-        mat_path = discover_mat_file(
+        trigger_source_path = discover_mat_file(
             session_name=session_name,
             session_dir=session_dir,
             explicit=mat_overrides,
@@ -827,12 +1003,15 @@ def main() -> int:
         process_one_session(
             session_name=session_name,
             session_dir=session_dir,
-            mat_path=mat_path,
+            trigger_source_path=trigger_source_path,
             output_subdir=args.output_subdir,
             t_before_s=float(args.t_before),
             t_after_s=float(args.t_after),
             bin_size_s=float(args.bin_size),
             trigger_channel_0based=trigger_channel_0based,
+            binary_num_channels=int(args.binary_num_channels),
+            binary_sampling_rate_hz=float(args.binary_sampling_rate),
+            binary_min_pulse_ms=float(args.binary_min_pulse_ms),
         )
 
     print("=" * 88)
