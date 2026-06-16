@@ -36,11 +36,21 @@ job_kwargs = dict(n_jobs=n_jobs, chunk_duration="1s", progress_bar=True)
 si.set_global_job_kwargs(**job_kwargs)
 print(f"✅ 并行参数: n_jobs = {n_jobs}")
 
-# ── 路径配置（只需修改这里）──────────────────────────────────────────────
-base_folder    = Path('/Users/xuandachen/Downloads/听故事数据')
-recording_path = base_folder / 'sub5_merged_neural_data.bin'
-results_base   = base_folder / 'sub5_sorting_results'
-results_base.mkdir(parents=True, exist_ok=True)
+# ── 路径配置（story_listen 批处理）────────────────────────────────────────
+DATASET_RUNS = [
+    {
+        "name": "sub5_story_listen",
+        "recording_path": Path("/share/workspace3/ieeg/micro/story_listen_v1/sub5_story_listen_merged"),
+        "results_base": Path("/share/home/mitan/Cuhksz4090/spike_sorting/mountainsort4/sub5_story_listen_sorting_results"),
+    },
+    {
+        "name": "sub6_story_listen",
+        "recording_path": Path("/share/workspace3/ieeg/micro/story_listen_v1/sub6_story_listen_merged"),
+        "results_base": Path("/share/home/mitan/Cuhksz4090/spike_sorting/mountainsort4/sub6_story_listen_sorting_results"),
+    },
+]
+# 兼容后续 Block 中对 base_folder 的引用（仅作为占位目录）。
+base_folder = Path("/share/workspace3/ieeg/micro/story_listen_v1")
 
 # ── 录制参数 ──────────────────────────────────────────────────────────────
 SAMPLING_RATE      = 30000.0   # Hz
@@ -72,13 +82,49 @@ REGION_COLORS = {
 }
 
 print("✅ BLOCK 0 全局参数初始化完成")
-print(f"   结果输出目录 : {results_base}")
+print("   目标批处理数据集:")
+for _job in DATASET_RUNS:
+    print(f"     - {_job['name']}: {_job['recording_path']}")
+    print(f"       输出目录: {_job['results_base']}")
 print(f"   脑区列表     : {list(REGION_CHANNEL_MAP.keys())}")
 
 
 # ██████████████████████████████████████████████████████████████████████████
 # BLOCK 1 ── 加载完整二进制数据（只加载一次，后续按脑区切片）
 # ██████████████████████████████████████████████████████████████████████████
+
+# 批处理入口：保持 BLOCK 1-3 主体排序逻辑不变，仅按不同输入/输出路径重复执行。
+if "__SPIKESORT_CXD_BATCH_EXECUTING__" not in globals():
+    globals()["__SPIKESORT_CXD_BATCH_EXECUTING__"] = True
+
+    src_text = Path(__file__).read_text(encoding="utf-8")
+    block_match = re.search(
+        r"print\(\"\\n\" \+ \"=\"\*65\)\n"
+        r"print\(\"BLOCK 1: 加载完整二进制数据\"\)\n"
+        r"print\(\"=\"\*65\)\n"
+        r"[\s\S]*?print\(\"✅ BLOCK 3 完成！\"\)\n"
+        r"print\(\"=\"\*65\)\n",
+        src_text,
+    )
+    if block_match is None:
+        raise RuntimeError("无法定位 BLOCK 1-3 代码段，批处理终止。")
+    block_1_to_3 = block_match.group(0)
+
+    for run_i, run_cfg in enumerate(DATASET_RUNS, start=1):
+        recording_path = Path(run_cfg["recording_path"])
+        results_base = Path(run_cfg["results_base"])
+        results_base.mkdir(parents=True, exist_ok=True)
+
+        print("\n" + "▓" * 72)
+        print(f"🚀 批处理任务 {run_i}/{len(DATASET_RUNS)}: {run_cfg['name']}")
+        print(f"   输入 merged 文件: {recording_path}")
+        print(f"   输出目录: {results_base}")
+        print("▓" * 72)
+
+        exec(block_1_to_3, globals(), globals())
+
+    print("\n✅ 所有 story_listen 批处理任务已完成（sub5 + sub6）。")
+    raise SystemExit(0)
 
 print("\n" + "="*65)
 print("BLOCK 1: 加载完整二进制数据")
