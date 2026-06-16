@@ -9,12 +9,17 @@ import numpy as np
 from scipy.io import loadmat
 
 
-BASE_DIR = Path("/share/workspace2/tangmi/bistable_sub4")
-FOLDER_TO_OUTPUT = {
-    "1": "bistable_sub4_session3",
-    "2": "bistable_sub4_session5",
-    "3": "bistable_sub4_session2",
-}
+OUTPUT_DIR = Path("/share/workspace3/ieeg/micro/story_listen_v1")
+MERGE_JOBS = [
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0120/2/sub5_story_listen"),
+        "output_name": "sub5_story_listen_merged",
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0122/sub6_story_listen"),
+        "output_name": "sub6_story_listen_merged",
+    },
+]
 GAIN_TO_UV = 0.195  # Intan RHD2000 conversion factor
 
 
@@ -94,10 +99,10 @@ def merge_folder(input_dir: Path, output_path: Path):
 
 
 def main():
-    BASE_DIR.mkdir(parents=True, exist_ok=True)
-    for folder_name, output_name in FOLDER_TO_OUTPUT.items():
-        input_dir = BASE_DIR / folder_name
-        output_path = BASE_DIR / output_name
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    for job in MERGE_JOBS:
+        input_dir = Path(job["input_dir"])
+        output_path = OUTPUT_DIR / str(job["output_name"])
         if not input_dir.exists():
             print(f"[SKIP] Input folder does not exist: {input_dir}")
             continue
