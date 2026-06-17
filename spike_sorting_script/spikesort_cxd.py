@@ -19,6 +19,7 @@ import shutil
 import pickle
 import pandas as pd
 import re
+import multiprocessing as mp
 import matplotlib
 # 远程无图形环境默认使用非交互后端；图像仅保存到文件。
 matplotlib.use("Agg")
@@ -33,9 +34,22 @@ import warnings
 warnings.simplefilter("ignore")
 ENABLE_INTERACTIVE_DISPLAY = False
 
+# 强制使用 fork，避免在 Linux 集群上被 spawn 重新导入本脚本导致递归启动。
+try:
+    mp.set_start_method("fork", force=True)
+except RuntimeError:
+    pass
+
+try:
+    import dask
+
+    dask.config.set({"multiprocessing.context": "fork"})
+except Exception:
+    pass
+
 # ── 并行参数 ──────────────────────────────────────────────────────────────
 n_jobs     = max(1, os.cpu_count() - 2)
-job_kwargs = dict(n_jobs=n_jobs, chunk_duration="1s", progress_bar=True)
+job_kwargs = dict(n_jobs=n_jobs, chunk_duration="1s", progress_bar=True, mp_context="fork")
 si.set_global_job_kwargs(**job_kwargs)
 print(f"✅ 并行参数: n_jobs = {n_jobs}")
 
