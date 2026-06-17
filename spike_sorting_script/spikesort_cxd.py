@@ -18,6 +18,9 @@ import numpy as np
 import shutil
 import pickle
 import pandas as pd
+import matplotlib
+# 远程无图形环境默认使用非交互后端；图像仅保存到文件。
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from pathlib import Path
@@ -27,8 +30,7 @@ from probeinterface import generate_linear_probe
 import os
 import warnings
 warnings.simplefilter("ignore")
-
-%matplotlib inline
+ENABLE_INTERACTIVE_DISPLAY = False
 
 # ── 并行参数 ──────────────────────────────────────────────────────────────
 n_jobs     = max(1, os.cpu_count() - 2)
@@ -774,7 +776,10 @@ psth_pdf = results_base / 'psth_all_regions.pdf'
 psth_png = results_base / 'psth_all_regions.png'
 plt.savefig(psth_pdf, dpi=300, bbox_inches='tight')
 plt.savefig(psth_png, dpi=300, bbox_inches='tight')
-plt.show()
+if ENABLE_INTERACTIVE_DISPLAY:
+    plt.show()
+else:
+    plt.close(fig)
 print(f"✅ PSTH 图已保存:\n   {psth_pdf}\n   {psth_png}")
 print("\n✅ BLOCK 6 完成！")
 
@@ -872,7 +877,10 @@ for region, unit_keys in region_units.items():
     raster_png = results_base / f'raster_{region}.png'
     plt.savefig(raster_pdf, dpi=300, bbox_inches='tight')
     plt.savefig(raster_png, dpi=300, bbox_inches='tight')
-    plt.show()
+    if ENABLE_INTERACTIVE_DISPLAY:
+        plt.show()
+    else:
+        plt.close(fig)
     print(f"✅ [{region}] Raster+PSTH 图已保存:\n   {raster_pdf}\n   {raster_png}")
 
 print("\n✅ BLOCK 7 完成！")
