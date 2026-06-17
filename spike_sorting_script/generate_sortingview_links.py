@@ -24,6 +24,11 @@ import spikeinterface.widgets as sw
 
 
 DEFAULT_OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting")
+DEFAULT_ANALYZER_ROOT = Path("/share/home/mitan/Cuhksz4090/spike_sorting/mountainsort4")
+DEFAULT_MANIFEST_PATH = Path(
+    "/share/home/mitan/Cuhksz4090/spike_sorting/"
+    "sortingview_links_mountainsort4_sub5&6_story_listen.json"
+)
 DEFAULT_REGIONS = ["ATL", "HG", "VMPFC", "Amygdala"]
 
 
@@ -132,13 +137,25 @@ def parse_args() -> argparse.Namespace:
         "--output-root",
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
-        help="Root directory containing sorting_results_session* folders.",
+        help="Output root metadata field (default: /share/home/mitan/spike_sorting).",
+    )
+    parser.add_argument(
+        "--analyzer-root",
+        type=Path,
+        default=DEFAULT_ANALYZER_ROOT,
+        help=(
+            "Root containing story-listen sorting result folders, e.g. "
+            "/share/home/mitan/Cuhksz4090/spike_sorting/mountainsort4."
+        ),
     )
     parser.add_argument(
         "--sessions",
         nargs="*",
         default=None,
-        help="Sessions to process, e.g. session2 session3. Default: auto-discover all.",
+        help=(
+            "Sessions to process, e.g. sub5 sub6. "
+            "Default: auto-discover from sub*_story_listen_sorting_results."
+        ),
     )
     parser.add_argument(
         "--regions",
@@ -149,8 +166,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=None,
-        help="Path to write JSON manifest. Default: <output-root>/sortingview_links_manifest_<timestamp>.json",
+        default=DEFAULT_MANIFEST_PATH,
+        help=(
+            "Path to write JSON manifest. "
+            "Default: /share/home/mitan/Cuhksz4090/spike_sorting/"
+            "sortingview_links_mountainsort4_sub5&6_story_listen.json"
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -204,12 +225,33 @@ def extract_url(widget_obj) -> Optional[str]:
     return None
 
 
-def discover_sessions(output_root: Path) -> List[str]:
-    sessions = []
-    for p in sorted(output_root.glob("sorting_results_session*")):
-        if p.is_dir() and p.name.startswith("sorting_results_"):
-            sessions.append(p.name.replace("sorting_results_", "", 1))
+def discover_story_listen_sessions(analyzer_root: Path) -> Dict[str, Path]:
+    sessions: Dict[str, Path] = {}
+    for p in sorted(analyzer_root.glob("sub*_story_listen_sorting_results")):
+        if not p.is_dir():
+            continue
+        m = re.match(r"^(sub\d+)_story_listen_sorting_results$", p.name)
+        if not m:
+            continue
+        session = m.group(1)
+        sessions[session] = p
     return sessions
+
+
+def resolve_story_listen_session_root(analyzer_root: Path, session: str) -> Path:
+    # Accept either "sub5" token or full folder name.
+    candidate_tokens = [
+        session,
+        f"{session}_story_listen_sorting_results",
+    ]
+    for token in candidate_tokens:
+        p = analyzer_root / token
+        if p.is_dir() and p.name.endswith("_story_listen_sorting_results"):
+            return p
+    raise FileNotFoundError(
+        f"Session folder not found for '{session}' under {analyzer_root}. "
+        "Expected e.g. sub5_story_listen_sorting_results."
+    )
 
 
 def generate_links_for_analyzer(
@@ -298,32 +340,32 @@ def main() -> None:
 
     args = parse_args()
     output_root = args.output_root
-    sessions = args.sessions if args.sessions else discover_sessions(output_root)
+    analyzer_root = args.analyzer_root
+    discovered = discover_story_listen_sessions(analyzer_root)
+    sessions = args.sessions if args.sessions else sorted(discovered.keys())
     regions = args.regions
     mode = args.mode
 
     if not sessions:
         raise SystemExit(
-            f"No sessions found under {output_root}. Expected folders like sorting_results_session2."
+            f"No sessions found under {analyzer_root}. "
+            "Expected folders like sub5_story_listen_sorting_results."
         )
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    manifest_path = (
-        args.manifest
-        if args.manifest is not None
-        else output_root / f"sortingview_links_manifest_{ts}.json"
-    )
+    manifest_path = args.manifest
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     results = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "output_root": str(output_root),
+        "analyzer_root": str(analyzer_root),
         "mode": mode,
         "host": os.uname().nodename,
         "items": [],
     }
 
     print(f"[INFO] Output root: {output_root}")
+    print(f"[INFO] Analyzer root: {analyzer_root}")
     print(f"[INFO] Sessions: {sessions}")
     print(f"[INFO] Regions: {regions}")
     print(f"[INFO] Mode: {mode}")
@@ -342,9 +384,12 @@ def main() -> None:
     port_counter = 0
 
     for session in sessions:
-        session_root = output_root / f"sorting_results_{session}"
+        if session in discovered:
+            session_root = discovered[session]
+        else:
+            session_root = resolve_story_listen_session_root(analyzer_root, session)
         for region in regions:
-            analyzer_path = session_root / region / "analyzer"
+            analyzer_path = session_root / f"{region}_analyzer"
             local_port = args.base_port + port_counter if mode == "local" else None
             port_counter += 1
             item = {
