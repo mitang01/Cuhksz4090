@@ -297,8 +297,8 @@ def process_one_file(
 
     file_tag = safe_stem(merged_path)
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_png = output_dir / f"{file_tag}_full_length_trigger_plot.png"
-    out_txt = output_dir / f"{file_tag}_trigger_details.txt"
+    out_png = output_dir / f"{file_tag}_merged_files_trigger_full.png"
+    out_txt = output_dir / f"{file_tag}_merged_files_trigger_full_details.txt"
 
     render_selected_channel_plot(
         out_png=out_png,
@@ -440,7 +440,7 @@ def main() -> int:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path(__file__).resolve().parent / "board_dig_in_merged_outputs",
+        default=Path("/share/workspace2/tangmi/bistable_trigger"),
         help="Output directory for generated PNG/TXT files.",
     )
     args = parser.parse_args()
