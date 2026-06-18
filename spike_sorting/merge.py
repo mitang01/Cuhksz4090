@@ -9,15 +9,43 @@ import numpy as np
 from scipy.io import loadmat
 
 
-OUTPUT_DIR = Path("/share/workspace3/ieeg/micro/story_listen_v1")
+MAT_FILE_GLOB = "Temp_26012*.mat"
 MERGE_JOBS = [
     {
-        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0120/2/sub5_story_listen"),
-        "output_name": "sub5_story_listen_merged",
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_095012"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session1"),
     },
     {
-        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0122/sub6_story_listen"),
-        "output_name": "sub6_story_listen_merged",
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_103639"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session2"),
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_104824"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session3"),
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_105933"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session4"),
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_125018"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session5"),
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_130023"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session6"),
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_1/Temp_260123_115236"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub6_session1"),
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_2/Temp_260123_120327"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub6_session3"),
+    },
+    {
+        "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_3/Temp_260123_121427"),
+        "output_path": Path("/share/workspace2/tangmi/bistable_sub6_session6"),
     },
 ]
 GAIN_TO_UV = 0.195  # Intan RHD2000 conversion factor
@@ -72,12 +100,13 @@ def load_amplifier_data(mat_path: Path) -> np.ndarray:
 
 
 def merge_folder(input_dir: Path, output_path: Path):
-    mat_files = sorted(input_dir.rglob("*.mat"), key=sort_key)
+    mat_files = sorted(input_dir.rglob(MAT_FILE_GLOB), key=sort_key)
     if not mat_files:
-        print(f"[SKIP] No .mat files found in {input_dir}")
+        print(f"[SKIP] No '{MAT_FILE_GLOB}' files found in {input_dir}")
         return
 
     print(f"[START] Merging {len(mat_files)} files from {input_dir}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as out_f:
         for idx, mat_path in enumerate(mat_files, start=1):
             try:
@@ -99,10 +128,9 @@ def merge_folder(input_dir: Path, output_path: Path):
 
 
 def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for job in MERGE_JOBS:
         input_dir = Path(job["input_dir"])
-        output_path = OUTPUT_DIR / str(job["output_name"])
+        output_path = Path(job["output_path"])
         if not input_dir.exists():
             print(f"[SKIP] Input folder does not exist: {input_dir}")
             continue
