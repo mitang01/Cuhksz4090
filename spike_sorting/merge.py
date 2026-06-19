@@ -1,8 +1,18 @@
-# This script is for merging the raw mat files into binary files. the output file doesn't end with .MAT 
+"""
+Merge Intan MAT chunks into one binary stream per session.
 
+Output channel layout per sample:
+  [amplifier_data channels..., board_dig_in_data channels...]
+
+For the current datasets that means:
+  - 128 amplifier channels
+  - 8 board digital input channels
+  - total = 136 channels
+"""
 
 from pathlib import Path
 import re
+from typing import Any
 
 import h5py
 import numpy as np
@@ -49,6 +59,8 @@ MERGE_JOBS = [
     },
 ]
 GAIN_TO_UV = 0.195  # Intan RHD2000 conversion factor
+AMPLIFIER_CHANNELS_EXPECTED = 128
+DIGITAL_IN_CHANNELS_EXPECTED = 8
 
 
 def sort_key(path: Path):
@@ -62,41 +74,184 @@ def sort_key(path: Path):
     return (path.name,)
 
 
-def load_amplifier_data(mat_path: Path) -> np.ndarray:
+def orient_samples_channels(data: np.ndarray, expected_channels: int, name: str, mat_path: Path) -> np.ndarray:
+    """Return array in (samples, channels) orientation."""
+    arr = np.asarray(data)
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    if arr.ndim != 2:
+        raise ValueError(f"Unexpected {name} shape {arr.shape} in {mat_path}")
+
+    if arr.shape[1] == expected_channels:
+        return arr
+    if arr.shape[0] == expected_channels and arr.shape[1] != expected_channels:
+        return arr.T
+
+    # Fallback heuristic: usually samples >> channels.
+    if arr.shape[0] > arr.shape[1]:
+        return arr
+    return arr.T
+
+
+def flatten_time_vector(t: np.ndarray | None) -> np.ndarray | None:
+    if t is None:
+        return None
+    arr = np.asarray(t).squeeze()
+    if arr.ndim != 1 or arr.size == 0:
+        return None
+    return arr.astype(np.float64, copy=False)
+
+
+def align_digital_to_amplifier(
+    amplifier: np.ndarray,
+    dig: np.ndarray,
+    t_amplifier: np.ndarray | None,
+    t_dig: np.ndarray | None,
+    mat_path: Path,
+) -> np.ndarray:
     """
-    Load 'amplifier_data' from either HDF5-style .mat (v7.3) or old MATLAB format.
-    Returns float array with shape (samples, channels).
+    Align digital samples to amplifier samples.
+
+    Priority:
+      1) if same sample count, keep as-is;
+      2) if both t vectors exist, map each amplifier timestamp to nearest t_dig;
+      3) fallback trim to min length.
     """
-    # v7.3 MAT files are HDF5; older MAT files are not.
-    # Detect format first so we do not incorrectly fall back between readers.
+    n_amp = amplifier.shape[0]
+    n_dig = dig.shape[0]
+    if n_amp == n_dig:
+        return dig
+
+    if t_amplifier is not None and t_dig is not None and t_amplifier.size == n_amp and t_dig.size == n_dig:
+        idx = np.searchsorted(t_dig, t_amplifier, side="left")
+        idx = np.clip(idx, 0, n_dig - 1)
+        # Choose nearest between left candidate and immediate predecessor.
+        prev = np.maximum(idx - 1, 0)
+        choose_prev = np.abs(t_dig[prev] - t_amplifier) < np.abs(t_dig[idx] - t_amplifier)
+        idx[choose_prev] = prev[choose_prev]
+        return dig[idx, :]
+
+    n = min(n_amp, n_dig)
+    print(
+        f"  [WARN] Sample mismatch without usable time vectors in {mat_path.name}: "
+        f"amplifier={n_amp}, dig={n_dig}. Trimming both to {n}."
+    )
+    return dig[:n, :]
+
+
+def load_streams(mat_path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Load amplifier and board digital inputs from one MAT file.
+
+    Returns:
+      amplifier_uV: float array, shape (samples, 128)
+      board_dig: int16 array, shape (samples, 8), values in {0,1}
+    """
+    amp_data: Any
+    dig_data: Any
+    t_amp: Any = None
+    t_dig: Any = None
+
     if h5py.is_hdf5(str(mat_path)):
         try:
             with h5py.File(mat_path, "r") as h5f:
                 if "amplifier_data" not in h5f:
                     raise KeyError("'amplifier_data' not found in file")
-                data = np.array(h5f["amplifier_data"])
+                if "board_dig_in_data" not in h5f:
+                    raise KeyError("'board_dig_in_data' not found in file")
+                amp_data = np.array(h5f["amplifier_data"])
+                dig_data = np.array(h5f["board_dig_in_data"])
+                if "t_amplifier" in h5f:
+                    t_amp = np.array(h5f["t_amplifier"])
+                if "t_dig" in h5f:
+                    t_dig = np.array(h5f["t_dig"])
         except OSError as exc:
             raise RuntimeError(f"Failed to read HDF5 MAT file: {mat_path}") from exc
     else:
         try:
             mat_data = loadmat(mat_path)
-        except NotImplementedError as exc:
+        except NotImplementedError:
             # Safety fallback in case a v7.3 file is misdetected.
             with h5py.File(mat_path, "r") as h5f:
                 if "amplifier_data" not in h5f:
                     raise KeyError("'amplifier_data' not found in file")
-                data = np.array(h5f["amplifier_data"])
+                if "board_dig_in_data" not in h5f:
+                    raise KeyError("'board_dig_in_data' not found in file")
+                amp_data = np.array(h5f["amplifier_data"])
+                dig_data = np.array(h5f["board_dig_in_data"])
+                if "t_amplifier" in h5f:
+                    t_amp = np.array(h5f["t_amplifier"])
+                if "t_dig" in h5f:
+                    t_dig = np.array(h5f["t_dig"])
         else:
             if "amplifier_data" not in mat_data:
                 raise KeyError(f"'amplifier_data' not found in {mat_path}")
-            data = np.array(mat_data["amplifier_data"])
+            if "board_dig_in_data" not in mat_data:
+                raise KeyError(f"'board_dig_in_data' not found in {mat_path}")
+            amp_data = np.array(mat_data["amplifier_data"])
+            dig_data = np.array(mat_data["board_dig_in_data"])
+            t_amp = np.array(mat_data["t_amplifier"]) if "t_amplifier" in mat_data else None
+            t_dig = np.array(mat_data["t_dig"]) if "t_dig" in mat_data else None
 
-    # Ensure data layout is always (samples, channels)
-    if data.ndim != 2:
-        raise ValueError(f"Unexpected amplifier_data shape {data.shape} in {mat_path}")
-    if data.shape[0] == 128 and data.shape[1] != 128:
-        data = data.T
-    return data
+    amplifier = orient_samples_channels(
+        amp_data,
+        expected_channels=AMPLIFIER_CHANNELS_EXPECTED,
+        name="amplifier_data",
+        mat_path=mat_path,
+    )
+    dig = orient_samples_channels(
+        dig_data,
+        expected_channels=DIGITAL_IN_CHANNELS_EXPECTED,
+        name="board_dig_in_data",
+        mat_path=mat_path,
+    )
+
+    t_amp_1d = flatten_time_vector(t_amp)
+    t_dig_1d = flatten_time_vector(t_dig)
+    dig_aligned = align_digital_to_amplifier(
+        amplifier=amplifier,
+        dig=dig,
+        t_amplifier=t_amp_1d,
+        t_dig=t_dig_1d,
+        mat_path=mat_path,
+    )
+
+    if amplifier.shape[0] != dig_aligned.shape[0]:
+        n = min(amplifier.shape[0], dig_aligned.shape[0])
+        amplifier = amplifier[:n, :]
+        dig_aligned = dig_aligned[:n, :]
+
+    if amplifier.shape[1] != AMPLIFIER_CHANNELS_EXPECTED:
+        raise ValueError(
+            f"Unexpected amplifier channel count in {mat_path}: "
+            f"{amplifier.shape[1]} (expected {AMPLIFIER_CHANNELS_EXPECTED})"
+        )
+    if dig_aligned.shape[1] != DIGITAL_IN_CHANNELS_EXPECTED:
+        raise ValueError(
+            f"Unexpected board_dig_in channel count in {mat_path}: "
+            f"{dig_aligned.shape[1]} (expected {DIGITAL_IN_CHANNELS_EXPECTED})"
+        )
+
+    # Keep digital stream as strict binary states.
+    dig_bin = (np.asarray(dig_aligned) > 0).astype(np.int16, copy=False)
+    return amplifier.astype(np.float32, copy=False), dig_bin
+
+
+def write_channel_layout_metadata(output_path: Path, total_channels: int) -> None:
+    meta_path = Path(f"{output_path}.meta.txt")
+    lines = [
+        f"output_file: {output_path}",
+        "sample_layout: [amplifier_data channels..., board_dig_in_data channels...]",
+        f"amplifier_channels: {AMPLIFIER_CHANNELS_EXPECTED}",
+        f"board_dig_in_channels: {DIGITAL_IN_CHANNELS_EXPECTED}",
+        f"total_channels: {total_channels}",
+        "channel_indexing: 1-based",
+        (
+            "board_dig_in_channel_range: "
+            f"{AMPLIFIER_CHANNELS_EXPECTED + 1}-{AMPLIFIER_CHANNELS_EXPECTED + DIGITAL_IN_CHANNELS_EXPECTED}"
+        ),
+    ]
+    meta_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def merge_folder(input_dir: Path, output_path: Path):
@@ -107,24 +262,38 @@ def merge_folder(input_dir: Path, output_path: Path):
 
     print(f"[START] Merging {len(mat_files)} files from {input_dir}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_total_channels = AMPLIFIER_CHANNELS_EXPECTED + DIGITAL_IN_CHANNELS_EXPECTED
+    written_chunks = 0
     with output_path.open("wb") as out_f:
         for idx, mat_path in enumerate(mat_files, start=1):
             try:
-                data_uv = load_amplifier_data(mat_path)
+                amplifier_uv, board_dig = load_streams(mat_path)
             except Exception as exc:
                 print(
                     f"  [WARN] Skipping unreadable file {mat_path.name}: {type(exc).__name__}: {exc}"
                 )
                 continue
-            data_int16 = np.round(data_uv / GAIN_TO_UV).astype(np.int16, copy=False)
-            data_int16.tofile(out_f)
+            amplifier_int16 = np.round(amplifier_uv / GAIN_TO_UV).astype(np.int16, copy=False)
+            merged = np.concatenate([amplifier_int16, board_dig], axis=1)
+            if merged.shape[1] != expected_total_channels:
+                raise RuntimeError(
+                    f"Unexpected merged channel count in {mat_path}: "
+                    f"{merged.shape[1]} (expected {expected_total_channels})"
+                )
+            merged.tofile(out_f)
+            written_chunks += 1
             print(
                 f"  [{idx:03d}/{len(mat_files):03d}] {mat_path.name} "
-                f"shape={data_uv.shape}"
+                f"shape_amp={amplifier_uv.shape} shape_dig={board_dig.shape} "
+                f"shape_merged={merged.shape}"
             )
 
     size_gb = output_path.stat().st_size / 1e9
-    print(f"[DONE] {output_path} ({size_gb:.2f} GB)")
+    write_channel_layout_metadata(output_path=output_path, total_channels=expected_total_channels)
+    print(
+        f"[DONE] {output_path} ({size_gb:.2f} GB), chunks_written={written_chunks}, "
+        f"channels_per_sample={expected_total_channels}"
+    )
 
 
 def main():
