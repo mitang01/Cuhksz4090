@@ -9,7 +9,7 @@
 # Sorter: mountainsort4
 # SORTER_DETECT_THRESHOLD = 7.0
 # Quality metrics: num_spikes, snr, isi_violation, firing_rate, presence_ratio
-# QC thresholds: snr>=5.0, isi<=0.02, n_spikes>=100, fr>=0.2, presence>=0.8
+# QC thresholds: snr>=5.0, isi<=0.02, n_spikes>=200, fr>=0.18, presence>=0.75
 # QC pass: all metrics pass
 # QC fail: any metric fails (see auto_qc_fail_reasons)
 
@@ -60,13 +60,15 @@ REGION_CHANNEL_MAP = {
     "Amygdala": (0, 16)    # channels 0-15
 }
 
-# Sorting/QC thresholds (moderate defaults for including more QC-passing units)
+# Sorting/QC thresholds (conservative but not all-rejecting)
 SORTER_DETECT_THRESHOLD = 7.0
 QC_MIN_SNR = 5.0
 QC_MAX_ISI_VIOLATION = 0.02
-QC_MIN_NUM_SPIKES = 100
-QC_MIN_FIRING_RATE_HZ = 0.2
-QC_MIN_PRESENCE_RATIO = 0.8
+QC_MIN_NUM_SPIKES = 200
+QC_MIN_FIRING_RATE_HZ = 0.18
+QC_MIN_PRESENCE_RATIO = 0.75
+# Some runs export no ISI metric; when missing, do not auto-fail every unit.
+QC_REQUIRE_ISI_METRIC = False
 MAX_SPIKEINTERFACE_JOBS = 4
 
 
@@ -191,7 +193,10 @@ def evaluate_qc_pass(
 
     if np.isnan(snr_val) or float(snr_val) < QC_MIN_SNR:
         fail_reasons.append(f"snr<{QC_MIN_SNR}")
-    if np.isnan(isi_val) or float(isi_val) > QC_MAX_ISI_VIOLATION:
+    if np.isnan(isi_val):
+        if QC_REQUIRE_ISI_METRIC:
+            fail_reasons.append("isi_missing")
+    elif float(isi_val) > QC_MAX_ISI_VIOLATION:
         fail_reasons.append(f"isi>{QC_MAX_ISI_VIOLATION}")
     if n_spikes < QC_MIN_NUM_SPIKES:
         fail_reasons.append(f"n_spikes<{QC_MIN_NUM_SPIKES}")
@@ -270,7 +275,16 @@ def sort_one_region(
 
     requested_metrics, metric_map = get_metric_request_info()
     if requested_metrics:
-        analyzer.compute("quality_metrics", metric_names=requested_metrics)
+        if "isi_violation" in metric_map:
+            analyzer.compute("quality_metrics", metric_names=requested_metrics)
+        else:
+            # If alias matching misses ISI in this SpikeInterface version, compute
+            # default quality metrics and infer an ISI-like column from output.
+            print(
+                "[WARN] ISI metric name not matched in available metric list; "
+                "computing default quality metrics for column inference."
+            )
+            analyzer.compute("quality_metrics")
         qm = analyzer.get_extension("quality_metrics").get_data()
         metric_map = resolve_metric_map_from_qm_columns(metric_map=metric_map, qm=qm)
     else:

@@ -1,0 +1,45 @@
+MAT file: /share/workspace2/tangmi/20260120-20260123港中文宏微电极采集/0121/bistable_sub5/Temp_260121_130023/Temp_260121_130023.mat
+Sampling rate (board_dig_in): 30000.000000 Hz
+board_dig_in_data raw shape from file: (17470208, 8)
+Interpreted orientation: using raw data as (samples, channels)
+board_dig_in_data interpreted shape: (samples=17470208, channels=8)
+Recording duration: 582.340233 s (from t_dig), ~582.340267 s (samples/sample_rate)
+Plotted window: first 582.340267 s, effective decimation step: 44
+
+Interpretation:
+  board_dig_in_data is a sampled digital state matrix (0/1), not a direct list of timestamps.
+  Event timestamps are obtained from t_dig at transitions, e.g., rising edges 0->1 (trigger onsets).
+
+Channel 1 (DIGITAL-IN-01): 301 rising edges, 301 falling edges
+  Rising-edge timestamps (s): 28.317933, 30.024100, 31.723533, 33.427433, 35.128500, 36.823567, 38.524067, 40.222800, 41.921667, 43.623500, 45.322867, 47.024467 ...
+  Falling-edge timestamps (s): 29.199067, 30.902100, 32.575267, 34.229500, 35.881367, 37.564767, 39.306900, 40.878167, 42.647700, 44.370333, 46.093633, 47.765733 ...
+
+Channel 2 (DIGITAL-IN-02): 300 rising edges, 300 falling edges
+  Rising-edge timestamps (s): 29.199067, 30.902100, 32.575267, 34.229500, 35.881367, 37.564767, 39.306900, 40.878167, 42.647700, 44.370333, 46.093633, 47.765733 ...
+  Falling-edge timestamps (s): 30.024100, 31.723533, 33.427433, 35.128500, 36.823567, 38.524067, 40.222800, 41.921667, 43.623500, 45.322867, 47.024467, 48.730200 ...
+
+Channel 3 (DIGITAL-IN-03): 0 rising edges, 0 falling edges
+  Rising-edge timestamps (s): none
+  Falling-edge timestamps (s): none
+
+Channel 4 (DIGITAL-IN-04): 296 rising edges, 296 falling edges
+  Rising-edge timestamps (s): 31.318433, 32.575267, 34.229500, 35.881367, 37.564767, 39.306900, 40.878167, 42.647700, 44.370333, 46.093633, 47.765733, 49.461767 ...
+  Falling-edge timestamps (s): 31.723533, 32.600333, 34.305833, 36.004000, 37.699100, 39.400233, 41.102100, 42.799833, 44.504100, 46.203967, 47.905200, 49.607700 ...
+
+Channel 5 (DIGITAL-IN-05): 0 rising edges, 0 falling edges
+  Rising-edge timestamps (s): none
+  Falling-edge timestamps (s): none
+
+Channel 6 (DIGITAL-IN-06): 0 rising edges, 0 falling edges
+  Rising-edge timestamps (s): none
+  Falling-edge timestamps (s): none
+
+Channel 7 (DIGITAL-IN-07): 1 rising edges, 1 falling edges
+  Rising-edge timestamps (s): 575.558033
+  Falling-edge timestamps (s): 575.558100
+
+Channel 8 (DIGITAL-IN-08): 1 rising edges, 1 falling edges
+  Rising-edge timestamps (s): 575.558033
+  Falling-edge timestamps (s): 575.558100
+
+Saved trigger_full_bistable_sub5_session6.png
