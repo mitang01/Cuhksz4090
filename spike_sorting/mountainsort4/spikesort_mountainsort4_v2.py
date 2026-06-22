@@ -70,6 +70,22 @@ QC_MIN_PRESENCE_RATIO = 0.8
 MAX_SPIKEINTERFACE_JOBS = 4
 
 
+METRIC_OUTPUT_CANDIDATES = {
+    "num_spikes": ["num_spikes"],
+    "snr": ["snr"],
+    "isi_violation": [
+        "isi_violations_ratio",
+        "isi_violation",
+        "isi_violation_ratio",
+        "isi_violations",
+        "isi_violations_rate",
+        "isi_violation_rate",
+    ],
+    "firing_rate": ["firing_rate"],
+    "presence_ratio": ["presence_ratio"],
+}
+
+
 def prepare_parallel_settings():
     slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
     if slurm_cpus is not None:
@@ -109,13 +125,7 @@ def prepare_parallel_settings():
 
 def get_metric_request_info():
     available_metrics = set(ComputeQualityMetrics.get_available_metric_names())
-    metric_candidates = {
-        "num_spikes": ["num_spikes"],
-        "snr": ["snr"],
-        "isi_violation": ["isi_violations_ratio", "isi_violation"],
-        "firing_rate": ["firing_rate"],
-        "presence_ratio": ["presence_ratio"],
-    }
+    metric_candidates = METRIC_OUTPUT_CANDIDATES
 
     requested = []
     metric_map = {}
@@ -126,6 +136,37 @@ def get_metric_request_info():
             metric_map[logical_name] = selected
     requested = list(dict.fromkeys(requested))
     return requested, metric_map
+
+
+def resolve_metric_map_from_qm_columns(
+    metric_map: Dict[str, str],
+    qm: pd.DataFrame,
+) -> Dict[str, str]:
+    """Resolve metric names against actual quality-metric output columns."""
+    if qm.empty:
+        return dict(metric_map)
+
+    qm_columns = list(qm.columns)
+    qm_column_set = set(qm_columns)
+    resolved = dict(metric_map)
+
+    for logical_name, candidates in METRIC_OUTPUT_CANDIDATES.items():
+        current = resolved.get(logical_name)
+        if current in qm_column_set:
+            continue
+
+        selected = next((c for c in candidates if c in qm_column_set), None)
+        if selected is None and logical_name == "isi_violation":
+            selected = next(
+                (c for c in qm_columns if "isi" in c.lower() and "ratio" in c.lower()),
+                None,
+            )
+        if selected is None and logical_name == "isi_violation":
+            selected = next((c for c in qm_columns if "isi" in c.lower()), None)
+        if selected is not None:
+            resolved[logical_name] = selected
+
+    return resolved
 
 
 def evaluate_qc_pass(
@@ -231,6 +272,7 @@ def sort_one_region(
     if requested_metrics:
         analyzer.compute("quality_metrics", metric_names=requested_metrics)
         qm = analyzer.get_extension("quality_metrics").get_data()
+        metric_map = resolve_metric_map_from_qm_columns(metric_map=metric_map, qm=qm)
     else:
         qm = pd.DataFrame()
 
