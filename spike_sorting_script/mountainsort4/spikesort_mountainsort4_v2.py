@@ -72,6 +72,22 @@ QC_REQUIRE_ISI_METRIC = False
 MAX_SPIKEINTERFACE_JOBS = 4
 
 
+METRIC_OUTPUT_CANDIDATES = {
+    "num_spikes": ["num_spikes"],
+    "snr": ["snr"],
+    "isi_violation": [
+        "isi_violations_ratio",
+        "isi_violation",
+        "isi_violation_ratio",
+        "isi_violations",
+        "isi_violations_rate",
+        "isi_violation_rate",
+    ],
+    "firing_rate": ["firing_rate"],
+    "presence_ratio": ["presence_ratio"],
+}
+
+
 def prepare_parallel_settings():
     slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
     if slurm_cpus is not None:
@@ -111,19 +127,7 @@ def prepare_parallel_settings():
 
 def get_metric_request_info():
     available_metrics = set(ComputeQualityMetrics.get_available_metric_names())
-    metric_candidates = {
-        "num_spikes": ["num_spikes"],
-        "snr": ["snr"],
-        "isi_violation": [
-            "isi_violations_ratio",
-            "isi_violation",
-            "isi_violation_ratio",
-            "isi_violations",
-            "isi_violations_rate",
-        ],
-        "firing_rate": ["firing_rate"],
-        "presence_ratio": ["presence_ratio"],
-    }
+    metric_candidates = METRIC_OUTPUT_CANDIDATES
 
     requested = []
     metric_map = {}
@@ -136,23 +140,35 @@ def get_metric_request_info():
     return requested, metric_map
 
 
-def infer_isi_metric_column(qm: pd.DataFrame, metric_map: Dict[str, str]) -> Dict[str, str]:
-    if "isi_violation" in metric_map or qm.empty:
-        return metric_map
+def resolve_metric_map_from_qm_columns(
+    metric_map: Dict[str, str],
+    qm: pd.DataFrame,
+) -> Dict[str, str]:
+    """Resolve metric names against actual quality-metric output columns."""
+    if qm.empty:
+        return dict(metric_map)
 
-    isi_cols = [col for col in qm.columns if "isi" in col.lower() and "viol" in col.lower()]
-    if len(isi_cols) == 1:
-        metric_map["isi_violation"] = isi_cols[0]
-        print(f"[INFO] Inferred ISI metric column: {isi_cols[0]}")
-    elif len(isi_cols) > 1:
-        metric_map["isi_violation"] = isi_cols[0]
-        print(
-            "[WARN] Multiple ISI metric columns found; "
-            f"using '{isi_cols[0]}' from {isi_cols}."
-        )
-    else:
-        print("[WARN] No ISI violation metric column found in quality metrics output.")
-    return metric_map
+    qm_columns = list(qm.columns)
+    qm_column_set = set(qm_columns)
+    resolved = dict(metric_map)
+
+    for logical_name, candidates in METRIC_OUTPUT_CANDIDATES.items():
+        current = resolved.get(logical_name)
+        if current in qm_column_set:
+            continue
+
+        selected = next((c for c in candidates if c in qm_column_set), None)
+        if selected is None and logical_name == "isi_violation":
+            selected = next(
+                (c for c in qm_columns if "isi" in c.lower() and "ratio" in c.lower()),
+                None,
+            )
+        if selected is None and logical_name == "isi_violation":
+            selected = next((c for c in qm_columns if "isi" in c.lower()), None)
+        if selected is not None:
+            resolved[logical_name] = selected
+
+    return resolved
 
 
 def evaluate_qc_pass(
@@ -270,7 +286,7 @@ def sort_one_region(
             )
             analyzer.compute("quality_metrics")
         qm = analyzer.get_extension("quality_metrics").get_data()
-        metric_map = infer_isi_metric_column(qm=qm, metric_map=metric_map)
+        metric_map = resolve_metric_map_from_qm_columns(metric_map=metric_map, qm=qm)
     else:
         qm = pd.DataFrame()
 
