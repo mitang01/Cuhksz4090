@@ -10,8 +10,10 @@ For the current datasets that means:
   - total = 136 channels
 """
 
+import errno
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import h5py
@@ -61,6 +63,8 @@ MERGE_JOBS = [
 GAIN_TO_UV = 0.195  # Intan RHD2000 conversion factor
 AMPLIFIER_CHANNELS_EXPECTED = 128
 DIGITAL_IN_CHANNELS_EXPECTED = 8
+MAX_IO_RETRIES = 6
+BASE_RETRY_SLEEP_S = 1.0
 
 
 def sort_key(path: Path):
@@ -72,6 +76,81 @@ def sort_key(path: Path):
     if digits:
         return tuple(int(d) for d in digits), path.name
     return (path.name,)
+
+
+def is_retryable_io_error(exc: OSError) -> bool:
+    return exc.errno in {errno.ESTALE, errno.EIO, errno.ETIMEDOUT}
+
+
+def retry_delay_s(attempt: int) -> float:
+    return BASE_RETRY_SLEEP_S * (2**attempt)
+
+
+def open_with_retry(path: Path, mode: str):
+    last_exc: OSError | None = None
+    for attempt in range(MAX_IO_RETRIES):
+        try:
+            return path.open(mode)
+        except OSError as exc:
+            last_exc = exc
+            if not is_retryable_io_error(exc) or attempt == MAX_IO_RETRIES - 1:
+                raise
+            wait_s = retry_delay_s(attempt)
+            print(
+                f"  [WARN] open failed ({exc}). retry {attempt + 1}/{MAX_IO_RETRIES} "
+                f"after {wait_s:.1f}s: {path}"
+            )
+            time.sleep(wait_s)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Unexpected open retry failure for {path}")
+
+
+def safe_stat_size(path: Path) -> int:
+    last_exc: OSError | None = None
+    for attempt in range(MAX_IO_RETRIES):
+        try:
+            return path.stat().st_size
+        except OSError as exc:
+            last_exc = exc
+            if not is_retryable_io_error(exc) or attempt == MAX_IO_RETRIES - 1:
+                raise
+            wait_s = retry_delay_s(attempt)
+            print(
+                f"  [WARN] stat failed ({exc}). retry {attempt + 1}/{MAX_IO_RETRIES} "
+                f"after {wait_s:.1f}s: {path}"
+            )
+            time.sleep(wait_s)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Unexpected stat retry failure for {path}")
+
+
+def touch_truncate_with_retry(path: Path) -> None:
+    with open_with_retry(path, "wb"):
+        return
+
+
+def append_array_with_retry(path: Path, arr: np.ndarray, chunk_name: str) -> None:
+    last_exc: OSError | None = None
+    for attempt in range(MAX_IO_RETRIES):
+        try:
+            with open_with_retry(path, "ab") as out_f:
+                arr.tofile(out_f)
+            return
+        except OSError as exc:
+            last_exc = exc
+            if not is_retryable_io_error(exc) or attempt == MAX_IO_RETRIES - 1:
+                raise
+            wait_s = retry_delay_s(attempt)
+            print(
+                f"  [WARN] append failed for {chunk_name} ({exc}). "
+                f"retry {attempt + 1}/{MAX_IO_RETRIES} after {wait_s:.1f}s."
+            )
+            time.sleep(wait_s)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Unexpected append retry failure for {chunk_name}")
 
 
 def orient_samples_channels(data: np.ndarray, expected_channels: int, name: str, mat_path: Path) -> np.ndarray:
@@ -91,6 +170,33 @@ def orient_samples_channels(data: np.ndarray, expected_channels: int, name: str,
     if arr.shape[0] > arr.shape[1]:
         return arr
     return arr.T
+
+
+def normalize_channel_count(
+    arr: np.ndarray,
+    expected_channels: int,
+    stream_name: str,
+    mat_path: Path,
+    pad_value: int = 0,
+) -> np.ndarray:
+    n_samples, n_ch = arr.shape
+    if n_ch == expected_channels:
+        return arr
+    if n_ch < expected_channels:
+        missing = expected_channels - n_ch
+        print(
+            f"  [WARN] {mat_path.name}: {stream_name} has {n_ch} channels, "
+            f"expected {expected_channels}. Padding {missing} missing channel(s) with {pad_value}."
+        )
+        pad = np.full((n_samples, missing), pad_value, dtype=arr.dtype)
+        return np.concatenate([arr, pad], axis=1)
+
+    extra = n_ch - expected_channels
+    print(
+        f"  [WARN] {mat_path.name}: {stream_name} has {n_ch} channels, "
+        f"expected {expected_channels}. Truncating last {extra} extra channel(s)."
+    )
+    return arr[:, :expected_channels]
 
 
 def flatten_time_vector(t: np.ndarray | None) -> np.ndarray | None:
@@ -199,11 +305,25 @@ def load_streams(mat_path: Path) -> tuple[np.ndarray, np.ndarray]:
         name="amplifier_data",
         mat_path=mat_path,
     )
+    amplifier = normalize_channel_count(
+        amplifier,
+        expected_channels=AMPLIFIER_CHANNELS_EXPECTED,
+        stream_name="amplifier_data",
+        mat_path=mat_path,
+        pad_value=0,
+    )
     dig = orient_samples_channels(
         dig_data,
         expected_channels=DIGITAL_IN_CHANNELS_EXPECTED,
         name="board_dig_in_data",
         mat_path=mat_path,
+    )
+    dig = normalize_channel_count(
+        dig,
+        expected_channels=DIGITAL_IN_CHANNELS_EXPECTED,
+        stream_name="board_dig_in_data",
+        mat_path=mat_path,
+        pad_value=0,
     )
 
     t_amp_1d = flatten_time_vector(t_amp)
@@ -222,14 +342,14 @@ def load_streams(mat_path: Path) -> tuple[np.ndarray, np.ndarray]:
         dig_aligned = dig_aligned[:n, :]
 
     if amplifier.shape[1] != AMPLIFIER_CHANNELS_EXPECTED:
-        raise ValueError(
-            f"Unexpected amplifier channel count in {mat_path}: "
-            f"{amplifier.shape[1]} (expected {AMPLIFIER_CHANNELS_EXPECTED})"
+        raise RuntimeError(
+            f"Internal error: amplifier normalization failed for {mat_path}: "
+            f"{amplifier.shape[1]} != {AMPLIFIER_CHANNELS_EXPECTED}"
         )
     if dig_aligned.shape[1] != DIGITAL_IN_CHANNELS_EXPECTED:
-        raise ValueError(
-            f"Unexpected board_dig_in channel count in {mat_path}: "
-            f"{dig_aligned.shape[1]} (expected {DIGITAL_IN_CHANNELS_EXPECTED})"
+        raise RuntimeError(
+            f"Internal error: board_dig_in normalization failed for {mat_path}: "
+            f"{dig_aligned.shape[1]} != {DIGITAL_IN_CHANNELS_EXPECTED}"
         )
 
     # Keep digital stream as strict binary states.
@@ -251,7 +371,8 @@ def write_channel_layout_metadata(output_path: Path, total_channels: int) -> Non
             f"{AMPLIFIER_CHANNELS_EXPECTED + 1}-{AMPLIFIER_CHANNELS_EXPECTED + DIGITAL_IN_CHANNELS_EXPECTED}"
         ),
     ]
-    meta_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with open_with_retry(meta_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def merge_folder(input_dir: Path, output_path: Path):
@@ -264,31 +385,43 @@ def merge_folder(input_dir: Path, output_path: Path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     expected_total_channels = AMPLIFIER_CHANNELS_EXPECTED + DIGITAL_IN_CHANNELS_EXPECTED
     written_chunks = 0
-    with output_path.open("wb") as out_f:
-        for idx, mat_path in enumerate(mat_files, start=1):
-            try:
-                amplifier_uv, board_dig = load_streams(mat_path)
-            except Exception as exc:
-                print(
-                    f"  [WARN] Skipping unreadable file {mat_path.name}: {type(exc).__name__}: {exc}"
-                )
-                continue
-            amplifier_int16 = np.round(amplifier_uv / GAIN_TO_UV).astype(np.int16, copy=False)
-            merged = np.concatenate([amplifier_int16, board_dig], axis=1)
-            if merged.shape[1] != expected_total_channels:
-                raise RuntimeError(
-                    f"Unexpected merged channel count in {mat_path}: "
-                    f"{merged.shape[1]} (expected {expected_total_channels})"
-                )
-            merged.tofile(out_f)
-            written_chunks += 1
+    touch_truncate_with_retry(output_path)
+    for idx, mat_path in enumerate(mat_files, start=1):
+        try:
+            amplifier_uv, board_dig = load_streams(mat_path)
+        except Exception as exc:
             print(
-                f"  [{idx:03d}/{len(mat_files):03d}] {mat_path.name} "
-                f"shape_amp={amplifier_uv.shape} shape_dig={board_dig.shape} "
-                f"shape_merged={merged.shape}"
+                f"  [WARN] Skipping unreadable file {mat_path.name}: {type(exc).__name__}: {exc}"
             )
+            continue
+        amplifier_int16 = np.round(amplifier_uv / GAIN_TO_UV).astype(np.int16, copy=False)
+        merged = np.concatenate([amplifier_int16, board_dig], axis=1)
+        if merged.shape[1] != expected_total_channels:
+            print(
+                f"  [WARN] Skipping {mat_path.name}: merged channel count "
+                f"{merged.shape[1]} != expected {expected_total_channels}"
+            )
+            continue
+        if merged.shape[0] == 0:
+            print(f"  [WARN] Skipping {mat_path.name}: zero samples after alignment")
+            continue
 
-    size_gb = output_path.stat().st_size / 1e9
+        try:
+            append_array_with_retry(output_path, merged.astype(np.int16, copy=False), mat_path.name)
+        except Exception as exc:
+            print(
+                f"  [WARN] Failed appending {mat_path.name}: {type(exc).__name__}: {exc}"
+            )
+            continue
+
+        written_chunks += 1
+        print(
+            f"  [{idx:03d}/{len(mat_files):03d}] {mat_path.name} "
+            f"shape_amp={amplifier_uv.shape} shape_dig={board_dig.shape} "
+            f"shape_merged={merged.shape}"
+        )
+
+    size_gb = safe_stat_size(output_path) / 1e9
     write_channel_layout_metadata(output_path=output_path, total_channels=expected_total_channels)
     print(
         f"[DONE] {output_path} ({size_gb:.2f} GB), chunks_written={written_chunks}, "
@@ -303,7 +436,14 @@ def main():
         if not input_dir.exists():
             print(f"[SKIP] Input folder does not exist: {input_dir}")
             continue
-        merge_folder(input_dir=input_dir, output_path=output_path)
+        try:
+            merge_folder(input_dir=input_dir, output_path=output_path)
+        except Exception as exc:
+            print(
+                f"[ERROR] Merge failed for {input_dir} -> {output_path}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
 
 
 if __name__ == "__main__":
