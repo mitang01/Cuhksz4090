@@ -48,6 +48,8 @@ DEFAULT_MERGED_FILES: list[Path] = [
     Path("/share/workspace2/tangmi/bistable_sub6_session3"),
     Path("/share/workspace2/tangmi/bistable_sub6_session6"),
 ]
+DEFAULT_AMPLIFIER_CHANNELS = 128
+DEFAULT_BOARD_DIG_IN_CHANNELS = 8
 
 
 def safe_stem(path: Path) -> str:
@@ -55,6 +57,103 @@ def safe_stem(path: Path) -> str:
     if not name:
         name = "merged_file"
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+
+
+def parse_sidecar_layout(merged_path: Path) -> dict[str, int] | None:
+    """
+    Parse layout metadata written by merge.py, if available.
+
+    Expected file:
+      <merged_path>.meta.txt
+    """
+    meta_path = Path(f"{merged_path}.meta.txt")
+    if not meta_path.is_file():
+        return None
+
+    raw = meta_path.read_text(encoding="utf-8")
+    kv: dict[str, str] = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        kv[k.strip()] = v.strip()
+
+    out: dict[str, int] = {}
+    for key in ("total_channels", "amplifier_channels", "board_dig_in_channels"):
+        if key in kv:
+            try:
+                out[key] = int(kv[key])
+            except ValueError:
+                pass
+    if "board_dig_in_channel_range" in kv:
+        m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", kv["board_dig_in_channel_range"])
+        if m:
+            out["board_dig_in_start_1based"] = int(m.group(1))
+            out["board_dig_in_end_1based"] = int(m.group(2))
+    return out or None
+
+
+def infer_layout(
+    flat_size: int,
+    merged_path: Path,
+    num_channels_override: int | None,
+    amplifier_channels: int,
+    board_dig_in_channels: int,
+) -> tuple[int, int, int, str]:
+    """
+    Return:
+      (total_channels, dig_start_0based, dig_count, detection_note)
+    """
+    if num_channels_override is not None:
+        total = int(num_channels_override)
+        if flat_size % total != 0:
+            raise RuntimeError(
+                f"File size ({flat_size}) is not divisible by --num-channels={total} for {merged_path}"
+            )
+        dig_count = int(min(board_dig_in_channels, total))
+        dig_start = int(total - dig_count)
+        note = "layout from --num-channels override"
+        return total, dig_start, dig_count, note
+
+    sidecar = parse_sidecar_layout(merged_path)
+    if sidecar is not None and "total_channels" in sidecar:
+        total = int(sidecar["total_channels"])
+        if total > 0 and flat_size % total == 0:
+            if (
+                "board_dig_in_start_1based" in sidecar
+                and "board_dig_in_end_1based" in sidecar
+            ):
+                start_1 = int(sidecar["board_dig_in_start_1based"])
+                end_1 = int(sidecar["board_dig_in_end_1based"])
+                dig_start = max(0, start_1 - 1)
+                dig_count = max(0, end_1 - start_1 + 1)
+            else:
+                # When sidecar has no explicit range, assume board_dig_in channels are appended at tail.
+                dig_count = int(sidecar.get("board_dig_in_channels", board_dig_in_channels))
+                dig_start = max(0, total - dig_count)
+            if dig_start + dig_count > total:
+                dig_count = max(0, total - dig_start)
+            note = "layout from sidecar metadata"
+            return total, dig_start, dig_count, note
+
+    candidate_total = int(amplifier_channels + board_dig_in_channels)
+    if candidate_total > 0 and flat_size % candidate_total == 0:
+        return (
+            candidate_total,
+            int(candidate_total - board_dig_in_channels),
+            int(board_dig_in_channels),
+            "layout autodetected as amplifier+board_dig_in",
+        )
+
+    # If we cannot validate a layout with dedicated board_dig_in channels,
+    # declare no trigger channels rather than falling back to amplifier thresholding.
+    if amplifier_channels > 0 and flat_size % amplifier_channels == 0:
+        return int(amplifier_channels), 0, 0, "layout looks amplifier-only"
+
+    raise RuntimeError(
+        f"Could not infer channel layout for {merged_path}. "
+        f"Try --num-channels explicitly."
+    )
 
 
 def edge_indices_from_bool(binary: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -218,10 +317,47 @@ def render_selected_channel_plot(
     plt.close(fig)
 
 
+def render_no_trigger_plot(
+    out_png: Path,
+    file_name: str,
+    duration_s: float,
+    n_total_samples: int,
+    total_channels: int,
+) -> None:
+    fig, ax = plt.subplots(1, 1, figsize=(12, 2.8), constrained_layout=True)
+    ax.axis("off")
+    ax.text(
+        0.5,
+        0.55,
+        "No trigger channels detected in output",
+        ha="center",
+        va="center",
+        fontsize=14,
+        color="C3",
+        fontweight="bold",
+    )
+    ax.text(
+        0.5,
+        0.25,
+        (
+            f"{file_name}\n"
+            f"duration={duration_s:.3f}s, samples={n_total_samples}, channels={total_channels}"
+        ),
+        ha="center",
+        va="center",
+        fontsize=10,
+        color="0.35",
+    )
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+
+
 def process_one_file(
     merged_path: Path,
     output_dir: Path,
-    num_channels: int,
+    num_channels_override: int | None,
+    amplifier_channels: int,
+    board_dig_in_channels: int,
     sample_rate_hz: float,
     dtype_str: str,
     min_pulse_ms: float,
@@ -242,14 +378,16 @@ def process_one_file(
     flat = np.memmap(merged_path, dtype=dtype, mode="r")
     if flat.size == 0:
         raise RuntimeError(f"Input file is empty: {merged_path}")
-    if flat.size % num_channels != 0:
-        raise RuntimeError(
-            f"File size ({flat.size} values) is not divisible by num_channels={num_channels} "
-            f"for file: {merged_path}"
-        )
+    total_channels, dig_start, dig_count, layout_note = infer_layout(
+        flat_size=int(flat.size),
+        merged_path=merged_path,
+        num_channels_override=num_channels_override,
+        amplifier_channels=int(amplifier_channels),
+        board_dig_in_channels=int(board_dig_in_channels),
+    )
 
-    n_total = int(flat.size // num_channels)
-    data = flat.reshape((n_total, num_channels))
+    n_total = int(flat.size // total_channels)
+    data = flat.reshape((n_total, total_channels))
     duration_s = float(n_total / sample_rate_hz)
 
     if seconds > 0:
@@ -265,22 +403,34 @@ def process_one_file(
     plot_indices = np.arange(0, n_plot, step, dtype=np.int64)
     t_plot = plot_indices / sample_rate_hz
 
-    labels = [f"RAW_CH_{i + 1}" for i in range(num_channels)]
+    using_real_dig = dig_count > 0
+    labels = [f"DIGITAL-IN-{i + 1:02d}" for i in range(dig_count)]
+    global_channel_1based = [dig_start + i + 1 for i in range(dig_count)]
+    data_for_edges = data[:, dig_start : dig_start + dig_count] if dig_count > 0 else data[:, :0]
 
     binary_plot_per_ch: list[np.ndarray] = []
     rising_idx_per_ch: list[np.ndarray] = []
     falling_idx_per_ch: list[np.ndarray] = []
     rising_ts_per_ch: list[np.ndarray] = []
     falling_ts_per_ch: list[np.ndarray] = []
-    threshold_info_per_ch: list[tuple[float, float, float]] = []
+    threshold_info_per_ch: list[tuple[float, float, float] | None] = []
 
-    for ch in range(num_channels):
-        signal = data[:, ch]
-        binary_full, rising_idx, falling_idx, thr, lo, hi = detect_binary_and_edges(
-            signal=signal,
-            sampling_rate_hz=sample_rate_hz,
-            min_pulse_ms=min_pulse_ms,
+    min_high_samples = max(
+        1,
+        int(round((float(min_pulse_ms) / 1000.0) * float(sample_rate_hz))),
+    )
+
+    for ch in range(data_for_edges.shape[1]):
+        signal = data_for_edges[:, ch]
+        binary_full = np.asarray(signal > 0, dtype=bool)
+        rising_raw, falling_raw = edge_indices_from_bool(binary_full)
+        rising_idx, falling_idx = filter_by_min_high_width(
+            rising_idx=rising_raw,
+            falling_idx=falling_raw,
+            min_high_samples=min_high_samples,
         )
+        threshold_info = None
+
         binary_plot_per_ch.append(binary_full[plot_indices].astype(np.float64))
         rising_idx_per_ch.append(rising_idx)
         falling_idx_per_ch.append(falling_idx)
@@ -288,17 +438,55 @@ def process_one_file(
         falling_ts_per_ch.append(
             falling_idx / sample_rate_hz if falling_idx.size else np.array([], dtype=np.float64)
         )
-        threshold_info_per_ch.append((thr, lo, hi))
-
-    trigger_ch = choose_trigger_channel(
-        rising_ts_per_channel=rising_ts_per_ch,
-        forced_channel_0based=trigger_channel_0based,
-    )
+        threshold_info_per_ch.append(threshold_info)
 
     file_tag = safe_stem(merged_path)
     output_dir.mkdir(parents=True, exist_ok=True)
     out_png = output_dir / f"{file_tag}_merged_files_trigger_full.png"
     out_txt = output_dir / f"{file_tag}_merged_files_trigger_full_details.txt"
+
+    lines: list[str] = []
+    lines.append(f"Input merged file: {merged_path}")
+    lines.append(f"dtype: {dtype_str}")
+    lines.append(f"Interpreted shape: (samples={n_total}, channels={total_channels})")
+    lines.append(f"Layout detection: {layout_note}")
+    if using_real_dig:
+        lines.append(
+            f"Detected board_dig_in channels in merged data: "
+            f"{dig_start + 1}-{dig_start + dig_count} (1-based), count={dig_count}"
+        )
+    else:
+        lines.append("No trigger channels detected in output.")
+    lines.append(f"Sampling rate: {sample_rate_hz:.6f} Hz")
+    lines.append(f"Recording duration: {duration_s:.6f} s")
+    lines.append(
+        f"Plotted window: first {n_plot / sample_rate_hz:.6f} s, effective decimation step: {step}"
+    )
+    lines.append(f"Min pulse width for trigger detection: {min_pulse_ms:.6f} ms")
+    lines.append("")
+    lines.append("Interpretation:")
+    if not using_real_dig:
+        lines.append("  No dedicated board_dig_in channels found in this merged file.")
+        lines.append("  Script is configured to use only board_dig_in channels for trigger detection.")
+        lines.append("")
+        out_txt.write_text("\n".join(lines), encoding="utf-8")
+        render_no_trigger_plot(
+            out_png=out_png,
+            file_name=merged_path.name,
+            duration_s=duration_s,
+            n_total_samples=n_total,
+            total_channels=total_channels,
+        )
+        return out_png, out_txt
+
+    lines.append("  Using real board_dig_in channels from merged stream (digital values).")
+    lines.append("  Trigger timestamps are rising edges (0->1) with minimum high-width filtering.")
+    lines.append("")
+
+    trigger_ch = choose_trigger_channel(
+        rising_ts_per_channel=rising_ts_per_ch,
+        forced_channel_0based=trigger_channel_0based,
+    )
 
     render_selected_channel_plot(
         out_png=out_png,
@@ -313,40 +501,21 @@ def process_one_file(
         duration_s=duration_s,
     )
 
-    lines: list[str] = []
-    lines.append(f"Input merged file: {merged_path}")
-    lines.append(f"dtype: {dtype_str}")
-    lines.append(f"Interpreted shape: (samples={n_total}, channels={num_channels})")
-    lines.append(f"Sampling rate: {sample_rate_hz:.6f} Hz")
-    lines.append(f"Recording duration: {duration_s:.6f} s")
     lines.append(
-        f"Plotted window: first {n_plot / sample_rate_hz:.6f} s, effective decimation step: {step}"
-    )
-    lines.append(f"Min pulse width for trigger detection: {min_pulse_ms:.6f} ms")
-    lines.append("")
-    lines.append("Interpretation:")
-    lines.append(
-        "  Each channel is converted to binary state by threshold=(1st_percentile + 99th_percentile)/2."
-    )
-    lines.append(
-        "  Trigger timestamps are rising edges (0->1) with minimum high-width filtering."
-    )
-    lines.append("")
-    lines.append(
-        f"Selected trigger channel: {trigger_ch + 1} ({labels[trigger_ch]}) "
+        f"Selected trigger channel: local={trigger_ch + 1}, merged_ch={global_channel_1based[trigger_ch]} "
+        f"({labels[trigger_ch]}) "
         f"with {rising_idx_per_ch[trigger_ch].size} rising edges"
     )
     lines.append("")
 
-    for ch in range(num_channels):
-        thr, lo, hi = threshold_info_per_ch[ch]
+    for ch in range(data_for_edges.shape[1]):
         rising_ts = rising_ts_per_ch[ch]
         falling_ts = falling_ts_per_ch[ch]
-        lines.append(
-            f"Channel {ch + 1} ({labels[ch]}): "
-            f"{rising_ts.size} rising edges, {falling_ts.size} falling edges, "
-            f"threshold={thr:.6f}, p1={lo:.6f}, p99={hi:.6f}"
+        base = (
+            f"Channel local={ch + 1}, merged_ch={global_channel_1based[ch]} ({labels[ch]}): "
+            f"{rising_ts.size} rising edges, {falling_ts.size} falling edges"
         )
+        lines.append(base + ", source=digital")
         if rising_ts.size:
             preview = ", ".join(f"{x:.6f}" for x in rising_ts[:max_preview])
             suffix = " ..." if rising_ts.size > max_preview else ""
@@ -381,8 +550,23 @@ def main() -> int:
     parser.add_argument(
         "--num-channels",
         type=int,
-        default=128,
-        help="Number of channels in merged binary file (default: 128).",
+        default=None,
+        help=(
+            "Override total channel count in merged file. "
+            "Default: auto-detect (prefer sidecar metadata or 128+8 layout)."
+        ),
+    )
+    parser.add_argument(
+        "--amplifier-channels",
+        type=int,
+        default=DEFAULT_AMPLIFIER_CHANNELS,
+        help=f"Expected amplifier channel count for auto-detection (default: {DEFAULT_AMPLIFIER_CHANNELS}).",
+    )
+    parser.add_argument(
+        "--board-dig-in-channels",
+        type=int,
+        default=DEFAULT_BOARD_DIG_IN_CHANNELS,
+        help=f"Expected board_dig_in channel count for auto-detection (default: {DEFAULT_BOARD_DIG_IN_CHANNELS}).",
     )
     parser.add_argument(
         "--sample-rate",
@@ -453,8 +637,14 @@ def main() -> int:
         )
         return 2
 
-    if args.num_channels <= 0:
+    if args.num_channels is not None and args.num_channels <= 0:
         print("Error: --num-channels must be > 0", file=sys.stderr)
+        return 2
+    if args.amplifier_channels <= 0:
+        print("Error: --amplifier-channels must be > 0", file=sys.stderr)
+        return 2
+    if args.board_dig_in_channels < 0:
+        print("Error: --board-dig-in-channels must be >= 0", file=sys.stderr)
         return 2
     if args.sample_rate <= 0:
         print("Error: --sample-rate must be > 0", file=sys.stderr)
@@ -490,7 +680,9 @@ def main() -> int:
             out_png, out_txt = process_one_file(
                 merged_path=fp,
                 output_dir=out_root,
-                num_channels=int(args.num_channels),
+                num_channels_override=int(args.num_channels) if args.num_channels is not None else None,
+                amplifier_channels=int(args.amplifier_channels),
+                board_dig_in_channels=int(args.board_dig_in_channels),
                 sample_rate_hz=float(args.sample_rate),
                 dtype_str=args.dtype,
                 min_pulse_ms=float(args.min_pulse_ms),
