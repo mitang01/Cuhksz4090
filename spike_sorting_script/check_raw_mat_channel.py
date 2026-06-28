@@ -3,7 +3,9 @@
 Inspect MAT files and report channel names/counts.
 
 Default root:
-  /share/workspace2/20260120-20260123/0121/bistable_sub5/
+  /share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4
+
+The default root contains three subfolders (1, 2, 3), each holding two .mat files.
 
 For each .mat file found (recursive), this script reports:
   - file name
@@ -33,8 +35,7 @@ except ModuleNotFoundError:
     loadmat = None
 
 
-DEFAULT_ROOT = Path("/share/workspace2/20260120-20260123/0121/bistable_sub5/")
-FALLBACK_ROOT = Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/")
+DEFAULT_ROOT = Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4")
 
 
 def infer_samples_channels(shape: tuple[int, ...]) -> tuple[int | None, int | None, str]:
@@ -178,9 +179,6 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.root.expanduser().resolve()
-    if not root.exists() and args.root == DEFAULT_ROOT and FALLBACK_ROOT.exists():
-        print(f"[INFO] Default root not found, using fallback: {FALLBACK_ROOT}")
-        root = FALLBACK_ROOT.resolve()
 
     if not root.exists() or not root.is_dir():
         print(f"Error: root folder not found or not a directory: {root}", file=sys.stderr)
