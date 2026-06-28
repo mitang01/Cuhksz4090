@@ -311,13 +311,16 @@ def normalize_amplifier_by_labels(
     stream_name: str,
     mat_path: Path,
     pad_value: int = 0,
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[str]]:
     """
     Rebuild amplifier data so columns line up with expected_labels.
 
     Missing labels (e.g. A-008 absent from a 127-channel chunk) become a
     zero-valued column at the correct position, instead of being padded at the
     end. Extra/unknown labels are dropped.
+
+    Returns (out, missing_labels) where missing_labels lists the labels that
+    were zero-padded, in expected-column order.
     """
     n_samples, n_ch = arr.shape
     expected_n = len(expected_labels)
@@ -327,10 +330,16 @@ def normalize_amplifier_by_labels(
 
     missing = [label for label in expected_labels if label not in label_to_col]
     extra = [label for label in actual_labels if label not in expected_labels]
+    missing_set = set(missing)
+    detail = ", ".join(
+        f"{label} (column {i + 1} of {expected_n})"
+        for i, label in enumerate(expected_labels)
+        if label in missing_set
+    )
     print(
-        f"  [WARN] {mat_path.name}: {stream_name} has {n_ch} channels, "
-        f"expected {expected_n}. Missing labels: {missing}. "
-        f"Extra labels: {extra}. Padding missing positions with {pad_value}."
+        f"  [PATCH] {mat_path.name}: {stream_name} {n_ch}->{expected_n} channels; "
+        f"zero-padded missing channel(s): {detail or 'none'}; "
+        f"extra labels dropped: {extra}."
     )
 
     out = np.full((n_samples, expected_n), pad_value, dtype=arr.dtype)
@@ -338,7 +347,7 @@ def normalize_amplifier_by_labels(
         src_col = label_to_col.get(label)
         if src_col is not None:
             out[:, out_col] = arr[:, src_col]
-    return out
+    return out, missing
 
 
 def flatten_time_vector(t: np.ndarray | None) -> np.ndarray | None:
@@ -387,13 +396,19 @@ def align_digital_to_amplifier(
     return dig[:n, :]
 
 
-def load_streams(mat_path: Path, label_aware_padding: bool = False) -> tuple[np.ndarray, np.ndarray]:
+def load_streams(mat_path: Path, label_aware_padding: bool = False) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
     Load amplifier and board digital inputs from one MAT file.
 
     Returns:
       amplifier_uV: float array, shape (samples, 128)
       board_dig: int16 array, shape (samples, 8), values in {0,1}
+      patch_info: dict with keys
+        - "missing_labels": list[str] of amplifier labels zero-padded at their
+          correct position (only populated when label_aware_padding triggers the
+          label-based path); empty otherwise.
+        - "fallback_end_padding": int count of channels end-padded when labels
+          could not be read/matched (safety net only).
 
     When label_aware_padding is True (used for subjects whose chunks may drop a
     single amplifier channel, e.g. sub5), a short-channel amplifier block is
@@ -452,10 +467,11 @@ def load_streams(mat_path: Path, label_aware_padding: bool = False) -> tuple[np.
         name="amplifier_data",
         mat_path=mat_path,
     )
+    patch_info: dict[str, Any] = {"missing_labels": [], "fallback_end_padding": 0}
     if label_aware_padding and amplifier.shape[1] != AMPLIFIER_CHANNELS_EXPECTED:
         actual_labels = read_amplifier_channel_labels(mat_path)
         if actual_labels and len(actual_labels) == amplifier.shape[1]:
-            amplifier = normalize_amplifier_by_labels(
+            amplifier, missing_labels = normalize_amplifier_by_labels(
                 amplifier,
                 expected_labels=EXPECTED_AMPLIFIER_LABELS,
                 actual_labels=actual_labels,
@@ -463,12 +479,14 @@ def load_streams(mat_path: Path, label_aware_padding: bool = False) -> tuple[np.
                 mat_path=mat_path,
                 pad_value=0,
             )
+            patch_info["missing_labels"] = missing_labels
         else:
             print(
                 f"  [WARN] {mat_path.name}: could not read matching amplifier "
                 f"channel labels (got {len(actual_labels)} labels for "
                 f"{amplifier.shape[1]} columns); falling back to end-padding."
             )
+            patch_info["fallback_end_padding"] = AMPLIFIER_CHANNELS_EXPECTED - amplifier.shape[1]
             amplifier = normalize_channel_count(
                 amplifier,
                 expected_channels=AMPLIFIER_CHANNELS_EXPECTED,
@@ -526,7 +544,7 @@ def load_streams(mat_path: Path, label_aware_padding: bool = False) -> tuple[np.
 
     # Keep digital stream as strict binary states.
     dig_bin = (np.asarray(dig_aligned) > 0).astype(np.int16, copy=False)
-    return amplifier.astype(np.float32, copy=False), dig_bin
+    return amplifier.astype(np.float32, copy=False), dig_bin, patch_info
 
 
 def write_channel_layout_metadata(output_path: Path, total_channels: int) -> None:
@@ -557,17 +575,24 @@ def merge_folder(input_dir: Path, output_path: Path, label_aware_padding: bool =
     output_path.parent.mkdir(parents=True, exist_ok=True)
     expected_total_channels = AMPLIFIER_CHANNELS_EXPECTED + DIGITAL_IN_CHANNELS_EXPECTED
     written_chunks = 0
+    patched_files: list[tuple[str, list[str]]] = []
     if output_path.exists():
         print(f"[INFO] Overwriting existing output: {output_path}")
     touch_truncate_with_retry(output_path)
     for idx, mat_path in enumerate(mat_files, start=1):
         try:
-            amplifier_uv, board_dig = load_streams(mat_path, label_aware_padding=label_aware_padding)
+            amplifier_uv, board_dig, patch_info = load_streams(mat_path, label_aware_padding=label_aware_padding)
         except Exception as exc:
             print(
                 f"  [WARN] Skipping unreadable file {mat_path.name}: {type(exc).__name__}: {exc}"
             )
             continue
+        if patch_info.get("missing_labels"):
+            patched_files.append((mat_path.name, list(patch_info["missing_labels"])))
+        if patch_info.get("fallback_end_padding"):
+            patched_files.append(
+                (mat_path.name, [f"<unknown:{patch_info['fallback_end_padding']} end-padded>"])
+            )
         amplifier_int16 = np.round(amplifier_uv / GAIN_TO_UV).astype(np.int16, copy=False)
         merged = np.concatenate([amplifier_int16, board_dig], axis=1)
         if merged.shape[1] != expected_total_channels:
@@ -597,6 +622,18 @@ def merge_folder(input_dir: Path, output_path: Path, label_aware_padding: bool =
 
     size_gb = safe_stat_size(output_path) / 1e9
     write_channel_layout_metadata(output_path=output_path, total_channels=expected_total_channels)
+    if patched_files:
+        print(
+            f"[SUMMARY] {len(patched_files)} file(s) had missing amplifier "
+            f"channel(s) patched (label_aware_padding={label_aware_padding}):"
+        )
+        for fname, labels in patched_files:
+            print(f"  - {fname}: patched {labels}")
+    else:
+        print(
+            f"[SUMMARY] No missing-channel patches applied "
+            f"(label_aware_padding={label_aware_padding})."
+        )
     print(
         f"[DONE] {output_path} ({size_gb:.2f} GB), chunks_written={written_chunks}, "
         f"channels_per_sample={expected_total_channels}"
