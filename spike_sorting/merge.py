@@ -8,6 +8,15 @@ For the current datasets that means:
   - 128 amplifier channels
   - 8 board digital input channels
   - total = 136 channels
+
+Notes:
+  - For subjects in LABEL_AWARE_PADDING_SUBJECTS (currently sub5), some MAT chunks
+    drop a single amplifier channel (e.g. A-008 missing -> 127 channels). For those
+    chunks the missing channel is zero-padded at its correct label position (detected
+    from the per-file channel labels, expected to run A-001 .. A-128), NOT at the end.
+  - sub6 chunks always carry the full 128 amplifier channels, so label-aware padding
+    is not enabled for sub6.
+  - Existing output files are overwritten on each run (truncated before writing).
 """
 
 import errno
@@ -24,38 +33,47 @@ from scipy.io import loadmat
 MAT_FILE_GLOB = "Temp_26012*.mat"
 MERGE_JOBS = [
     {
+        "subject": "sub5",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_095012"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session1"),
     },
     {
+        "subject": "sub5",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_103639"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session2"),
     },
     {
+        "subject": "sub5",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_104824"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session3"),
     },
     {
+        "subject": "sub5",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_105933"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session4"),
     },
     {
+        "subject": "sub5",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_125018"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session5"),
     },
     {
+        "subject": "sub5",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5/Temp_260121_130023"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub5_session6"),
     },
     {
+        "subject": "sub6",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_1/Temp_260123_115236"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub6_session1"),
     },
     {
+        "subject": "sub6",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_2/Temp_260123_120327"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub6_session3"),
     },
     {
+        "subject": "sub6",
         "input_dir": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_3/Temp_260123_121427"),
         "output_path": Path("/share/workspace2/tangmi/bistable_sub6_session6"),
     },
@@ -63,6 +81,12 @@ MERGE_JOBS = [
 GAIN_TO_UV = 0.195  # Intan RHD2000 conversion factor
 AMPLIFIER_CHANNELS_EXPECTED = 128
 DIGITAL_IN_CHANNELS_EXPECTED = 8
+# Full amplifier channel label set for 128-channel Intan exports (A-001 .. A-128).
+EXPECTED_AMPLIFIER_LABELS = [f"A-{i:03d}" for i in range(1, AMPLIFIER_CHANNELS_EXPECTED + 1)]
+# Subjects whose MAT chunks may drop a single amplifier channel (e.g. A-008 missing,
+# leaving 127 channels). For these, pad the missing channel at its correct label
+# position (identified from the per-file channel labels) instead of at the end.
+LABEL_AWARE_PADDING_SUBJECTS = {"sub5"}
 MAX_IO_RETRIES = 6
 BASE_RETRY_SLEEP_S = 1.0
 
@@ -199,6 +223,124 @@ def normalize_channel_count(
     return arr[:, :expected_channels]
 
 
+def _decode_hdf5_name_dataset(f: "h5py.File", ref: Any) -> str:
+    try:
+        ds = f[ref]
+        arr = np.array(ds)
+    except Exception:
+        return ""
+    if arr.size == 0:
+        return ""
+    if arr.dtype.kind in {"U", "S"}:
+        return "".join(str(x) for x in arr.ravel()).strip()
+    flat = np.asarray(arr).ravel()
+    if np.issubdtype(flat.dtype, np.integer):
+        return "".join(chr(int(c)) for c in flat if 0 < int(c) < 256).strip()
+    return ""
+
+
+def _decode_hdf5_channel_names(f: "h5py.File", group_key: str) -> list[str]:
+    if group_key not in f:
+        return []
+    g = f[group_key]
+    for key in ("native_channel_name", "custom_channel_name"):
+        if key not in g:
+            continue
+        refs = np.array(g[key], dtype=object).ravel()
+        out: list[str] = []
+        for i, ref in enumerate(refs, start=1):
+            name = _decode_hdf5_name_dataset(f, ref)
+            out.append(name if name else f"{group_key}_{i}")
+        return out
+    return []
+
+
+def _extract_legacy_name(one_channel_obj: Any, idx: int, group_key: str) -> str:
+    for field in ("native_channel_name", "custom_channel_name"):
+        if hasattr(one_channel_obj, field):
+            value = getattr(one_channel_obj, field)
+            if isinstance(value, np.ndarray):
+                if value.dtype.kind in {"U", "S"}:
+                    s = "".join(str(x) for x in value.ravel())
+                    return s.strip() or f"{group_key}_{idx}"
+                if np.issubdtype(value.dtype, np.integer):
+                    s = "".join(chr(int(x)) for x in value.ravel() if int(x) != 0)
+                    return s.strip() or f"{group_key}_{idx}"
+            if isinstance(value, str):
+                return value.strip() or f"{group_key}_{idx}"
+    if isinstance(one_channel_obj, np.void) and one_channel_obj.dtype.names:
+        for field in ("native_channel_name", "custom_channel_name"):
+            if field in one_channel_obj.dtype.names:
+                v = one_channel_obj[field]
+                arr = np.asarray(v).ravel()
+                if arr.dtype.kind in {"U", "S"}:
+                    s = "".join(str(x) for x in arr)
+                    return s.strip() or f"{group_key}_{idx}"
+                if np.issubdtype(arr.dtype, np.integer):
+                    s = "".join(chr(int(x)) for x in arr if int(x) != 0)
+                    return s.strip() or f"{group_key}_{idx}"
+    return f"{group_key}_{idx}"
+
+
+def _decode_legacy_channel_names(mat_data: dict[str, Any], group_key: str) -> list[str]:
+    if group_key not in mat_data:
+        return []
+    arr = np.asarray(mat_data[group_key]).ravel()
+    return [_extract_legacy_name(obj, i, group_key) for i, obj in enumerate(arr, start=1)]
+
+
+def read_amplifier_channel_labels(mat_path: Path) -> list[str]:
+    """Read amplifier channel labels (e.g. A-001 .. A-128) from a MAT file."""
+    if h5py.is_hdf5(str(mat_path)):
+        try:
+            with h5py.File(mat_path, "r") as f:
+                return _decode_hdf5_channel_names(f, "amplifier_channels")
+        except OSError:
+            return []
+    try:
+        mat_data = loadmat(mat_path, squeeze_me=True, struct_as_record=False)
+    except Exception:
+        return []
+    return _decode_legacy_channel_names(mat_data, "amplifier_channels")
+
+
+def normalize_amplifier_by_labels(
+    arr: np.ndarray,
+    expected_labels: list[str],
+    actual_labels: list[str],
+    stream_name: str,
+    mat_path: Path,
+    pad_value: int = 0,
+) -> np.ndarray:
+    """
+    Rebuild amplifier data so columns line up with expected_labels.
+
+    Missing labels (e.g. A-008 absent from a 127-channel chunk) become a
+    zero-valued column at the correct position, instead of being padded at the
+    end. Extra/unknown labels are dropped.
+    """
+    n_samples, n_ch = arr.shape
+    expected_n = len(expected_labels)
+    label_to_col: dict[str, int] = {}
+    for col, label in enumerate(actual_labels):
+        label_to_col.setdefault(label, col)
+
+    missing = [label for label in expected_labels if label not in label_to_col]
+    extra = [label for label in actual_labels if label not in expected_labels]
+    print(
+        f"  [WARN] {mat_path.name}: {stream_name} has {n_ch} channels, "
+        f"expected {expected_n}. Missing labels: {missing}. "
+        f"Extra labels: {extra}. Padding missing positions with {pad_value}."
+    )
+
+    out = np.full((n_samples, expected_n), pad_value, dtype=arr.dtype)
+    for out_col, label in enumerate(expected_labels):
+        src_col = label_to_col.get(label)
+        if src_col is not None:
+            out[:, out_col] = arr[:, src_col]
+    return out
+
+
 def flatten_time_vector(t: np.ndarray | None) -> np.ndarray | None:
     if t is None:
         return None
@@ -245,13 +387,18 @@ def align_digital_to_amplifier(
     return dig[:n, :]
 
 
-def load_streams(mat_path: Path) -> tuple[np.ndarray, np.ndarray]:
+def load_streams(mat_path: Path, label_aware_padding: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """
     Load amplifier and board digital inputs from one MAT file.
 
     Returns:
       amplifier_uV: float array, shape (samples, 128)
       board_dig: int16 array, shape (samples, 8), values in {0,1}
+
+    When label_aware_padding is True (used for subjects whose chunks may drop a
+    single amplifier channel, e.g. sub5), a short-channel amplifier block is
+    rebuilt so the missing channel lands at its correct label position (detected
+    from the per-file channel labels) rather than being padded at the end.
     """
     amp_data: Any
     dig_data: Any
@@ -305,13 +452,38 @@ def load_streams(mat_path: Path) -> tuple[np.ndarray, np.ndarray]:
         name="amplifier_data",
         mat_path=mat_path,
     )
-    amplifier = normalize_channel_count(
-        amplifier,
-        expected_channels=AMPLIFIER_CHANNELS_EXPECTED,
-        stream_name="amplifier_data",
-        mat_path=mat_path,
-        pad_value=0,
-    )
+    if label_aware_padding and amplifier.shape[1] != AMPLIFIER_CHANNELS_EXPECTED:
+        actual_labels = read_amplifier_channel_labels(mat_path)
+        if actual_labels and len(actual_labels) == amplifier.shape[1]:
+            amplifier = normalize_amplifier_by_labels(
+                amplifier,
+                expected_labels=EXPECTED_AMPLIFIER_LABELS,
+                actual_labels=actual_labels,
+                stream_name="amplifier_data",
+                mat_path=mat_path,
+                pad_value=0,
+            )
+        else:
+            print(
+                f"  [WARN] {mat_path.name}: could not read matching amplifier "
+                f"channel labels (got {len(actual_labels)} labels for "
+                f"{amplifier.shape[1]} columns); falling back to end-padding."
+            )
+            amplifier = normalize_channel_count(
+                amplifier,
+                expected_channels=AMPLIFIER_CHANNELS_EXPECTED,
+                stream_name="amplifier_data",
+                mat_path=mat_path,
+                pad_value=0,
+            )
+    else:
+        amplifier = normalize_channel_count(
+            amplifier,
+            expected_channels=AMPLIFIER_CHANNELS_EXPECTED,
+            stream_name="amplifier_data",
+            mat_path=mat_path,
+            pad_value=0,
+        )
     dig = orient_samples_channels(
         dig_data,
         expected_channels=DIGITAL_IN_CHANNELS_EXPECTED,
@@ -375,7 +547,7 @@ def write_channel_layout_metadata(output_path: Path, total_channels: int) -> Non
         f.write("\n".join(lines) + "\n")
 
 
-def merge_folder(input_dir: Path, output_path: Path):
+def merge_folder(input_dir: Path, output_path: Path, label_aware_padding: bool = False):
     mat_files = sorted(input_dir.rglob(MAT_FILE_GLOB), key=sort_key)
     if not mat_files:
         print(f"[SKIP] No '{MAT_FILE_GLOB}' files found in {input_dir}")
@@ -385,10 +557,12 @@ def merge_folder(input_dir: Path, output_path: Path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     expected_total_channels = AMPLIFIER_CHANNELS_EXPECTED + DIGITAL_IN_CHANNELS_EXPECTED
     written_chunks = 0
+    if output_path.exists():
+        print(f"[INFO] Overwriting existing output: {output_path}")
     touch_truncate_with_retry(output_path)
     for idx, mat_path in enumerate(mat_files, start=1):
         try:
-            amplifier_uv, board_dig = load_streams(mat_path)
+            amplifier_uv, board_dig = load_streams(mat_path, label_aware_padding=label_aware_padding)
         except Exception as exc:
             print(
                 f"  [WARN] Skipping unreadable file {mat_path.name}: {type(exc).__name__}: {exc}"
@@ -436,8 +610,13 @@ def main():
         if not input_dir.exists():
             print(f"[SKIP] Input folder does not exist: {input_dir}")
             continue
+        label_aware_padding = job.get("subject") in LABEL_AWARE_PADDING_SUBJECTS
         try:
-            merge_folder(input_dir=input_dir, output_path=output_path)
+            merge_folder(
+                input_dir=input_dir,
+                output_path=output_path,
+                label_aware_padding=label_aware_padding,
+            )
         except Exception as exc:
             print(
                 f"[ERROR] Merge failed for {input_dir} -> {output_path}: "
