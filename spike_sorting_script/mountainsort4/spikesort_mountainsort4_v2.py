@@ -1,7 +1,23 @@
-#   ATL:      Ch 32-47
-#   HG:       Ch 16-31
-#   VMPFC:    Ch 48-63
-#   Amygdala: Ch 0-15
+# NOTE: the first 10 min for bistable_sub4_session1: Temp_251230_130425.mat is
+# corrupted. Need to re-upload to the cluster and merge again.
+#
+# Channel -> brain region maps (channel LABELS, not python indices):
+#   Sub4 (80-channel amplifier; labels A-000 .. A-079, 0-indexed labels):
+#     Amygdala: A-000 .. A-015  -> python idx [0:16]
+#     HG:       A-016 .. A-031  -> python idx [16:32]
+#     ATL:      A-032 .. A-047  -> python idx [32:48]
+#     VMPFC:    A-048 .. A-063  -> python idx [48:64]
+#     (A-064 .. A-079 are not assigned to any region)
+#   Sub5 (128-channel amplifier; labels A-001 .. A-128, 1-indexed labels):
+#     ATL:      A-065 .. A-080  -> python idx [64:80]
+#     HG:       A-081 .. A-096  -> python idx [80:96]
+#     VMPFC:    A-097 .. A-112  -> python idx [96:112]
+#     Amygdala: A-113 .. A-128  -> python idx [112:128]
+#   Sub6 (128-channel amplifier; labels A-001 .. A-128, 1-indexed labels):
+#     ATL:      A-065 .. A-080  -> python idx [64:80]
+#     HG:       A-081 .. A-096  -> python idx [80:96]
+#     Amygdala: A-097 .. A-112  -> python idx [96:112]
+#     VMPFC:    A-113 .. A-128  -> python idx [112:128]
 
 
 # Other notes:
@@ -37,28 +53,71 @@ from spikeinterface.metrics.quality.quality_metrics import ComputeQualityMetrics
 warnings.simplefilter("ignore")
 
 
-# Input files produced by merge.py
-MERGED_RECORDINGS = {
-    "session3": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session3"),
-    "session5": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session5"),
-    "session2": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session2"),
-}
-
-# Output directory requested by user
+# Output directory (each dataset gets its own sorting_results_<name>_v2 folder)
 OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
 
 # Recording metadata
 SAMPLING_RATE = 30000.0
-NUM_CHANNELS_TOTAL = 128
 GAIN_TO_UV = 0.195
 
-# Brain-region channels (0-indexed, end-exclusive)
-REGION_CHANNEL_MAP = {
-    "ATL": (32, 48),       # channels 32-47
-    "HG": (16, 32),        # channels 16-31
-    "VMPFC": (48, 64),     # channels 48-63
-    "Amygdala": (0, 16)    # channels 0-15
+# Per-subject amplifier channel count and brain-region channel map.
+# Region tuples are python slices (0-indexed, end-exclusive) into the recording.
+SUBJECT_CONFIGS = {
+    "sub4": {
+        "num_channels": 80,
+        "region_channel_map": {
+            "Amygdala": (0, 16),
+            "HG": (16, 32),
+            "ATL": (32, 48),
+            "VMPFC": (48, 64),
+        },
+    },
+    "sub5": {
+        "num_channels": 128,
+        "region_channel_map": {
+            "ATL": (64, 80),
+            "HG": (80, 96),
+            "VMPFC": (96, 112),
+            "Amygdala": (112, 128),
+        },
+    },
+    "sub6": {
+        "num_channels": 128,
+        "region_channel_map": {
+            "ATL": (64, 80),
+            "HG": (80, 96),
+            "Amygdala": (96, 112),
+            "VMPFC": (112, 128),
+        },
+    },
 }
+
+# Batch of datasets to sort. Each entry maps a dataset name to its merged binary
+# recording path and subject (which selects the channel count + region map above).
+DATASETS = [
+    {"name": "bistable_sub4_session3", "subject": "sub4",
+     "path": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session3")},
+    {"name": "bistable_sub4_session5", "subject": "sub4",
+     "path": Path("/share/workspace3/ieeg/micro/word_boun_perce_v1/bistable_sub4/bistable_sub4_session5")},
+    {"name": "bistable_sub5_session1", "subject": "sub5",
+     "path": Path("/share/workspace2/tangmi/bistable_sub5_session1")},
+    {"name": "bistable_sub5_session2", "subject": "sub5",
+     "path": Path("/share/workspace2/tangmi/bistable_sub5_session2")},
+    {"name": "bistable_sub5_session3", "subject": "sub5",
+     "path": Path("/share/workspace2/tangmi/bistable_sub5_session3")},
+    {"name": "bistable_sub5_session4", "subject": "sub5",
+     "path": Path("/share/workspace2/tangmi/bistable_sub5_session4")},
+    {"name": "bistable_sub5_session5", "subject": "sub5",
+     "path": Path("/share/workspace2/tangmi/bistable_sub5_session5")},
+    {"name": "bistable_sub5_session6", "subject": "sub5",
+     "path": Path("/share/workspace2/tangmi/bistable_sub5_session6")},
+    {"name": "bistable_sub6_session1", "subject": "sub6",
+     "path": Path("/share/workspace2/tangmi/bistable_sub6_session1")},
+    {"name": "bistable_sub6_session3", "subject": "sub6",
+     "path": Path("/share/workspace2/tangmi/bistable_sub6_session3")},
+    {"name": "bistable_sub6_session6", "subject": "sub6",
+     "path": Path("/share/workspace2/tangmi/bistable_sub6_session6")},
+]
 
 # Sorting/QC thresholds (conservative but not all-rejecting)
 SORTER_DETECT_THRESHOLD = 7.0
@@ -356,7 +415,12 @@ def sort_one_region(
     return region_spike_times, region_good_spike_times, region_meta
 
 
-def sort_one_session(session_name: str, recording_path: Path):
+def sort_one_session(
+    session_name: str,
+    recording_path: Path,
+    num_channels: int,
+    region_channel_map: Dict[str, tuple],
+):
     if not recording_path.exists():
         print(f"[WARN] Input file not found: {recording_path}. Skipping {session_name}.")
         return
@@ -370,7 +434,7 @@ def sort_one_session(session_name: str, recording_path: Path):
 
     recording_full = si.read_binary(
         file_paths=str(recording_path),
-        num_channels=NUM_CHANNELS_TOTAL,
+        num_channels=num_channels,
         dtype="int16",
         sampling_frequency=SAMPLING_RATE,
         gain_to_uV=GAIN_TO_UV,
@@ -383,7 +447,7 @@ def sort_one_session(session_name: str, recording_path: Path):
     all_good_spike_times = {}
     all_units_meta = []
 
-    for region_name, (ch_start, ch_end) in REGION_CHANNEL_MAP.items():
+    for region_name, (ch_start, ch_end) in region_channel_map.items():
         region_spikes, region_good_spikes, region_meta = sort_one_region(
             recording_full=recording_full,
             total_duration_s=total_duration_s,
@@ -419,9 +483,15 @@ def sort_one_session(session_name: str, recording_path: Path):
 def main():
     prepare_parallel_settings()
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    for session_name, recording_path in MERGED_RECORDINGS.items():
-        sort_one_session(session_name=session_name, recording_path=recording_path)
-    print("[DONE] All requested sessions finished.")
+    for dataset in DATASETS:
+        cfg = SUBJECT_CONFIGS[dataset["subject"]]
+        sort_one_session(
+            session_name=dataset["name"],
+            recording_path=dataset["path"],
+            num_channels=cfg["num_channels"],
+            region_channel_map=cfg["region_channel_map"],
+        )
+    print("[DONE] All requested datasets finished.")
 
 
 if __name__ == "__main__":
