@@ -24,10 +24,10 @@ import spikeinterface.widgets as sw
 
 
 DEFAULT_OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting")
-DEFAULT_ANALYZER_ROOT = Path("/share/home/mitan/Cuhksz4090/spike_sorting/mountainsort4")
+DEFAULT_ANALYZER_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
 DEFAULT_MANIFEST_PATH = Path(
-    "/share/home/mitan/Cuhksz4090/spike_sorting/"
-    "sortingview_links_mountainsort4_sub5&6_story_listen.json"
+    "/share/home/mitan/spike_sorting/"
+    "sortingview_links_mountainsort4_bistable_sub4_5_6.json"
 )
 DEFAULT_REGIONS = ["ATL", "HG", "VMPFC", "Amygdala"]
 
@@ -144,8 +144,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_ANALYZER_ROOT,
         help=(
-            "Root containing story-listen sorting result folders, e.g. "
-            "/share/home/mitan/Cuhksz4090/spike_sorting/mountainsort4."
+            "Root containing sorting result folders (sorting_results_*_v2), e.g. "
+            "/share/home/mitan/spike_sorting/mountainsort4."
         ),
     )
     parser.add_argument(
@@ -153,8 +153,8 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=None,
         help=(
-            "Sessions to process, e.g. sub5 sub6. "
-            "Default: auto-discover from sub*_story_listen_sorting_results."
+            "Sessions to process, e.g. bistable_sub4_session3 bistable_sub5_session1. "
+            "Default: auto-discover all sorting_results_*_v2 folders under --analyzer-root."
         ),
     )
     parser.add_argument(
@@ -169,8 +169,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MANIFEST_PATH,
         help=(
             "Path to write JSON manifest. "
-            "Default: /share/home/mitan/Cuhksz4090/spike_sorting/"
-            "sortingview_links_mountainsort4_sub5&6_story_listen.json"
+            "Default: /share/home/mitan/spike_sorting/"
+            "sortingview_links_mountainsort4_bistable_sub4_5_6.json"
         ),
     )
     parser.add_argument(
@@ -225,12 +225,19 @@ def extract_url(widget_obj) -> Optional[str]:
     return None
 
 
-def discover_story_listen_sessions(analyzer_root: Path) -> Dict[str, Path]:
+def discover_sorting_result_sessions(analyzer_root: Path) -> Dict[str, Path]:
+    """
+    Auto-discover sorting result folders under analyzer_root.
+
+    Matches folders named like 'sorting_results_<dataset>_v2' (e.g.
+    sorting_results_bistable_sub4_session3_v2) and keys them by the dataset
+    name with the 'sorting_results_' prefix and optional '_v2' suffix removed.
+    """
     sessions: Dict[str, Path] = {}
-    for p in sorted(analyzer_root.glob("sub*_story_listen_sorting_results")):
+    for p in sorted(analyzer_root.glob("sorting_results_*")):
         if not p.is_dir():
             continue
-        m = re.match(r"^(sub\d+)_story_listen_sorting_results$", p.name)
+        m = re.match(r"^sorting_results_(.+?)(_v2)?$", p.name)
         if not m:
             continue
         session = m.group(1)
@@ -238,20 +245,45 @@ def discover_story_listen_sessions(analyzer_root: Path) -> Dict[str, Path]:
     return sessions
 
 
-def resolve_story_listen_session_root(analyzer_root: Path, session: str) -> Path:
-    # Accept either "sub5" token or full folder name.
-    candidate_tokens = [
-        session,
-        f"{session}_story_listen_sorting_results",
+def resolve_session_root(analyzer_root: Path, session: str) -> Path:
+    """
+    Resolve a session token to its sorting-results folder.
+
+    Accepts the bare dataset name (e.g. 'bistable_sub4_session3'), the name with
+    a 'sorting_results_' prefix, with/without a '_v2' suffix, or the full folder
+    name.
+    """
+    candidates = [
+        analyzer_root / session,
+        analyzer_root / f"sorting_results_{session}",
+        analyzer_root / f"sorting_results_{session}_v2",
     ]
-    for token in candidate_tokens:
-        p = analyzer_root / token
-        if p.is_dir() and p.name.endswith("_story_listen_sorting_results"):
-            return p
+    for c in candidates:
+        if c.is_dir():
+            return c
     raise FileNotFoundError(
         f"Session folder not found for '{session}' under {analyzer_root}. "
-        "Expected e.g. sub5_story_listen_sorting_results."
+        "Expected e.g. sorting_results_bistable_sub4_session3_v2."
     )
+
+
+def resolve_analyzer_path(session_root: Path, region: str) -> Path:
+    """
+    Resolve a region's SortingAnalyzer folder within a session root.
+
+    Supports both layouts:
+      - '<session_root>/<region>/analyzer' (current batch v2 layout)
+      - '<session_root>/<region>_analyzer' (older story-listen layout)
+    Returns the first existing candidate; if none exist, returns the preferred
+    (batch v2) candidate so the caller's existence check produces a clear skip.
+    """
+    preferred = session_root / region / "analyzer"
+    if preferred.exists():
+        return preferred
+    legacy = session_root / f"{region}_analyzer"
+    if legacy.exists():
+        return legacy
+    return preferred
 
 
 def generate_links_for_analyzer(
@@ -341,7 +373,7 @@ def main() -> None:
     args = parse_args()
     output_root = args.output_root
     analyzer_root = args.analyzer_root
-    discovered = discover_story_listen_sessions(analyzer_root)
+    discovered = discover_sorting_result_sessions(analyzer_root)
     sessions = args.sessions if args.sessions else sorted(discovered.keys())
     regions = args.regions
     mode = args.mode
@@ -349,7 +381,7 @@ def main() -> None:
     if not sessions:
         raise SystemExit(
             f"No sessions found under {analyzer_root}. "
-            "Expected folders like sub5_story_listen_sorting_results."
+            "Expected folders like sorting_results_bistable_sub4_session3_v2."
         )
 
     manifest_path = args.manifest
@@ -387,9 +419,9 @@ def main() -> None:
         if session in discovered:
             session_root = discovered[session]
         else:
-            session_root = resolve_story_listen_session_root(analyzer_root, session)
+            session_root = resolve_session_root(analyzer_root, session)
         for region in regions:
-            analyzer_path = session_root / f"{region}_analyzer"
+            analyzer_path = resolve_analyzer_path(session_root, region)
             local_port = args.base_port + port_counter if mode == "local" else None
             port_counter += 1
             item = {
