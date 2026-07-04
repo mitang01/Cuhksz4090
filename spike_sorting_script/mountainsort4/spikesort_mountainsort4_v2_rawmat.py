@@ -299,6 +299,24 @@ def build_recording_from_amplifier(amplifier_uv: np.ndarray):
     return recording
 
 
+def make_recording_sortable(recording_mem, session_output: Path):
+    """
+    Mountainsort4 requires a serializable recording object.
+    Persist in-memory traces to a binary folder and return that extractor.
+    """
+    recording_cache_dir = session_output / "_recording_cache"
+    if recording_cache_dir.exists():
+        shutil.rmtree(recording_cache_dir)
+    print(f"[INFO] Saving temporary binary recording cache: {recording_cache_dir}")
+    recording_saved = recording_mem.save(
+        format="binary",
+        folder=str(recording_cache_dir),
+        n_jobs=1,
+        chunk_duration="1s",
+    )
+    return recording_saved
+
+
 def sort_one_region(
     recording_full,
     total_duration_s: float,
@@ -466,7 +484,8 @@ def sort_one_mat_file(subject: str, mat_path: Path):
     session_output = OUTPUT_ROOT / f"sorting_results_{session_name}_v2_rawmat"
     session_output.mkdir(parents=True, exist_ok=True)
 
-    recording_full = build_recording_from_amplifier(amplifier_uv=amplifier_uv)
+    recording_mem = build_recording_from_amplifier(amplifier_uv=amplifier_uv)
+    recording_full = make_recording_sortable(recording_mem=recording_mem, session_output=session_output)
     total_duration_s = recording_full.get_num_samples() / SAMPLING_RATE
     print(f"[INFO] Recording duration: {total_duration_s / 60:.2f} min")
 
