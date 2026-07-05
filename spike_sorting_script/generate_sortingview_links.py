@@ -27,7 +27,7 @@ DEFAULT_OUTPUT_ROOT = Path("/share/home/mitan/spike_sorting")
 DEFAULT_ANALYZER_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
 DEFAULT_MANIFEST_PATH = Path(
     "/share/home/mitan/spike_sorting/"
-    "sortingview_links_mountainsort4_bistable_sub4_5_6.json"
+    "sortingview_links_mountainsort4_rawmat_sub5_6.json"
 )
 DEFAULT_REGIONS = ["ATL", "HG", "VMPFC", "Amygdala"]
 
@@ -144,7 +144,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_ANALYZER_ROOT,
         help=(
-            "Root containing sorting result folders (sorting_results_*_v2), e.g. "
+            "Root containing sorting result folders (sorting_results_*_v2_rawmat), e.g. "
             "/share/home/mitan/spike_sorting/mountainsort4."
         ),
     )
@@ -153,8 +153,8 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=None,
         help=(
-            "Sessions to process, e.g. bistable_sub4_session3 bistable_sub5_session1. "
-            "Default: auto-discover all sorting_results_*_v2 folders under --analyzer-root."
+            "Sessions to process, e.g. sub5_Temp_260121_095012_Temp_260121_095012. "
+            "Default: auto-discover all sorting_results_*_v2_rawmat folders under --analyzer-root."
         ),
     )
     parser.add_argument(
@@ -170,7 +170,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Path to write JSON manifest. "
             "Default: /share/home/mitan/spike_sorting/"
-            "sortingview_links_mountainsort4_bistable_sub4_5_6.json"
+            "sortingview_links_mountainsort4_rawmat_sub5_6.json"
         ),
     )
     parser.add_argument(
@@ -229,15 +229,16 @@ def discover_sorting_result_sessions(analyzer_root: Path) -> Dict[str, Path]:
     """
     Auto-discover sorting result folders under analyzer_root.
 
-    Matches folders named like 'sorting_results_<dataset>_v2' (e.g.
-    sorting_results_bistable_sub4_session3_v2) and keys them by the dataset
-    name with the 'sorting_results_' prefix and optional '_v2' suffix removed.
+    Matches folders named like 'sorting_results_<dataset>_v2_rawmat' (e.g.
+    sorting_results_sub5_Temp_260121_095012_Temp_260121_095012_v2_rawmat)
+    and keys them by the dataset name with prefix/suffix removed.
+    Legacy '_v2' folders are also supported.
     """
     sessions: Dict[str, Path] = {}
     for p in sorted(analyzer_root.glob("sorting_results_*")):
         if not p.is_dir():
             continue
-        m = re.match(r"^sorting_results_(.+?)(_v2)?$", p.name)
+        m = re.match(r"^sorting_results_(.+?)(?:_v2_rawmat|_v2)?$", p.name)
         if not m:
             continue
         session = m.group(1)
@@ -249,12 +250,15 @@ def resolve_session_root(analyzer_root: Path, session: str) -> Path:
     """
     Resolve a session token to its sorting-results folder.
 
-    Accepts the bare dataset name (e.g. 'bistable_sub4_session3'), the name with
-    a 'sorting_results_' prefix, with/without a '_v2' suffix, or the full folder
-    name.
+    Accepts bare session token or folder-like variants with:
+      - sorting_results_<session>_v2_rawmat
+      - sorting_results_<session>_v2
+      - sorting_results_<session>
+      - full folder name
     """
     candidates = [
         analyzer_root / session,
+        analyzer_root / f"sorting_results_{session}_v2_rawmat",
         analyzer_root / f"sorting_results_{session}",
         analyzer_root / f"sorting_results_{session}_v2",
     ]
@@ -263,7 +267,7 @@ def resolve_session_root(analyzer_root: Path, session: str) -> Path:
             return c
     raise FileNotFoundError(
         f"Session folder not found for '{session}' under {analyzer_root}. "
-        "Expected e.g. sorting_results_bistable_sub4_session3_v2."
+        "Expected e.g. sorting_results_<session>_v2_rawmat."
     )
 
 
@@ -381,7 +385,7 @@ def main() -> None:
     if not sessions:
         raise SystemExit(
             f"No sessions found under {analyzer_root}. "
-            "Expected folders like sorting_results_bistable_sub4_session3_v2."
+            "Expected folders like sorting_results_<session>_v2_rawmat."
         )
 
     manifest_path = args.manifest
