@@ -50,8 +50,8 @@ GAIN_TO_UV = 0.195
 RAW_FOLDERS = [
     {"subject": "sub5", "path": Path("/share/workspace2/tangmi/20260120-20260123/0121/bistable_sub5")},
     {"subject": "sub6", "path": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_1")},
-    {"subject": "sub6", "path": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_1")},
-    {"subject": "sub6", "path": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_1")},
+    {"subject": "sub6", "path": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_2")},
+    {"subject": "sub6", "path": Path("/share/workspace2/tangmi/20260120-20260123/0123/bistable_sub6_3")},
 ]
 
 MAT_GLOB = "*.mat"
@@ -506,6 +506,18 @@ def sort_one_mat_file(subject: str, mat_path: Path):
     print(f"[INFO] region map for this file: {region_channel_map}")
 
     session_output = OUTPUT_ROOT / f"sorting_results_{session_name}_v2_rawmat"
+    summary_csv = session_output / "all_regions_units_summary.csv"
+    good_summary_csv = session_output / "good_units_summary.csv"
+    all_spikes_pkl = session_output / "all_spike_times.pkl"
+    good_spikes_pkl = session_output / "good_units_spike_times.pkl"
+
+    # Skip files that already have completed outputs to save runtime.
+    existing_outputs = [summary_csv, good_summary_csv, all_spikes_pkl, good_spikes_pkl]
+    if all(p.exists() for p in existing_outputs):
+        print(f"[SKIP] Existing outputs found for {session_name}; skipping re-run.")
+        print(f"       - {summary_csv}")
+        return
+
     session_output.mkdir(parents=True, exist_ok=True)
 
     recording_mem = build_recording_from_amplifier(amplifier_uv=amplifier_uv)
@@ -564,18 +576,14 @@ def sort_one_mat_file(subject: str, mat_path: Path):
             summary_df[col] = np.nan
     summary_df = summary_df[UNIT_META_COLUMNS]
 
-    summary_csv = session_output / "all_regions_units_summary.csv"
     summary_df.to_csv(summary_csv, index=False)
-    good_summary_csv = session_output / "good_units_summary.csv"
     if "auto_qc_pass" in summary_df.columns:
         summary_df[summary_df["auto_qc_pass"]].to_csv(good_summary_csv, index=False)
     else:
         pd.DataFrame(columns=UNIT_META_COLUMNS).to_csv(good_summary_csv, index=False)
 
-    all_spikes_pkl = session_output / "all_spike_times.pkl"
     with all_spikes_pkl.open("wb") as f:
         pickle.dump(all_spike_times, f, protocol=4)
-    good_spikes_pkl = session_output / "good_units_spike_times.pkl"
     with good_spikes_pkl.open("wb") as f:
         pickle.dump(all_good_spike_times, f, protocol=4)
 
