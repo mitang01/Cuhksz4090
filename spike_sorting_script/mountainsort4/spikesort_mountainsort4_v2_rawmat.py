@@ -82,6 +82,24 @@ METRIC_OUTPUT_CANDIDATES = {
     "presence_ratio": ["presence_ratio"],
 }
 
+UNIT_META_COLUMNS = [
+    "region",
+    "unit_id",
+    "global_key",
+    "best_channel_1idx",
+    "n_spikes",
+    "mean_fr_hz",
+    "snr",
+    "isi_violation",
+    "firing_rate",
+    "presence_ratio",
+    "num_spikes_qm",
+    "auto_qc_pass",
+    "auto_qc_fail_reasons",
+    "is_warning_row",
+    "warning_message",
+]
+
 
 def prepare_parallel_settings():
     slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
@@ -329,7 +347,7 @@ def sort_one_region(
     n_ch = ch_end - ch_start
     if n_ch <= 0:
         print(f"[WARN] Empty region {region_name} [{ch_start}:{ch_end}], skipping.")
-        return {}, {}, []
+        return {}, {}, [], f"empty_region_range:{region_name}[{ch_start}:{ch_end}]"
 
     region_root = session_output / region_name
     sort_dir = region_root / "sorting"
@@ -363,6 +381,11 @@ def sort_one_region(
         freq_max=6000,
         adjacency_radius=-1,
     )
+
+    unit_ids = sorting.get_unit_ids()
+    if len(unit_ids) == 0:
+        print(f"[INFO] Region {region_name}: no units found; skipping analyzer/phy export.")
+        return {}, {}, [], f"no_units_found_in_region:{region_name}"
 
     analyzer = si.create_sorting_analyzer(
         sorting=sorting,
@@ -401,7 +424,6 @@ def sort_one_region(
         compute_amplitudes=True,
     )
 
-    unit_ids = sorting.get_unit_ids()
     templates_data = analyzer.get_extension("templates").get_data()
     region_spike_times = {}
     region_good_spike_times = {}
@@ -450,6 +472,8 @@ def sort_one_region(
                 "num_spikes_qm": int(qm_row.get(metric_map.get("num_spikes"), -1)),
                 "auto_qc_pass": auto_qc_pass,
                 "auto_qc_fail_reasons": auto_qc_fail_reasons,
+                "is_warning_row": False,
+                "warning_message": "",
             }
         )
 
@@ -457,7 +481,7 @@ def sort_one_region(
         f"[INFO] Region {region_name}: found {len(unit_ids)} units, "
         f"QC-passing {len(region_good_spike_times)} units."
     )
-    return region_spike_times, region_good_spike_times, region_meta
+    return region_spike_times, region_good_spike_times, region_meta, None
 
 
 def sort_one_mat_file(subject: str, mat_path: Path):
@@ -492,9 +516,10 @@ def sort_one_mat_file(subject: str, mat_path: Path):
     all_spike_times = {}
     all_good_spike_times = {}
     all_units_meta = []
+    all_warnings = []
 
     for region_name, (ch_start, ch_end) in region_channel_map.items():
-        region_spikes, region_good_spikes, region_meta = sort_one_region(
+        region_spikes, region_good_spikes, region_meta, region_warning = sort_one_region(
             recording_full=recording_full,
             total_duration_s=total_duration_s,
             region_name=region_name,
@@ -505,12 +530,47 @@ def sort_one_mat_file(subject: str, mat_path: Path):
         all_spike_times.update(region_spikes)
         all_good_spike_times.update(region_good_spikes)
         all_units_meta.extend(region_meta)
+        if region_warning:
+            all_warnings.append({"region": region_name, "warning_message": region_warning})
 
     summary_df = pd.DataFrame(all_units_meta)
+    if all_warnings:
+        warning_rows = []
+        for w in all_warnings:
+            warning_rows.append(
+                {
+                    "region": w["region"],
+                    "unit_id": -1,
+                    "global_key": f"{w['region']}_WARNING",
+                    "best_channel_1idx": -1,
+                    "n_spikes": 0,
+                    "mean_fr_hz": 0.0,
+                    "snr": np.nan,
+                    "isi_violation": np.nan,
+                    "firing_rate": np.nan,
+                    "presence_ratio": np.nan,
+                    "num_spikes_qm": -1,
+                    "auto_qc_pass": False,
+                    "auto_qc_fail_reasons": "warning_row",
+                    "is_warning_row": True,
+                    "warning_message": w["warning_message"],
+                }
+            )
+        summary_df = pd.concat([summary_df, pd.DataFrame(warning_rows)], ignore_index=True)
+
+    # Ensure output schema is stable even if no rows exist.
+    for col in UNIT_META_COLUMNS:
+        if col not in summary_df.columns:
+            summary_df[col] = np.nan
+    summary_df = summary_df[UNIT_META_COLUMNS]
+
     summary_csv = session_output / "all_regions_units_summary.csv"
     summary_df.to_csv(summary_csv, index=False)
     good_summary_csv = session_output / "good_units_summary.csv"
-    summary_df[summary_df["auto_qc_pass"]].to_csv(good_summary_csv, index=False)
+    if "auto_qc_pass" in summary_df.columns:
+        summary_df[summary_df["auto_qc_pass"]].to_csv(good_summary_csv, index=False)
+    else:
+        pd.DataFrame(columns=UNIT_META_COLUMNS).to_csv(good_summary_csv, index=False)
 
     all_spikes_pkl = session_output / "all_spike_times.pkl"
     with all_spikes_pkl.open("wb") as f:
