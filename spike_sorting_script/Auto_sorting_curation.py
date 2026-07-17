@@ -18,6 +18,7 @@ the source analyzer folder before any merge operation.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import shutil
 from datetime import datetime
@@ -27,7 +28,6 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import spikeinterface.full as si
 from spikeinterface.curation import (
-    auto_merge_units,
     bombcell_get_default_thresholds,
     bombcell_label_units,
     compute_merge_unit_groups,
@@ -173,12 +173,18 @@ def safe_rmtree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def copy_analyzer_tree(src: Path, dst: Path, overwrite: bool) -> None:
+def copy_analyzer(source_analyzer, dst: Path, overwrite: bool):
+    """Create an independent analyzer copy using SpikeInterface's save API.
+
+    A plain shutil.copytree() breaks analyzers whose serialized recording paths
+    are relative to the analyzer folder. save_as() rewrites the analyzer
+    metadata for the new location and returns the copied analyzer directly.
+    """
     if dst.exists():
         if not overwrite:
             raise FileExistsError(f"Destination exists: {dst}")
         safe_rmtree(dst)
-    shutil.copytree(src, dst)
+    return source_analyzer.save_as(format="binary_folder", folder=str(dst))
 
 
 def compute_required_extensions(analyzer) -> None:
@@ -190,10 +196,11 @@ def compute_required_extensions(analyzer) -> None:
         ("templates", {}),
         ("noise_levels", {}),
         ("spike_amplitudes", {}),
+        ("spike_locations", {}),
         ("unit_locations", {}),
         ("correlograms", {}),
         ("template_similarity", {}),
-        ("quality_metrics", {}),
+        ("principal_components", {}),
     ]
     for ext_name, kwargs in steps:
         try:
@@ -203,6 +210,49 @@ def compute_required_extensions(analyzer) -> None:
             analyzer.compute(ext_name, **kwargs)
         except Exception as exc:  # pylint: disable=broad-except
             print(f"    [WARN] Could not compute extension '{ext_name}': {exc}")
+
+
+def compute_labeling_metrics(analyzer) -> None:
+    """Compute the complete quality/template metric sets used by the models.
+
+    The sorting scripts computed only a small QC subset. Bombcell and
+    UnitRefine require additional waveform, amplitude, drift, and template
+    metrics, so merely seeing an existing quality_metrics extension is not
+    sufficient.
+    """
+    compute_required_extensions(analyzer)
+
+    analyzer.compute(
+        "template_metrics",
+        include_multi_channel_metrics=True,
+        delete_existing_metrics=False,
+    )
+    analyzer.compute(
+        "quality_metrics",
+        metric_names=None,
+        delete_existing_metrics=False,
+    )
+
+
+def run_unitrefine(analyzer, args: argparse.Namespace) -> pd.DataFrame:
+    """Call UnitRefine across SpikeInterface API naming changes."""
+    parameters = inspect.signature(unitrefine_label_units).parameters
+    kwargs: Dict[str, Any] = {"sorting_analyzer": analyzer}
+
+    if "noise_neural_classifier" in parameters:
+        kwargs["noise_neural_classifier"] = args.unitrefine_noise_neural_model
+        kwargs["sua_mua_classifier"] = args.unitrefine_sua_mua_model
+    elif "noise_neural_model" in parameters:
+        kwargs["noise_neural_model"] = args.unitrefine_noise_neural_model
+        kwargs["sua_mua_model"] = args.unitrefine_sua_mua_model
+    else:
+        raise RuntimeError(
+            "Unsupported unitrefine_label_units signature: "
+            f"{inspect.signature(unitrefine_label_units)}"
+        )
+
+    print(f"    [INFO] UnitRefine API: {inspect.signature(unitrefine_label_units)}")
+    return unitrefine_label_units(**kwargs)
 
 
 def persist_analyzer(analyzer, folder: Path, overwrite: bool):
@@ -246,10 +296,9 @@ def run_single_method(
 ) -> Dict[str, Any]:
     method_root.mkdir(parents=True, exist_ok=True)
     input_copy = method_root / "analyzer_input_copy"
-    copy_analyzer_tree(source_analyzer_path, input_copy, overwrite=args.overwrite)
-
-    analyzer = si.load_sorting_analyzer(str(input_copy))
-    compute_required_extensions(analyzer)
+    source_analyzer = si.load_sorting_analyzer(str(source_analyzer_path))
+    analyzer = copy_analyzer(source_analyzer, input_copy, overwrite=args.overwrite)
+    compute_labeling_metrics(analyzer)
 
     # Optional cleaning step from curation tutorial.
     try:
@@ -257,12 +306,13 @@ def run_single_method(
             analyzer.sorting,
             censored_period_ms=args.duplicate_censored_ms,
         )
-        analyzer = si.create_sorting_analyzer(
+        dedup_analyzer = si.create_sorting_analyzer(
             sorting=dedup_sorting,
             recording=analyzer.recording,
             format="memory",
         )
-        compute_required_extensions(analyzer)
+        compute_labeling_metrics(dedup_analyzer)
+        analyzer = dedup_analyzer
     except Exception as exc:  # pylint: disable=broad-except
         print(f"    [WARN] remove_duplicated_spikes step skipped: {exc}")
 
@@ -273,8 +323,9 @@ def run_single_method(
             duplicate_threshold=args.redundant_threshold,
             remove_strategy=args.redundant_remove_strategy,
         )
-        analyzer = analyzer.select_units(clean_sorting.unit_ids)
-        compute_required_extensions(analyzer)
+        nonredundant_analyzer = analyzer.select_units(clean_sorting.unit_ids)
+        compute_labeling_metrics(nonredundant_analyzer)
+        analyzer = nonredundant_analyzer
     except Exception as exc:  # pylint: disable=broad-except
         print(f"    [WARN] remove_redundant_units step skipped: {exc}")
 
@@ -294,7 +345,7 @@ def run_single_method(
             censored_period_ms=args.merge_censored_period_ms,
             merging_mode=args.merge_mode,
         )
-        compute_required_extensions(analyzer)
+        compute_labeling_metrics(analyzer)
 
     curated_analyzer_path = method_root / "analyzer_curated"
     analyzer = persist_analyzer(analyzer, curated_analyzer_path, overwrite=args.overwrite)
@@ -304,13 +355,11 @@ def run_single_method(
             sorting_analyzer=analyzer,
             thresholds=bombcell_get_default_thresholds(),
         )
+        if "label" in labels_df.columns and "bombcell_label" not in labels_df.columns:
+            labels_df = labels_df.rename(columns={"label": "bombcell_label"})
         label_column = "bombcell_label"
     elif method == "unitrefine":
-        labels_df = unitrefine_label_units(
-            sorting_analyzer=analyzer,
-            noise_neural_model=args.unitrefine_noise_neural_model,
-            sua_mua_model=args.unitrefine_sua_mua_model,
-        )
+        labels_df = run_unitrefine(analyzer, args)
         label_column = "unitrefine_label"
     else:
         raise ValueError(f"Unsupported method: {method}")
