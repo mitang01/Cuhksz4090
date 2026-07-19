@@ -3,7 +3,7 @@
 Run automatic curation on existing SortingAnalyzer outputs.
 
 This script processes existing sorting result folders (it does NOT run sorting):
-  /share/home/mitan/spike_sorting/mountainsort4/sorting_results_*
+  /share/home/mitan/spike_sorting/mountainsort4/sorting_results_*_Temp_*
 
 For each session folder and region analyzer, it runs two independent curation
 branches in parallel for comparison:
@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 import spikeinterface.full as si
 from spikeinterface.curation import (
@@ -38,10 +39,11 @@ from spikeinterface.curation import (
 
 
 DEFAULT_ANALYZER_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
-DEFAULT_SESSION_GLOB = "sorting_results_*"
+DEFAULT_SESSION_GLOB = "sorting_results_*_Temp_*"
 DEFAULT_REGIONS = ["ATL", "HG", "VMPFC", "Amygdala"]
 DEFAULT_METHODS = ["bombcell", "unitrefine"]
 DEFAULT_OUTPUT_SUBDIR = "auto_curation"
+DEFAULT_GAIN_TO_UV = 0.195
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +72,10 @@ def parse_args() -> argparse.Namespace:
         "--session-glob",
         type=str,
         default=DEFAULT_SESSION_GLOB,
-        help=f"Glob used for auto-discovery when --session-folders is omitted (default: {DEFAULT_SESSION_GLOB})",
+        help=(
+            "Glob used for auto-discovery when --session-folders is omitted. "
+            f"Only names containing '_Temp_' are accepted (default: {DEFAULT_SESSION_GLOB})."
+        ),
     )
     parser.add_argument(
         "--regions",
@@ -145,6 +150,15 @@ def parse_args() -> argparse.Namespace:
         default="SpikeInterface/UnitRefine_sua_mua_classifier",
         help="HuggingFace model id for UnitRefine sua-vs-mua classifier.",
     )
+    parser.add_argument(
+        "--gain-to-uv",
+        type=float,
+        default=DEFAULT_GAIN_TO_UV,
+        help=(
+            "Microvolts per ADC count used to repair raw-MAT analyzers that were "
+            f"saved without scaling metadata (default: {DEFAULT_GAIN_TO_UV})."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -153,7 +167,7 @@ def discover_session_roots(analyzer_root: Path, args: argparse.Namespace) -> Lis
         roots = [analyzer_root / name for name in args.session_folders]
     else:
         roots = sorted(p for p in analyzer_root.glob(args.session_glob) if p.is_dir())
-    return [p for p in roots if p.is_dir()]
+    return [p for p in roots if p.is_dir() and "_Temp_" in p.name]
 
 
 def resolve_region_analyzer_path(session_root: Path, region: str) -> Path:
@@ -185,6 +199,46 @@ def copy_analyzer(source_analyzer, dst: Path, overwrite: bool):
             raise FileExistsError(f"Destination exists: {dst}")
         safe_rmtree(dst)
     return source_analyzer.save_as(format="binary_folder", folder=str(dst))
+
+
+def ensure_uv_scaled_analyzer(analyzer, gain_to_uv: float):
+    """Return an analyzer whose templates/traces are expressed in microvolts.
+
+    Raw-MAT sorting outputs were built from int16 ADC counts without recording
+    gain/offset properties, so SpikeInterface stored them with
+    return_in_uV=False. Template metrics in SpikeInterface 0.104 request
+    return_in_uV=True and reject such analyzers. Rebuilding after attaching the
+    known Intan gain fixes the metadata and ensures newly computed templates
+    are actually scaled rather than merely relabeled.
+    """
+    if bool(getattr(analyzer, "return_in_uV", False)):
+        return analyzer
+
+    if gain_to_uv <= 0:
+        raise ValueError(f"--gain-to-uv must be positive, got {gain_to_uv}")
+
+    try:
+        recording = analyzer.recording
+    except Exception as exc:
+        raise RuntimeError(
+            "Analyzer is unscaled and its recording could not be loaded; "
+            "cannot rebuild templates in microvolts."
+        ) from exc
+
+    recording.set_channel_gains(gain_to_uv)
+    recording.set_channel_offsets(0.0)
+    print(
+        "    [INFO] Rebuilding analyzer with microvolt scaling: "
+        f"gain_to_uV={gain_to_uv}, offset_to_uV=0.0"
+    )
+
+    return si.create_sorting_analyzer(
+        sorting=analyzer.sorting,
+        recording=recording,
+        format="memory",
+        sparsity=analyzer.sparsity,
+        return_in_uV=True,
+    )
 
 
 def compute_required_extensions(analyzer) -> None:
@@ -298,6 +352,7 @@ def run_single_method(
     input_copy = method_root / "analyzer_input_copy"
     source_analyzer = si.load_sorting_analyzer(str(source_analyzer_path))
     analyzer = copy_analyzer(source_analyzer, input_copy, overwrite=args.overwrite)
+    analyzer = ensure_uv_scaled_analyzer(analyzer, gain_to_uv=args.gain_to_uv)
     compute_labeling_metrics(analyzer)
 
     # Optional cleaning step from curation tutorial.
