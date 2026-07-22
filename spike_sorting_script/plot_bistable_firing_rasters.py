@@ -238,8 +238,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--trigger-channel", type=int, default=None, help="Force 1-based TTL channel.")
     parser.add_argument("--sample-rate", type=float, default=30000.0)
-    parser.add_argument("--t-before", type=float, default=0.5)
-    parser.add_argument("--t-after", type=float, default=1.0)
+    parser.add_argument(
+        "--t-before",
+        type=float,
+        default=0.5,
+        help="Seconds before sound onset (paper-equivalent fixation period: 0.5).",
+    )
+    parser.add_argument(
+        "--t-after",
+        type=float,
+        default=1.35,
+        help="Seconds after sound onset (paper-equivalent 1.85-s total window: 1.35).",
+    )
     parser.add_argument("--bin-ms", type=float, default=10.0)
     parser.add_argument("--gaussian-sigma-ms", type=float, default=150.0)
     parser.add_argument(
