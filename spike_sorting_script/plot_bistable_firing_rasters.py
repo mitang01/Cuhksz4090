@@ -12,6 +12,7 @@ sources for sub4/sub5/sub6.  It pools trial-averaged single-unit PSTHs either
 over all four regions or within one region and writes exactly 15 non-interactive
 PNG figures: syllable, word (every second sound), and sub4 session02 response
 switches, each for all regions and ATL/HG/VMPFC/Amygdala.
+Bombcell units labeled good or MUA are included; noise units remain excluded.
 
 Firing rates use 10-ms bins and a 150-ms Gaussian kernel by default.  The SEM
 is across units.  Raster rows are unit-event observations; a deterministic
@@ -62,7 +63,7 @@ DEFAULT_RAW_ROOTS = [
 REGIONS = ("ATL", "HG", "VMPFC", "Amygdala")
 ANALYSES = ("syllable", "word", "switch")
 SCOPE_NAMES = ("all_regions", *REGIONS)
-DEFAULT_ACCEPTED_LABELS = ("good", "sua", "single", "single_unit")
+DEFAULT_ACCEPTED_LABELS = ("good", "mua", "sua", "single", "single_unit")
 STIMULUS_DURATIONS_MS = {
     "bai": 480.77,
     "bi": 545.40,
@@ -226,7 +227,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--accepted-label",
         action="append",
         default=None,
-        help="Accepted Bombcell label; repeatable (default: good/SUA/single-unit aliases).",
+        help=(
+            "Accepted Bombcell label; repeatable "
+            "(default: good, MUA, and single-unit aliases; noise remains excluded)."
+        ),
     )
     parser.add_argument("--trigger-channel", type=int, default=None, help="Force 1-based TTL channel.")
     parser.add_argument("--sample-rate", type=float, default=30000.0)
