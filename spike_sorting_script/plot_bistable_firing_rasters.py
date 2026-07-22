@@ -1129,8 +1129,12 @@ def plot_rate_and_raster(
             labeled_directions.add(direction)
         rate_ax.text(
             0.01,
-            0.98,
-            "Two-sided one-sample t-test on ΔFR from −500–0 ms baseline",
+            0.90,
+            (
+                "Two-sided one-sample t-test on ΔFR from "
+                f"{statistics['baseline_start_s'] * 1000:g}–"
+                f"{statistics['baseline_end_s'] * 1000:g} ms baseline"
+            ),
             transform=rate_ax.transAxes,
             ha="left",
             va="top",
