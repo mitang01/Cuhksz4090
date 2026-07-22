@@ -39,6 +39,7 @@ import h5py
 import numpy as np
 from scipy.io import loadmat
 from scipy.ndimage import gaussian_filter1d
+from scipy.stats import f as f_distribution
 
 import matplotlib
 
@@ -98,6 +99,7 @@ class EventGroups:
     syllable: dict[str, np.ndarray]
     word: dict[str, np.ndarray]
     switch: dict[str, np.ndarray]
+    factor_levels: dict[str, dict[str, tuple[str, str]]]
     stimulus_column: str
     condition_column: str | None
     response_column: str | None
@@ -118,6 +120,8 @@ class RateRasterAccumulator:
     n_units: int = 0
     n_events: int = 0
     _raster_heap: list[tuple[int, int, np.ndarray]] = field(default_factory=list)
+    _event_rate_sums: dict[str, np.ndarray] = field(default_factory=dict)
+    _event_unit_counts: dict[str, int] = field(default_factory=dict)
     _serial: int = 0
 
     def __post_init__(self) -> None:
@@ -130,6 +134,7 @@ class RateRasterAccumulator:
         spikes_s: np.ndarray,
         events_s: np.ndarray,
         observation_prefix: str,
+        event_prefix: str,
     ) -> None:
         """Add one unit, averaging its PSTH over all supplied events."""
         if events_s.size == 0:
@@ -151,6 +156,12 @@ class RateRasterAccumulator:
                 truncate=4.0,
             )
             per_event_rates.append(rate)
+            event_key = f"{event_prefix}|{self.category}|{event_index}"
+            if event_key not in self._event_rate_sums:
+                self._event_rate_sums[event_key] = np.zeros_like(rate)
+                self._event_unit_counts[event_key] = 0
+            self._event_rate_sums[event_key] += rate
+            self._event_unit_counts[event_key] += 1
             self._offer_raster_row(
                 relative,
                 f"{observation_prefix}|{self.category}|{event_index}",
@@ -190,6 +201,13 @@ class RateRasterAccumulator:
         ordered = sorted(self._raster_heap, key=lambda item: (-item[0], item[1]))
         return [item[2] for item in ordered]
 
+    def population_event_rates(self) -> list[tuple[str, np.ndarray]]:
+        return [
+            (key, self._event_rate_sums[key] / self._event_unit_counts[key])
+            for key in sorted(self._event_rate_sums)
+            if self._event_unit_counts[key] > 0
+        ]
+
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -224,6 +242,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--t-after", type=float, default=1.0)
     parser.add_argument("--bin-ms", type=float, default=10.0)
     parser.add_argument("--gaussian-sigma-ms", type=float, default=150.0)
+    parser.add_argument(
+        "--anova-point-alpha",
+        type=float,
+        default=0.01,
+        help="Pointwise p threshold used to form temporal ANOVA clusters (paper: 0.01).",
+    )
+    parser.add_argument(
+        "--cluster-alpha",
+        type=float,
+        default=0.01,
+        help="Permutation cluster significance threshold (paper: 0.01).",
+    )
+    parser.add_argument(
+        "--n-permutations",
+        type=int,
+        default=100,
+        help="Number of joint condition/response label permutations (paper: 100).",
+    )
     parser.add_argument("--max-raster-rows", type=int, default=600)
     parser.add_argument("--dpi", type=int, default=200)
     parser.add_argument(
@@ -619,14 +655,22 @@ def extract_triggers(
     )
 
 
-def grouped_times(times: np.ndarray, labels: Sequence[str]) -> dict[str, np.ndarray]:
+def grouped_factor_times(
+    times: Sequence[float],
+    conditions: Sequence[str],
+    responses: Sequence[str],
+) -> tuple[dict[str, np.ndarray], dict[str, tuple[str, str]]]:
     output: dict[str, list[float]] = defaultdict(list)
-    for time, label in zip(times, labels):
+    factors: dict[str, tuple[str, str]] = {}
+    for time, condition, response in zip(times, conditions, responses):
+        label = f"{condition} | {response}"
         output[label].append(float(time))
-    return {
+        factors[label] = (condition, response)
+    groups = {
         label: np.asarray(values, dtype=np.float64)
         for label, values in sorted(output.items(), key=lambda item: item[0])
     }
+    return groups, factors
 
 
 def build_event_groups(
@@ -675,9 +719,11 @@ def build_event_groups(
     triggers = triggers[:usable_pairs]
 
     all_onsets: list[float] = []
-    all_labels: list[str] = []
+    all_conditions: list[str] = []
+    all_responses: list[str] = []
     word_onsets: list[float] = []
-    word_labels: list[str] = []
+    word_conditions: list[str] = []
+    word_responses: list[str] = []
     missing_duration_names: set[str] = set()
     for row_index, row in enumerate(rows):
         pair_index = row_index // 2
@@ -693,12 +739,22 @@ def build_event_groups(
                 continue
             onset = float(triggers[pair_index] + duration_ms / 1000.0)
             word_onsets.append(onset)
-            word_labels.append(
+            word_conditions.append(
                 condition_label(row.get(condition_column, "")) if condition_column else "all stimuli"
             )
+            word_responses.append(
+                (row.get(response_column, "").strip() or "missing response")
+                if response_column
+                else "all responses"
+            )
         all_onsets.append(onset)
-        all_labels.append(
+        all_conditions.append(
             condition_label(row.get(condition_column, "")) if condition_column else "all stimuli"
+        )
+        all_responses.append(
+            (row.get(response_column, "").strip() or "missing response")
+            if response_column
+            else "all responses"
         )
     if missing_duration_names:
         raise KeyError(
@@ -707,7 +763,8 @@ def build_event_groups(
         )
 
     switch_times: list[float] = []
-    switch_labels: list[str] = []
+    switch_conditions: list[str] = []
+    switch_directions: list[str] = []
     if session.subject == "sub4" and session.key == "session02" and response_column:
         previous: str | None = None
         for pair_index in range(usable_pairs):
@@ -716,13 +773,32 @@ def build_event_groups(
                 continue
             if previous is not None and normalize_name(response) != normalize_name(previous):
                 switch_times.append(float(triggers[pair_index]))
-                switch_labels.append(f"{previous} \u2192 {response}")
+                switch_conditions.append(
+                    condition_label(rows[2 * pair_index].get(condition_column, ""))
+                    if condition_column
+                    else "all stimuli"
+                )
+                switch_directions.append(f"{previous} \u2192 {response}")
             previous = response
 
+    syllable, syllable_factors = grouped_factor_times(
+        all_onsets, all_conditions, all_responses
+    )
+    word, word_factors = grouped_factor_times(
+        word_onsets, word_conditions, word_responses
+    )
+    switch, switch_factors = grouped_factor_times(
+        switch_times, switch_conditions, switch_directions
+    )
     groups = EventGroups(
-        syllable=grouped_times(np.asarray(all_onsets), all_labels),
-        word=grouped_times(np.asarray(word_onsets), word_labels),
-        switch=grouped_times(np.asarray(switch_times), switch_labels),
+        syllable=syllable,
+        word=word,
+        switch=switch,
+        factor_levels={
+            "syllable": syllable_factors,
+            "word": word_factors,
+            "switch": switch_factors,
+        },
         stimulus_column=stimulus_column,
         condition_column=condition_column,
         response_column=response_column,
@@ -860,6 +936,7 @@ def add_session_to_accumulators(
                             spikes_s=spikes,
                             events_s=event_times,
                             observation_prefix=f"{session.subject}|{session.key}|{region}|{unit_id}",
+                            event_prefix=f"{session.subject}|{session.key}|{scope}",
                         )
     return unit_qc_rows
 
@@ -869,11 +946,206 @@ def category_colors(categories: Sequence[str]) -> dict[str, Any]:
     return {category: palette(index % 10) for index, category in enumerate(categories)}
 
 
+def sum_contrast(labels: np.ndarray) -> tuple[np.ndarray, list[str]]:
+    levels = sorted({str(value) for value in labels})
+    if len(levels) < 2:
+        return np.empty((labels.size, 0), dtype=np.float64), levels
+    matrix = np.zeros((labels.size, len(levels) - 1), dtype=np.float64)
+    for column, level in enumerate(levels[:-1]):
+        matrix[labels == level, column] = 1.0
+        matrix[labels == levels[-1], column] = -1.0
+    return matrix, levels
+
+
+def residual_sum_squares(design: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, int]:
+    coefficients, _, rank, _ = np.linalg.lstsq(design, values, rcond=None)
+    residuals = values - design @ coefficients
+    return np.sum(residuals * residuals, axis=0), int(rank)
+
+
+def factorial_f_tests(
+    values: np.ndarray,
+    condition: np.ndarray,
+    response: np.ndarray,
+) -> tuple[dict[str, tuple[np.ndarray, np.ndarray]], dict[str, Any]]:
+    """Type-III two-factor ANOVA using sum-to-zero contrasts at every time bin."""
+    condition_matrix, condition_levels = sum_contrast(condition)
+    response_matrix, response_levels = sum_contrast(response)
+    if condition_matrix.shape[1] == 0 or response_matrix.shape[1] == 0:
+        return {}, {
+            "status": "not_estimable",
+            "reason": "both factors require at least two observed levels",
+            "condition_levels": condition_levels,
+            "response_levels": response_levels,
+        }
+    interaction = np.einsum(
+        "ij,ik->ijk", condition_matrix, response_matrix
+    ).reshape(values.shape[0], -1)
+    intercept = np.ones((values.shape[0], 1), dtype=np.float64)
+    blocks = {
+        "condition": condition_matrix,
+        "response": response_matrix,
+        "interaction": interaction,
+    }
+    full_design = np.column_stack((intercept, *blocks.values()))
+    full_rss, full_rank = residual_sum_squares(full_design, values)
+    residual_df = values.shape[0] - full_rank
+    if residual_df <= 0:
+        return {}, {
+            "status": "not_estimable",
+            "reason": "insufficient residual degrees of freedom",
+            "condition_levels": condition_levels,
+            "response_levels": response_levels,
+            "n_observations": int(values.shape[0]),
+            "full_rank": full_rank,
+        }
+    denominator = full_rss / residual_df
+    tests: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for effect in ("condition", "response", "interaction"):
+        reduced_blocks = [
+            block for block_name, block in blocks.items() if block_name != effect
+        ]
+        reduced_design = np.column_stack((intercept, *reduced_blocks))
+        reduced_rss, reduced_rank = residual_sum_squares(reduced_design, values)
+        effect_df = full_rank - reduced_rank
+        if effect_df <= 0:
+            continue
+        numerator = np.maximum(reduced_rss - full_rss, 0.0) / effect_df
+        with np.errstate(divide="ignore", invalid="ignore"):
+            f_values = numerator / denominator
+        f_values = np.where(
+            (denominator == 0) & (numerator > 0), np.inf, f_values
+        )
+        p_values = f_distribution.sf(f_values, effect_df, residual_df)
+        tests[effect] = (f_values, p_values)
+    return tests, {
+        "status": "ok" if tests else "not_estimable",
+        "condition_levels": condition_levels,
+        "response_levels": response_levels,
+        "n_observations": int(values.shape[0]),
+        "residual_df": residual_df,
+    }
+
+
+def temporal_clusters(
+    f_values: np.ndarray,
+    p_values: np.ndarray,
+    point_alpha: float,
+) -> list[tuple[int, int, float]]:
+    significant = np.isfinite(p_values) & (p_values < point_alpha)
+    indices = np.flatnonzero(significant)
+    if indices.size == 0:
+        return []
+    breaks = np.flatnonzero(np.diff(indices) > 1) + 1
+    groups = np.split(indices, breaks)
+    return [
+        (int(group[0]), int(group[-1]), float(np.sum(f_values[group])))
+        for group in groups
+        if group.size
+    ]
+
+
+def cluster_permutation_anova(
+    category_accumulators: dict[str, RateRasterAccumulator],
+    factor_levels: dict[str, tuple[str, str]],
+    point_alpha: float,
+    cluster_alpha: float,
+    n_permutations: int,
+    seed: int,
+) -> dict[str, Any]:
+    """Sliding two-factor ANOVA with max-cluster label permutation correction."""
+    values: list[np.ndarray] = []
+    conditions: list[str] = []
+    responses: list[str] = []
+    session_keys: list[str] = []
+    for category, accumulator in sorted(category_accumulators.items()):
+        factors = factor_levels.get(category)
+        if factors is None:
+            continue
+        for event_key, event_rate in accumulator.population_event_rates():
+            values.append(event_rate)
+            conditions.append(factors[0])
+            responses.append(factors[1])
+            key_parts = event_key.split("|", 2)
+            session_keys.append("|".join(key_parts[:2]))
+    if not values:
+        return {"status": "not_estimable", "reason": "no population event rates"}
+    value_matrix = np.vstack(values)
+    condition_array = np.asarray(conditions, dtype=object)
+    response_array = np.asarray(responses, dtype=object)
+    observed, metadata = factorial_f_tests(
+        value_matrix, condition_array, response_array
+    )
+    if metadata["status"] != "ok":
+        return metadata
+
+    session_array = np.asarray(session_keys, dtype=object)
+    session_groups = [
+        np.flatnonzero(session_array == session_key)
+        for session_key in sorted(set(session_keys))
+    ]
+    rng = np.random.default_rng(seed)
+    null_maxima = {
+        effect: np.zeros(n_permutations, dtype=np.float64) for effect in observed
+    }
+    for permutation_index in range(n_permutations):
+        shuffled_condition = condition_array.copy()
+        shuffled_response = response_array.copy()
+        for group in session_groups:
+            shuffled = rng.permutation(group)
+            shuffled_condition[group] = condition_array[shuffled]
+            shuffled_response[group] = response_array[shuffled]
+        permuted, _ = factorial_f_tests(
+            value_matrix, shuffled_condition, shuffled_response
+        )
+        for effect in observed:
+            if effect not in permuted:
+                continue
+            clusters = temporal_clusters(
+                permuted[effect][0], permuted[effect][1], point_alpha
+            )
+            null_maxima[effect][permutation_index] = max(
+                (cluster[2] for cluster in clusters), default=0.0
+            )
+
+    result: dict[str, Any] = {
+        **metadata,
+        "point_alpha": point_alpha,
+        "cluster_alpha": cluster_alpha,
+        "n_permutations": n_permutations,
+        "effects": {},
+    }
+    for effect, (f_values, p_values) in observed.items():
+        clusters = []
+        for start, end, statistic in temporal_clusters(
+            f_values, p_values, point_alpha
+        ):
+            permutation_p = (
+                1.0 + float(np.count_nonzero(null_maxima[effect] >= statistic))
+            ) / (n_permutations + 1.0)
+            clusters.append(
+                {
+                    "start_index": start,
+                    "end_index": end,
+                    "f_sum": statistic,
+                    "permutation_p": permutation_p,
+                    "significant": bool(permutation_p <= cluster_alpha),
+                }
+            )
+        result["effects"][effect] = {
+            "f_values": f_values,
+            "point_p_values": p_values,
+            "clusters": clusters,
+        }
+    return result
+
+
 def plot_rate_and_raster(
     output_path: Path,
     analysis: str,
     scope: str,
     category_accumulators: dict[str, RateRasterAccumulator],
+    statistics: dict[str, Any],
     edges: np.ndarray,
     dpi: int,
 ) -> None:
@@ -956,6 +1228,50 @@ def plot_rate_and_raster(
         )
     rate_ax.set_xlabel("Time from onset (s)")
     rate_ax.set_ylabel("Firing rate (Hz)\nmean ± SEM across units")
+    effect_colors = {
+        "condition": "0.15",
+        "response": "#7b3294",
+        "interaction": "#008837",
+    }
+    if statistics.get("status") == "ok":
+        for effect_index, effect in enumerate(
+            ("condition", "response", "interaction")
+        ):
+            effect_result = statistics.get("effects", {}).get(effect, {})
+            first_interval = True
+            for cluster in effect_result.get("clusters", []):
+                if not cluster["significant"]:
+                    continue
+                start = edges[int(cluster["start_index"])]
+                end = edges[int(cluster["end_index"]) + 1]
+                rate_ax.axvspan(
+                    start,
+                    end,
+                    color=effect_colors[effect],
+                    alpha=0.08,
+                    linewidth=0,
+                )
+                rate_ax.plot(
+                    [start, end],
+                    [0.98 - 0.045 * effect_index] * 2,
+                    transform=rate_ax.get_xaxis_transform(),
+                    color=effect_colors[effect],
+                    linewidth=4,
+                    solid_capstyle="butt",
+                    label=f"significant {effect}" if first_interval else None,
+                )
+                first_interval = False
+    else:
+        rate_ax.text(
+            0.01,
+            0.98,
+            f"2-factor ANOVA not estimable: {statistics.get('reason', 'insufficient data')}",
+            transform=rate_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="0.35",
+        )
     if categories and any(acc.n_units for acc in category_accumulators.values()):
         rate_ax.legend(frameon=False, fontsize=8, loc="upper right")
     rate_ax.set_xlim(edges[0], edges[-1])
@@ -1010,6 +1326,62 @@ def write_rate_summary(
     write_csv(path, rows)
 
 
+def write_anova_summaries(
+    output_dir: Path,
+    statistics_results: dict[tuple[str, str], dict[str, Any]],
+    edges: np.ndarray,
+) -> None:
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    timecourse_rows: list[dict[str, Any]] = []
+    cluster_rows: list[dict[str, Any]] = []
+    for (analysis, scope), result in sorted(statistics_results.items()):
+        if result.get("status") != "ok":
+            cluster_rows.append(
+                {
+                    "analysis": analysis,
+                    "scope": scope,
+                    "status": result.get("status", "not_estimable"),
+                    "reason": result.get("reason", ""),
+                    "effect": "",
+                    "start_s": "",
+                    "end_s": "",
+                    "f_sum": "",
+                    "permutation_p": "",
+                    "significant": False,
+                }
+            )
+            continue
+        for effect, effect_result in result["effects"].items():
+            for index, time in enumerate(centers):
+                timecourse_rows.append(
+                    {
+                        "analysis": analysis,
+                        "scope": scope,
+                        "effect": effect,
+                        "time_s": f"{time:.6f}",
+                        "f_value": f"{effect_result['f_values'][index]:.8g}",
+                        "point_p": f"{effect_result['point_p_values'][index]:.8g}",
+                    }
+                )
+            for cluster in effect_result["clusters"]:
+                cluster_rows.append(
+                    {
+                        "analysis": analysis,
+                        "scope": scope,
+                        "status": "ok",
+                        "reason": "",
+                        "effect": effect,
+                        "start_s": f"{edges[cluster['start_index']]:.6f}",
+                        "end_s": f"{edges[cluster['end_index'] + 1]:.6f}",
+                        "f_sum": f"{cluster['f_sum']:.8g}",
+                        "permutation_p": f"{cluster['permutation_p']:.8g}",
+                        "significant": cluster["significant"],
+                    }
+                )
+    write_csv(output_dir / "sliding_anova_timecourse.csv", timecourse_rows)
+    write_csv(output_dir / "cluster_significance.csv", cluster_rows)
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if args.sample_rate <= 0:
         raise ValueError("--sample-rate must be positive")
@@ -1019,6 +1391,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-raster-rows cannot be negative")
     if args.trigger_channel is not None and args.trigger_channel < 1:
         raise ValueError("--trigger-channel must be at least 1")
+    if not 0 < args.anova_point_alpha < 1:
+        raise ValueError("--anova-point-alpha must be between 0 and 1")
+    if not 0 < args.cluster_alpha < 1:
+        raise ValueError("--cluster-alpha must be between 0 and 1")
+    if args.n_permutations < 1:
+        raise ValueError("--n-permutations must be at least 1")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1054,6 +1432,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for label in (args.accepted_label or list(DEFAULT_ACCEPTED_LABELS))
         }
         accumulators: dict[tuple[str, str, str], RateRasterAccumulator] = {}
+        factor_levels_by_analysis: dict[str, dict[str, tuple[str, str]]] = {
+            analysis: {} for analysis in ANALYSES
+        }
         session_qc_rows: list[dict[str, Any]] = []
         unit_qc_rows: list[dict[str, Any]] = []
         for session in sessions:
@@ -1091,6 +1472,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **trigger_qc,
             }
             session_qc_rows.append(row)
+            for analysis, factor_mapping in event_groups.factor_levels.items():
+                for category, factors in factor_mapping.items():
+                    previous = factor_levels_by_analysis[analysis].get(category)
+                    if previous is not None and previous != factors:
+                        raise ValueError(
+                            f"Inconsistent factor coding for category '{category}': "
+                            f"{previous} versus {factors}"
+                        )
+                    factor_levels_by_analysis[analysis][category] = factors
             try:
                 unit_qc_rows.extend(
                     add_session_to_accumulators(
@@ -1113,6 +1503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise RuntimeError("No analyzers contributed units; see session_qc.csv")
 
         figure_paths: list[Path] = []
+        statistics_results: dict[tuple[str, str], dict[str, Any]] = {}
         for analysis in ANALYSES:
             for scope in SCOPE_NAMES:
                 category_accumulators = {
@@ -1120,17 +1511,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for (item_analysis, item_scope, category), accumulator in accumulators.items()
                     if item_analysis == analysis and item_scope == scope
                 }
+                seed_text = f"{analysis}|{scope}|cluster-permutation"
+                seed = int.from_bytes(
+                    hashlib.blake2b(seed_text.encode(), digest_size=4).digest(), "big"
+                )
+                statistics = cluster_permutation_anova(
+                    category_accumulators=category_accumulators,
+                    factor_levels=factor_levels_by_analysis[analysis],
+                    point_alpha=float(args.anova_point_alpha),
+                    cluster_alpha=float(args.cluster_alpha),
+                    n_permutations=int(args.n_permutations),
+                    seed=seed,
+                )
+                statistics_results[(analysis, scope)] = statistics
                 output_path = output_dir / f"{analysis}_{scope}.png"
                 plot_rate_and_raster(
                     output_path=output_path,
                     analysis=analysis,
                     scope=scope,
                     category_accumulators=category_accumulators,
+                    statistics=statistics,
                     edges=edges,
                     dpi=int(args.dpi),
                 )
                 figure_paths.append(output_path)
         write_rate_summary(output_dir / "population_rate_summary.csv", accumulators, edges)
+        write_anova_summaries(output_dir, statistics_results, edges)
         run_info = {
             "figures": [str(path) for path in figure_paths],
             "figure_count": len(figure_paths),
@@ -1138,6 +1544,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "rate_definition": (
                 f"{args.bin_ms:g}-ms spike-count bins, Gaussian sigma="
                 f"{args.gaussian_sigma_ms:g} ms; trials averaged within unit, then units averaged"
+            ),
+            "significance_test": (
+                "sliding two-factor Type-III ANOVA (condition × mapped_response) at "
+                f"{args.bin_ms:g}-ms steps; pointwise cluster-forming p < "
+                f"{args.anova_point_alpha:g}; {args.n_permutations} joint label "
+                f"permutations within session; max-cluster summed-F alpha="
+                f"{args.cluster_alpha:g}"
             ),
             "raster_definition": (
                 "rows are deterministic sampled unit-event observations; raster subsampling "
