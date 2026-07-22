@@ -3,12 +3,12 @@
 Run automatic curation on existing SortingAnalyzer outputs.
 
 This script processes existing sorting result folders (it does NOT run sorting):
-  /share/home/mitan/spike_sorting/mountainsort4/sorting_results_*_Temp_*
+  /share/home/mitan/spike_sorting/mountainsort4/sorting_results_*
 
-For each session folder and region analyzer, it runs two independent curation
-branches in parallel for comparison:
-  1) Bombcell labeling
-  2) UnitRefine labeling
+For each session folder and region analyzer, it runs Bombcell labeling with a
+project-specific two-metric threshold:
+  - num_spikes > 100
+  - isi_violations_ratio < 0.02
 
 Important:
 Merges are irreversible, so each method starts from its own physical copy of
@@ -18,40 +18,50 @@ the source analyzer folder before any merge operation.
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
 import spikeinterface.full as si
 from spikeinterface.curation import (
-    bombcell_get_default_thresholds,
     bombcell_label_units,
     compute_merge_unit_groups,
     remove_duplicated_spikes,
     remove_redundant_units,
-    unitrefine_label_units,
 )
 
 
 DEFAULT_ANALYZER_ROOT = Path("/share/home/mitan/spike_sorting/mountainsort4")
-DEFAULT_SESSION_GLOB = "sorting_results_*_Temp_*"
+DEFAULT_SESSION_GLOB = "sorting_results_*"
 DEFAULT_REGIONS = ["ATL", "HG", "VMPFC", "Amygdala"]
-DEFAULT_METHODS = ["bombcell", "unitrefine"]
 DEFAULT_OUTPUT_SUBDIR = "auto_curation"
 DEFAULT_GAIN_TO_UV = 0.195
+# SpikeInterface's threshold API uses inclusive >= / <= comparisons. Use the
+# next valid integer/float bounds to implement the requested strict > / < rules.
+BOMBCELL_THRESHOLDS = {
+    "noise": {},
+    "mua": {
+        "num_spikes": {"greater": 101, "less": None},
+        "isi_violations_ratio": {
+            "greater": None,
+            "less": float(np.nextafter(0.02, -np.inf)),
+        },
+    },
+    "non-somatic": {},
+}
+BOMBCELL_LABELING_RULES = {
+    "num_spikes": "> 100",
+    "isi_violations_ratio": "< 0.02",
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Run automatic curation on existing SortingAnalyzer folders with "
-            "parallel Bombcell and UnitRefine branches."
-        )
+        description="Run Bombcell curation on existing SortingAnalyzer folders."
     )
     parser.add_argument(
         "--analyzer-root",
@@ -74,7 +84,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SESSION_GLOB,
         help=(
             "Glob used for auto-discovery when --session-folders is omitted. "
-            f"Only names containing '_Temp_' are accepted (default: {DEFAULT_SESSION_GLOB})."
+            f"Default: {DEFAULT_SESSION_GLOB}"
         ),
     )
     parser.add_argument(
@@ -82,13 +92,6 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=DEFAULT_REGIONS,
         help="Regions to process. Default: ATL HG VMPFC Amygdala",
-    )
-    parser.add_argument(
-        "--methods",
-        nargs="*",
-        default=DEFAULT_METHODS,
-        choices=DEFAULT_METHODS,
-        help="Auto-label methods to run. Default: bombcell unitrefine",
     )
     parser.add_argument(
         "--output-subdir",
@@ -139,18 +142,6 @@ def parse_args() -> argparse.Namespace:
         help="merge_units merging_mode (default: soft).",
     )
     parser.add_argument(
-        "--unitrefine-noise-neural-model",
-        type=str,
-        default="SpikeInterface/UnitRefine_noise_neural_classifier",
-        help="HuggingFace model id for UnitRefine noise-vs-neural classifier.",
-    )
-    parser.add_argument(
-        "--unitrefine-sua-mua-model",
-        type=str,
-        default="SpikeInterface/UnitRefine_sua_mua_classifier",
-        help="HuggingFace model id for UnitRefine sua-vs-mua classifier.",
-    )
-    parser.add_argument(
         "--gain-to-uv",
         type=float,
         default=DEFAULT_GAIN_TO_UV,
@@ -167,7 +158,7 @@ def discover_session_roots(analyzer_root: Path, args: argparse.Namespace) -> Lis
         roots = [analyzer_root / name for name in args.session_folders]
     else:
         roots = sorted(p for p in analyzer_root.glob(args.session_glob) if p.is_dir())
-    return [p for p in roots if p.is_dir() and "_Temp_" in p.name]
+    return [p for p in roots if p.is_dir()]
 
 
 def resolve_region_analyzer_path(session_root: Path, region: str) -> Path:
@@ -267,12 +258,11 @@ def compute_required_extensions(analyzer) -> None:
 
 
 def compute_labeling_metrics(analyzer) -> None:
-    """Compute the complete quality/template metric sets used by the models.
+    """Compute quality/template metrics used by curation and merging.
 
     The sorting scripts computed only a small QC subset. Bombcell and
-    UnitRefine require additional waveform, amplitude, drift, and template
-    metrics, so merely seeing an existing quality_metrics extension is not
-    sufficient.
+    auto-merging require additional waveform and template extensions, so merely
+    seeing an existing quality_metrics extension is not sufficient.
     """
     compute_required_extensions(analyzer)
 
@@ -286,27 +276,6 @@ def compute_labeling_metrics(analyzer) -> None:
         metric_names=None,
         delete_existing_metrics=False,
     )
-
-
-def run_unitrefine(analyzer, args: argparse.Namespace) -> pd.DataFrame:
-    """Call UnitRefine across SpikeInterface API naming changes."""
-    parameters = inspect.signature(unitrefine_label_units).parameters
-    kwargs: Dict[str, Any] = {"sorting_analyzer": analyzer}
-
-    if "noise_neural_classifier" in parameters:
-        kwargs["noise_neural_classifier"] = args.unitrefine_noise_neural_model
-        kwargs["sua_mua_classifier"] = args.unitrefine_sua_mua_model
-    elif "noise_neural_model" in parameters:
-        kwargs["noise_neural_model"] = args.unitrefine_noise_neural_model
-        kwargs["sua_mua_model"] = args.unitrefine_sua_mua_model
-    else:
-        raise RuntimeError(
-            "Unsupported unitrefine_label_units signature: "
-            f"{inspect.signature(unitrefine_label_units)}"
-        )
-
-    print(f"    [INFO] UnitRefine API: {inspect.signature(unitrefine_label_units)}")
-    return unitrefine_label_units(**kwargs)
 
 
 def persist_analyzer(analyzer, folder: Path, overwrite: bool):
@@ -342,12 +311,12 @@ def write_dataframe(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path, index=True)
 
 
-def run_single_method(
-    method: str,
+def run_bombcell(
     source_analyzer_path: Path,
     method_root: Path,
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
+    method = "bombcell"
     method_root.mkdir(parents=True, exist_ok=True)
     input_copy = method_root / "analyzer_input_copy"
     source_analyzer = si.load_sorting_analyzer(str(source_analyzer_path))
@@ -405,19 +374,14 @@ def run_single_method(
     curated_analyzer_path = method_root / "analyzer_curated"
     analyzer = persist_analyzer(analyzer, curated_analyzer_path, overwrite=args.overwrite)
 
-    if method == "bombcell":
-        labels_df = bombcell_label_units(
-            sorting_analyzer=analyzer,
-            thresholds=bombcell_get_default_thresholds(),
-        )
-        if "label" in labels_df.columns and "bombcell_label" not in labels_df.columns:
-            labels_df = labels_df.rename(columns={"label": "bombcell_label"})
-        label_column = "bombcell_label"
-    elif method == "unitrefine":
-        labels_df = run_unitrefine(analyzer, args)
-        label_column = "unitrefine_label"
-    else:
-        raise ValueError(f"Unsupported method: {method}")
+    labels_df = bombcell_label_units(
+        sorting_analyzer=analyzer,
+        thresholds=BOMBCELL_THRESHOLDS,
+        label_non_somatic=False,
+    )
+    if "label" in labels_df.columns and "bombcell_label" not in labels_df.columns:
+        labels_df = labels_df.rename(columns={"label": "bombcell_label"})
+    label_column = "bombcell_label"
 
     labels_csv = method_root / f"{method}_labels.csv"
     write_dataframe(labels_df, labels_csv)
@@ -467,30 +431,28 @@ def process_session_region(
     output_root = session_root / region / args.output_subdir
     output_root.mkdir(parents=True, exist_ok=True)
 
-    for method in args.methods:
-        method_root = output_root / method
-        print(f"  [START] {session_root.name}/{region} :: {method}")
-        try:
-            method_summary = run_single_method(
-                method=method,
-                source_analyzer_path=analyzer_path,
-                method_root=method_root,
-                args=args,
-            )
-            result["methods"].append(method_summary)
-            print(f"  [OK] {session_root.name}/{region} :: {method}")
-        except Exception as exc:  # pylint: disable=broad-except
-            result["methods"].append(
-                {
-                    "method": method,
-                    "status": "error",
-                    "error": repr(exc),
-                }
-            )
-            print(f"  [ERROR] {session_root.name}/{region} :: {method}: {exc}")
-
-    statuses = [m.get("status", "ok") for m in result["methods"]]
-    result["status"] = "ok" if all(s != "error" for s in statuses) else "partial_error"
+    method = "bombcell"
+    method_root = output_root / method
+    print(f"  [START] {session_root.name}/{region} :: {method}")
+    try:
+        method_summary = run_bombcell(
+            source_analyzer_path=analyzer_path,
+            method_root=method_root,
+            args=args,
+        )
+        result["methods"].append(method_summary)
+        result["status"] = "ok"
+        print(f"  [OK] {session_root.name}/{region} :: {method}")
+    except Exception as exc:  # pylint: disable=broad-except
+        result["methods"].append(
+            {
+                "method": method,
+                "status": "error",
+                "error": repr(exc),
+            }
+        )
+        result["status"] = "error"
+        print(f"  [ERROR] {session_root.name}/{region} :: {method}: {exc}")
     return result
 
 
@@ -510,7 +472,8 @@ def main() -> None:
     print(f"[INFO] analyzer_root: {analyzer_root}")
     print(f"[INFO] sessions found: {len(session_roots)}")
     print(f"[INFO] regions: {args.regions}")
-    print(f"[INFO] methods: {args.methods}")
+    print("[INFO] method: bombcell")
+    print(f"[INFO] Bombcell labeling rules: {BOMBCELL_LABELING_RULES}")
     print(f"[INFO] overwrite: {args.overwrite}")
 
     run_results = []
@@ -526,7 +489,9 @@ def main() -> None:
         "analyzer_root": str(analyzer_root),
         "session_count": len(session_roots),
         "regions": args.regions,
-        "methods": args.methods,
+        "methods": ["bombcell"],
+        "bombcell_labeling_rules": BOMBCELL_LABELING_RULES,
+        "bombcell_runtime_thresholds": BOMBCELL_THRESHOLDS,
         "results": run_results,
     }
     log_path = analyzer_root / f"auto_sorting_curation_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
