@@ -31,8 +31,9 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from itertools import chain
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Iterable, Sequence
 
 import h5py
 import numpy as np
@@ -301,11 +302,15 @@ def index_trigger_sources(raw_roots: Sequence[Path]) -> dict[tuple[str, str], li
     for root in raw_roots:
         if not root.exists():
             continue
-        candidates: Iterator[Path]
         if root.is_file():
-            candidates = iter([root])
+            candidates: Iterable[Path] = [root]
         else:
-            candidates = root.rglob("*")
+            mat_candidates: Iterable[Path] = root.rglob("*.mat")
+            if "sub4" in str(root).lower() or root == DEFAULT_LOG_ROOT:
+                legacy_candidates: Iterable[Path] = root.rglob("bistable_sub4_session*")
+                candidates = chain(mat_candidates, legacy_candidates)
+            else:
+                candidates = mat_candidates
         for path in candidates:
             if path in seen or not path.is_file():
                 continue
@@ -572,6 +577,8 @@ def extract_triggers(
     sample_rate: float,
     forced_channel_1based: int | None,
 ) -> tuple[np.ndarray, int, list[int]]:
+    channel_number_offset = 0
+    forced_candidate_channel = forced_channel_1based
     if path.suffix.lower() == ".mat":
         digital, timestamps, mat_sample_rate = load_mat_digital(path)
         rate = mat_sample_rate if mat_sample_rate > 0 else sample_rate
@@ -585,6 +592,9 @@ def extract_triggers(
     else:
         # Legacy sub4 files were sorted as 80-channel int16 streams.  Only the
         # unassigned channels 65-80 are considered TTL candidates.
+        channel_number_offset = 64
+        if forced_channel_1based is not None and forced_channel_1based > 16:
+            forced_candidate_channel = forced_channel_1based - channel_number_offset
         raw = np.memmap(path, dtype=np.int16, mode="r")
         n_channels = 80
         if raw.size % n_channels:
@@ -600,9 +610,13 @@ def extract_triggers(
                 continue
             indices = rising_indices(signal > (low + high) / 2.0)
             per_channel.append(indices.astype(np.float64) / sample_rate)
-    channel = select_ttl_channel(per_channel, expected_count, forced_channel_1based)
+    channel = select_ttl_channel(per_channel, expected_count, forced_candidate_channel)
     counts = [int(times.size) for times in per_channel]
-    return np.asarray(per_channel[channel], dtype=np.float64), channel + 1, counts
+    return (
+        np.asarray(per_channel[channel], dtype=np.float64),
+        channel + 1 + channel_number_offset,
+        counts,
+    )
 
 
 def grouped_times(times: np.ndarray, labels: Sequence[str]) -> dict[str, np.ndarray]:
@@ -636,6 +650,18 @@ def build_event_groups(
         forced_channel_1based=args.trigger_channel,
     )
     warnings: list[str] = []
+    if condition_column is None:
+        warnings.append(
+            "No bistable/nonbistable condition column was inferred; events are pooled as 'all stimuli'"
+        )
+    if (
+        session.subject == "sub4"
+        and session.key == "session02"
+        and response_column is None
+    ):
+        warnings.append(
+            "mapped_response column was not found; response-switch figures will contain no events"
+        )
     if triggers.size != expected_count:
         message = f"TTL count {triggers.size} != expected ceil(rows/2)={expected_count}"
         if args.strict_trigger_count:
