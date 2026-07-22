@@ -40,13 +40,22 @@ DEFAULT_SESSION_GLOB = "sorting_results_*"
 DEFAULT_REGIONS = ["ATL", "HG", "VMPFC", "Amygdala"]
 DEFAULT_OUTPUT_SUBDIR = "auto_curation"
 DEFAULT_GAIN_TO_UV = 0.195
+# SpikeInterface's threshold API uses inclusive >= / <= comparisons. Use the
+# next valid integer/float bounds to implement the requested strict > / < rules.
 BOMBCELL_THRESHOLDS = {
     "noise": {},
     "mua": {
-        "num_spikes": {"greater": 100, "less": None},
-        "isi_violations_ratio": {"greater": None, "less": 0.02},
+        "num_spikes": {"greater": 101, "less": None},
+        "isi_violations_ratio": {
+            "greater": None,
+            "less": float(np.nextafter(0.02, -np.inf)),
+        },
     },
     "non-somatic": {},
+}
+BOMBCELL_LABELING_RULES = {
+    "num_spikes": "> 100",
+    "isi_violations_ratio": "< 0.02",
 }
 
 
@@ -464,7 +473,7 @@ def main() -> None:
     print(f"[INFO] sessions found: {len(session_roots)}")
     print(f"[INFO] regions: {args.regions}")
     print("[INFO] method: bombcell")
-    print(f"[INFO] Bombcell thresholds: {BOMBCELL_THRESHOLDS}")
+    print(f"[INFO] Bombcell labeling rules: {BOMBCELL_LABELING_RULES}")
     print(f"[INFO] overwrite: {args.overwrite}")
 
     run_results = []
@@ -481,7 +490,8 @@ def main() -> None:
         "session_count": len(session_roots),
         "regions": args.regions,
         "methods": ["bombcell"],
-        "bombcell_thresholds": BOMBCELL_THRESHOLDS,
+        "bombcell_labeling_rules": BOMBCELL_LABELING_RULES,
+        "bombcell_runtime_thresholds": BOMBCELL_THRESHOLDS,
         "results": run_results,
     }
     log_path = analyzer_root / f"auto_sorting_curation_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
