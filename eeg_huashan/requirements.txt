@@ -1,4 +1,3 @@
 matplotlib
-mne>=1.12.1
+mne
 numpy
-edfio>=0.4.14
