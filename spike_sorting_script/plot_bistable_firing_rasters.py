@@ -10,14 +10,15 @@ reconstructed as::
 The script discovers matching Bombcell SortingAnalyzers, CSV logs, and trigger
 sources for sub4/sub5/sub6.  It pools trial-averaged single-unit PSTHs either
 over all four regions or within one region and writes exactly 15 non-interactive
-PNG figures: syllable, word (every second sound), and sub4 session02 response
+PNG figures: syllable, word (every second sound), and sub4 session03 response
 switches, each for all regions and ATL/HG/VMPFC/Amygdala.
-Bombcell units labeled good or MUA are included; noise units remain excluded.
+Only Bombcell units labeled good are included.
 
-Firing rates use 10-ms bins and a 150-ms Gaussian kernel by default.  The SEM
+Firing rates use 10-ms bins and a 50-ms Gaussian kernel by default.  The SEM
 is across units.  Raster rows are unit-event observations; a deterministic
 reservoir sample keeps population rasters readable without changing the rate
-calculation.  Significance is assessed after onset with a two-sided one-sample
+calculation.  Each figure also shows a baseline-normalized unit heatmap sorted
+by post-onset peak latency. Significance is assessed after onset with a two-sided one-sample
 t-test across units on firing-rate change from the -500-to-0-ms baseline,
 followed by max-cluster sign-flip correction.
 """
@@ -63,7 +64,7 @@ DEFAULT_RAW_ROOTS = [
 REGIONS = ("ATL", "HG", "VMPFC", "Amygdala")
 ANALYSES = ("syllable", "word", "switch")
 SCOPE_NAMES = ("all_regions", *REGIONS)
-DEFAULT_ACCEPTED_LABELS = ("good", "mua", "sua", "single", "single_unit")
+DEFAULT_ACCEPTED_LABELS = ("good",)
 STIMULUS_DURATIONS_MS = {
     "bai": 480.77,
     "bi": 545.40,
@@ -140,24 +141,31 @@ class RateRasterAccumulator:
         if events_s.size == 0:
             return
         per_event_rates: list[np.ndarray] = []
-        before = -float(self.edges[0])
-        after = float(self.edges[-1])
         bin_s = float(np.diff(self.edges)[0])
+        n_bins = self.edges.size - 1
+        pad_bins = max(1, int(math.ceil(4.0 * self.sigma_bins)))
+        extended_edges = self.edges[0] + np.arange(
+            -pad_bins, n_bins + pad_bins + 1, dtype=np.float64
+        ) * bin_s
         spikes_s = np.sort(np.asarray(spikes_s, dtype=np.float64).ravel())
         for event_index, onset in enumerate(events_s):
-            left = int(np.searchsorted(spikes_s, onset - before, side="left"))
-            right = int(np.searchsorted(spikes_s, onset + after, side="right"))
+            left = int(np.searchsorted(spikes_s, onset + extended_edges[0], side="left"))
+            right = int(np.searchsorted(spikes_s, onset + extended_edges[-1], side="right"))
             relative = spikes_s[left:right] - onset
-            counts = np.histogram(relative, bins=self.edges)[0].astype(np.float64)
-            rate = gaussian_filter1d(
+            counts = np.histogram(relative, bins=extended_edges)[0].astype(np.float64)
+            extended_rate = gaussian_filter1d(
                 counts / bin_s,
                 sigma=self.sigma_bins,
                 mode="constant",
                 truncate=4.0,
             )
+            rate = extended_rate[pad_bins : pad_bins + n_bins]
             per_event_rates.append(rate)
+            displayed_spikes = relative[
+                (relative >= self.edges[0]) & (relative <= self.edges[-1])
+            ]
             self._offer_raster_row(
-                relative,
+                displayed_spikes,
                 f"{observation_prefix}|{self.category}|{event_index}",
             )
         unit_rate = np.mean(np.vstack(per_event_rates), axis=0)
@@ -229,7 +237,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Accepted Bombcell label; repeatable "
-            "(default: good, MUA, and single-unit aliases; noise remains excluded)."
+            "(default: good only; MUA and noise are excluded)."
         ),
     )
     parser.add_argument("--trigger-channel", type=int, default=None, help="Force 1-based TTL channel.")
@@ -259,7 +267,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="End of the pre-onset baseline window in seconds (default: 0).",
     )
     parser.add_argument("--bin-ms", type=float, default=10.0)
-    parser.add_argument("--gaussian-sigma-ms", type=float, default=150.0)
+    parser.add_argument(
+        "--gaussian-sigma-ms",
+        type=float,
+        default=50.0,
+        help="Gaussian smoothing sigma in milliseconds (default: 50).",
+    )
     parser.add_argument(
         "--ttest-point-alpha",
         type=float,
@@ -701,7 +714,7 @@ def build_event_groups(
     warnings: list[str] = []
     if (
         session.subject == "sub4"
-        and session.key == "session02"
+        and session.key == "session03"
         and response_column is None
     ):
         warnings.append(
@@ -744,7 +757,7 @@ def build_event_groups(
         )
 
     switch_times: list[float] = []
-    if session.subject == "sub4" and session.key == "session02" and response_column:
+    if session.subject == "sub4" and session.key == "session03" and response_column:
         previous: str | None = None
         for pair_index in range(usable_pairs):
             response = rows[2 * pair_index].get(response_column, "").strip()
@@ -816,6 +829,13 @@ def load_bombcell_units(
     analyzer = si.load_sorting_analyzer(str(analyzer_path))
     sorting = analyzer.sorting
     labels, label_column = read_bombcell_labels(bombcell_path)
+    if label_column is None:
+        raise FileNotFoundError(
+            f"Bombcell labels are required for good-unit-only plotting: "
+            f"{bombcell_path / 'bombcell_labels.csv'}"
+        )
+    if not labels:
+        raise RuntimeError(f"Bombcell label table contains no units: {bombcell_path}")
     frequency = float(sorting.get_sampling_frequency())
     units: dict[str, np.ndarray] = {}
     excluded = 0
@@ -1018,6 +1038,35 @@ def cluster_permutation_ttest(
     }
 
 
+def normalized_unit_heatmap(
+    category_accumulators: dict[str, RateRasterAccumulator],
+    centers: np.ndarray,
+    baseline_start_s: float,
+    baseline_end_s: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    blocks = [
+        accumulator.unit_rates() for accumulator in category_accumulators.values()
+    ]
+    blocks = [block for block in blocks if block.shape[0] > 0]
+    if not blocks:
+        return np.empty((0, centers.size)), np.array([], dtype=np.float64)
+    unit_rates = np.vstack(blocks)
+    baseline_mask = (centers >= baseline_start_s) & (centers < baseline_end_s)
+    if not np.any(baseline_mask):
+        raise ValueError("Heatmap baseline window contains no bins")
+    baseline = np.mean(unit_rates[:, baseline_mask], axis=1, keepdims=True)
+    changes = unit_rates - baseline
+    scale = np.max(np.abs(changes), axis=1, keepdims=True)
+    scale[scale == 0] = 1.0
+    normalized = changes / scale
+    post_indices = np.flatnonzero(centers >= 0.0)
+    if post_indices.size == 0:
+        return normalized, np.full(normalized.shape[0], np.nan)
+    peak_indices = post_indices[np.argmax(normalized[:, post_indices], axis=1)]
+    order = np.argsort(centers[peak_indices], kind="stable")
+    return normalized[order], centers[peak_indices][order]
+
+
 def plot_rate_and_raster(
     output_path: Path,
     analysis: str,
@@ -1030,12 +1079,12 @@ def plot_rate_and_raster(
     categories = sorted(category_accumulators)
     colors = category_colors(categories)
     centers = (edges[:-1] + edges[1:]) / 2.0
-    fig, (raster_ax, rate_ax) = plt.subplots(
-        2,
+    fig, (raster_ax, heatmap_ax, rate_ax) = plt.subplots(
+        3,
         1,
-        figsize=(11, 8),
+        figsize=(11, 11),
         sharex=True,
-        gridspec_kw={"height_ratios": [2.2, 1.4]},
+        gridspec_kw={"height_ratios": [2.2, 1.6, 1.4]},
         constrained_layout=True,
     )
     row_offset = 0
@@ -1081,14 +1130,56 @@ def plot_rate_and_raster(
                 alpha=0.2,
                 linewidth=0,
             )
-    for axis in (raster_ax, rate_ax):
+    baseline_start = float(statistics.get("baseline_start_s", edges[0]))
+    baseline_end = float(statistics.get("baseline_end_s", 0.0))
+    heatmap, _peak_latencies = normalized_unit_heatmap(
+        category_accumulators,
+        centers,
+        baseline_start_s=baseline_start,
+        baseline_end_s=baseline_end,
+    )
+    if heatmap.shape[0]:
+        image = heatmap_ax.imshow(
+            heatmap,
+            aspect="auto",
+            origin="upper",
+            interpolation="nearest",
+            extent=[edges[0], edges[-1], heatmap.shape[0] - 0.5, -0.5],
+            cmap="RdBu_r",
+            vmin=-1.0,
+            vmax=1.0,
+            rasterized=True,
+        )
+        colorbar = fig.colorbar(image, ax=heatmap_ax, pad=0.01)
+        colorbar.set_label("Normalized ΔFR")
+        heatmap_ax.set_ylabel(
+            f"Good units (n={heatmap.shape[0]})\nsorted by peak latency"
+        )
+        heatmap_ax.set_yticks([])
+        heatmap_ax.set_title(
+            "Unit activity: baseline-subtracted and scaled to each unit’s maximum |ΔFR|",
+            fontsize=9,
+        )
+    else:
+        heatmap_ax.text(
+            0.5,
+            0.5,
+            "No good units with matching events",
+            transform=heatmap_ax.transAxes,
+            ha="center",
+            va="center",
+            color="0.4",
+        )
+        heatmap_ax.set_ylabel("Good units")
+    for axis in (raster_ax, heatmap_ax, rate_ax):
         axis.axvline(0, color="black", linestyle="--", linewidth=1.0)
         axis.axvspan(0, 0.57556, color="0.5", alpha=0.08)
+    for axis in (raster_ax, rate_ax):
         axis.grid(axis="x", alpha=0.2)
     pretty_analysis = {
         "syllable": "All stimulus onsets (syllable)",
         "word": "Every second stimulus onset (word)",
-        "switch": "sub4 session02 mapped-response switches",
+        "switch": "Firing rate when word percepts switch (sub4 session03)",
     }[analysis]
     pretty_scope = "all four regions" if scope == "all_regions" else scope
     raster_ax.set_title(f"{pretty_analysis} — {pretty_scope}")
