@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Nihon Kohden recordings to EDF+ and optionally plot raw signals."""
+"""Convert Nihon Kohden recordings to EDF+ and save static raw-signal plots."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ import numpy as np
 
 
 SIDECAR_EXTENSIONS = (".21E", ".PNT", ".LOG")
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -41,7 +42,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--plot-dir",
         type=Path,
-        help="Also write a full-duration raw PNG to this directory",
+        default=SCRIPT_DIR,
+        help=(
+            "Full-duration raw PNG destination "
+            "(default: the directory containing this script)"
+        ),
     )
     parser.add_argument(
         "--encoding",

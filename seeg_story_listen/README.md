@@ -1,10 +1,11 @@
 # Story-listening sEEG: Nihon Kohden conversion
 
 `convert_nihon_kohden_to_edf.py` converts one Nihon Kohden `.EEG` recording,
-or every recording below a directory, to EDF+. It can also render a static
-full-duration raw-signal plot. Every EDF is reopened after export to validate
-channel order, sample count, sampling frequency, annotations, and sampled
-signal scale.
+or every recording below a directory, to EDF+. It also renders a static
+full-duration raw-signal plot. It explicitly uses Matplotlib's non-interactive
+`Agg` backend, so it works from a remote Linux shell without X11, a desktop, or
+a display server. Every EDF is reopened after export to validate channel order,
+sample count, sampling frequency, annotations, and sampled signal scale.
 
 Keep each `.EEG` file beside its same-stem sidecars:
 
@@ -27,15 +28,15 @@ Run from the repository root:
 ```bash
 python3 seeg_story_listen/convert_nihon_kohden_to_edf.py \
   /share/workspace3/ieeg/seeg/story_listen_v2/sub001/ses01/NKT/EEG2100 \
-  --output-dir /share/workspace3/ieeg/seeg/story_listen_v2/sub001 \
-  --plot-dir /share/home/mitan
+  --output-dir /share/workspace3/ieeg/seeg/story_listen_v2/sub001
 ```
 
 This recursively converts every `.EEG` file below `EEG2100`. EDF files are
 written below the `sub001` output directory, and plots are named
-`<recording>_raw_full_duration.png` below `/share/home/mitan`. Subdirectories
-relative to the input are preserved to prevent files with identical names from
-overwriting one another.
+`<recording>_raw_full_duration.png` in the repository's `seeg_story_listen`
+directory beside the script. Subdirectories relative to the input are preserved
+to prevent files with identical names from overwriting one another. Use
+`--plot-dir` only when a different plot destination is needed.
 
 Existing outputs are skipped. Pass `--overwrite` to regenerate them. If
 annotations are garbled, provide the recorder's encoding, for example
