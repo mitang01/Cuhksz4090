@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 import mne
+import numpy as np
 
 
 SIDECAR_EXTENSIONS = (".21E", ".PNT", ".LOG")
@@ -85,7 +86,7 @@ def missing_sidecars(source: Path) -> list[str]:
 
 
 def validate_edf(source_raw: mne.io.BaseRaw, destination: Path) -> None:
-    """Reopen an EDF and verify the recording's core structure."""
+    """Reopen an EDF and verify structure plus sampled signal fidelity."""
     exported = mne.io.read_raw_edf(destination, preload=False, verbose="ERROR")
     try:
         problems: list[str] = []
@@ -105,10 +106,55 @@ def validate_edf(source_raw: mne.io.BaseRaw, destination: Path) -> None:
                 "annotation count differs "
                 f"({len(source_raw.annotations)} -> {len(exported.annotations)})"
             )
+        if not problems:
+            window_size = min(1000, source_raw.n_times)
+            starts = {
+                0,
+                max(0, source_raw.n_times // 2 - window_size // 2),
+                source_raw.n_times - window_size,
+            }
+            for start in starts:
+                stop = start + window_size
+                expected = source_raw.get_data(start=start, stop=stop)
+                observed = exported.get_data(start=start, stop=stop)
+                # EDF is 16-bit, so small quantization error is expected.
+                tolerance = np.maximum(
+                    np.max(np.abs(expected), axis=1) / 30_000, 1e-10
+                )
+                error = np.max(np.abs(expected - observed), axis=1)
+                bad = np.flatnonzero(error > tolerance)
+                if bad.size:
+                    channel = int(bad[0])
+                    problems.append(
+                        f"signal values differ for {source_raw.ch_names[channel]} "
+                        f"(maximum error {error[channel]:.6g})"
+                    )
+                    break
         if problems:
             raise RuntimeError("; ".join(problems))
     finally:
         exported.close()
+
+
+def mark_misc_channels_as_volts(destination: Path, channel_indices: Sequence[int]) -> None:
+    """Correct MNE's EDF unit label for voltage-valued NK misc channels."""
+    if not channel_indices:
+        return
+    with destination.open("r+b") as edf:
+        edf.seek(252)
+        try:
+            signal_count = int(edf.read(4).decode("ascii").strip())
+        except ValueError as error:
+            raise RuntimeError("exported EDF has an invalid signal count") from error
+        if max(channel_indices) >= signal_count:
+            raise RuntimeError("exported EDF has fewer signals than expected")
+
+        # EDF stores each header field for all signals contiguously. Physical
+        # dimensions follow the 16-byte labels and 80-byte transducer fields.
+        dimensions_offset = 256 + signal_count * (16 + 80)
+        for index in channel_indices:
+            edf.seek(dimensions_offset + index * 8)
+            edf.write(b"V       ")
 
 
 def convert_recording(
@@ -136,6 +182,11 @@ def convert_recording(
     )
     temporary = destination.with_name(f".{destination.name}.partial.edf")
     try:
+        misc_indices = [
+            index
+            for index, kind in enumerate(raw.get_channel_types())
+            if kind == "misc"
+        ]
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary.unlink(missing_ok=True)
         mne.export.export_raw(
@@ -146,6 +197,10 @@ def convert_recording(
             overwrite=True,
             verbose="ERROR",
         )
+        # MNE currently labels misc data as microvolts without converting its
+        # numeric values from volts. Correct the EDF header to prevent a 1e6
+        # scale error when NK marker channels are read back.
+        mark_misc_channels_as_volts(temporary, misc_indices)
         if validate:
             validate_edf(raw, temporary)
         temporary.replace(destination)
