@@ -814,6 +814,15 @@ def read_bombcell_labels(path: Path) -> tuple[dict[str, str], str | None]:
     }, label_column
 
 
+def unit_spike_diagnostics(units: dict[str, np.ndarray]) -> dict[str, int]:
+    zero_spike_units = sum(spikes.size == 0 for spikes in units.values())
+    return {
+        "included_units_with_spikes": int(len(units) - zero_spike_units),
+        "included_units_with_zero_recorded_spikes": int(zero_spike_units),
+        "included_spike_count": int(sum(spikes.size for spikes in units.values())),
+    }
+
+
 def load_bombcell_units(
     bombcell_path: Path,
     accepted_labels: set[str],
@@ -853,6 +862,7 @@ def load_bombcell_units(
         "units_in_analyzer": int(len(sorting.get_unit_ids())),
         "units_included": int(len(units)),
         "units_excluded_by_label": excluded,
+        **unit_spike_diagnostics(units),
         "sampling_frequency_hz": frequency,
     }
 
@@ -1067,6 +1077,22 @@ def normalized_unit_heatmap(
     return normalized[order], centers[peak_indices][order]
 
 
+def unit_rate_diagnostics(
+    category_accumulators: dict[str, RateRasterAccumulator],
+) -> dict[str, int]:
+    blocks = [
+        accumulator.unit_rates() for accumulator in category_accumulators.values()
+    ]
+    blocks = [block for block in blocks if block.shape[0] > 0]
+    if not blocks:
+        return {"included_units": 0, "zero_rate_units": 0}
+    unit_rates = np.vstack(blocks)
+    return {
+        "included_units": int(unit_rates.shape[0]),
+        "zero_rate_units": int(np.count_nonzero(np.all(unit_rates == 0.0, axis=1))),
+    }
+
+
 def plot_rate_and_raster(
     output_path: Path,
     analysis: str,
@@ -1138,6 +1164,7 @@ def plot_rate_and_raster(
         baseline_start_s=baseline_start,
         baseline_end_s=baseline_end,
     )
+    rate_diagnostics = unit_rate_diagnostics(category_accumulators)
     if heatmap.shape[0]:
         image = heatmap_ax.imshow(
             heatmap,
@@ -1156,10 +1183,17 @@ def plot_rate_and_raster(
             f"Good units (n={heatmap.shape[0]})\nsorted by peak latency"
         )
         heatmap_ax.set_yticks([])
-        heatmap_ax.set_title(
-            "Unit activity: baseline-subtracted and scaled to each unit’s maximum |ΔFR|",
-            fontsize=9,
-        )
+        if rate_diagnostics["zero_rate_units"] == rate_diagnostics["included_units"]:
+            heatmap_ax.set_title(
+                "All included unit PSTHs are 0 Hz: no spikes contributed within "
+                "the analyzed event windows",
+                fontsize=9,
+            )
+        else:
+            heatmap_ax.set_title(
+                "Unit activity: baseline-subtracted and scaled to each unit’s maximum |ΔFR|",
+                fontsize=9,
+            )
     else:
         heatmap_ax.text(
             0.5,
@@ -1197,6 +1231,21 @@ def plot_rate_and_raster(
         )
     rate_ax.set_xlabel("Time from onset (s)")
     rate_ax.set_ylabel("Firing rate (Hz)\nmean ± SEM across units")
+    if rate_diagnostics["zero_rate_units"]:
+        rate_ax.text(
+            0.01,
+            0.82,
+            (
+                f"Zero-rate PSTHs: {rate_diagnostics['zero_rate_units']}/"
+                f"{rate_diagnostics['included_units']} included units; these units "
+                "had no spike contribution in the analyzed event windows."
+            ),
+            transform=rate_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="0.35",
+        )
     direction_colors = {"increase": "#b2182b", "decrease": "#2166ac"}
     if statistics.get("status") == "ok":
         labeled_directions: set[str] = set()
@@ -1285,6 +1334,7 @@ def write_rate_summary(
     rows: list[dict[str, Any]] = []
     for (analysis, scope, category), accumulator in sorted(accumulators.items()):
         mean, sem = accumulator.mean_sem()
+        diagnostics = unit_rate_diagnostics({category: accumulator})
         for index, time in enumerate(centers):
             rows.append(
                 {
@@ -1295,6 +1345,10 @@ def write_rate_summary(
                     "mean_rate_hz": f"{mean[index]:.8f}",
                     "sem_rate_hz": f"{sem[index]:.8f}",
                     "n_units": accumulator.n_units,
+                    "n_units_with_nonzero_event_psth": (
+                        diagnostics["included_units"] - diagnostics["zero_rate_units"]
+                    ),
+                    "n_zero_rate_units": diagnostics["zero_rate_units"],
                     "events_summed_across_units": accumulator.n_events,
                     "raster_rows_plotted": len(accumulator.raster_rows()),
                 }
@@ -1311,49 +1365,112 @@ def write_ttest_summaries(
     timecourse_rows: list[dict[str, Any]] = []
     cluster_rows: list[dict[str, Any]] = []
     for (analysis, scope), result in sorted(statistics_results.items()):
-        if result.get("status") != "ok":
-            cluster_rows.append(
-                {
-                    "analysis": analysis,
-                    "scope": scope,
-                    "status": result.get("status", "not_estimable"),
-                    "reason": result.get("reason", ""),
-                    "direction": "",
-                    "start_s": "",
-                    "end_s": "",
-                    "t_abs_sum": "",
-                    "permutation_p": "",
-                    "significant": False,
-                }
-            )
-            continue
-        for index, time in enumerate(centers):
+        status = result.get("status", "not_estimable")
+        reason = result.get("reason", "")
+        clusters = result.get("clusters", [])
+        is_estimable = status == "ok"
+        cluster_rows.append(
+            {
+                "analysis": analysis,
+                "scope": scope,
+                "record_type": "summary",
+                "analysis_status": status,
+                "reason": reason,
+                "n_units": result.get("n_units", ""),
+                "candidate_cluster_count": len(clusters) if is_estimable else "",
+                "significant_cluster_count": (
+                    sum(bool(cluster["significant"]) for cluster in clusters)
+                    if is_estimable
+                    else ""
+                ),
+                "cluster_id": "",
+                "direction": "",
+                "start_s": "",
+                "end_s": "",
+                "t_abs_sum": "",
+                "permutation_p": "",
+                "cluster_significant": "",
+            }
+        )
+        if not is_estimable:
             timecourse_rows.append(
                 {
                     "analysis": analysis,
                     "scope": scope,
+                    "analysis_status": status,
+                    "reason": reason,
+                    "time_s": "",
+                    "mean_baseline_corrected_rate_hz": "",
+                    "t_value": "",
+                    "point_p": "",
+                    "point_significant": "",
+                    "in_candidate_cluster": "",
+                    "cluster_id": "",
+                    "cluster_permutation_p": "",
+                    "in_cluster_corrected_significant_cluster": "",
+                    "n_units": result.get("n_units", ""),
+                    "point_alpha": "",
+                    "cluster_alpha": "",
+                }
+            )
+            continue
+        cluster_by_index: dict[int, tuple[int, dict[str, Any]]] = {}
+        for cluster_id, cluster in enumerate(clusters, start=1):
+            for index in range(cluster["start_index"], cluster["end_index"] + 1):
+                cluster_by_index[index] = (cluster_id, cluster)
+        for index, time in enumerate(centers):
+            cluster_membership = cluster_by_index.get(index)
+            cluster_id = cluster_membership[0] if cluster_membership else ""
+            cluster = cluster_membership[1] if cluster_membership else None
+            timecourse_rows.append(
+                {
+                    "analysis": analysis,
+                    "scope": scope,
+                    "analysis_status": status,
+                    "reason": reason,
                     "time_s": f"{time:.6f}",
                     "mean_baseline_corrected_rate_hz": (
                         f"{result['mean_change_hz'][index]:.8g}"
                     ),
                     "t_value": f"{result['t_values'][index]:.8g}",
                     "point_p": f"{result['point_p_values'][index]:.8g}",
+                    "point_significant": bool(
+                        np.isfinite(result["point_p_values"][index])
+                        and result["point_p_values"][index] < result["point_alpha"]
+                    ),
+                    "in_candidate_cluster": cluster is not None,
+                    "cluster_id": cluster_id,
+                    "cluster_permutation_p": (
+                        f"{cluster['permutation_p']:.8g}" if cluster else ""
+                    ),
+                    "in_cluster_corrected_significant_cluster": (
+                        bool(cluster["significant"]) if cluster else False
+                    ),
                     "n_units": result["n_units"],
+                    "point_alpha": result["point_alpha"],
+                    "cluster_alpha": result["cluster_alpha"],
                 }
             )
-        for cluster in result["clusters"]:
+        for cluster_id, cluster in enumerate(clusters, start=1):
             cluster_rows.append(
                 {
                     "analysis": analysis,
                     "scope": scope,
-                    "status": "ok",
-                    "reason": "",
+                    "record_type": "cluster",
+                    "analysis_status": status,
+                    "reason": reason,
+                    "n_units": result["n_units"],
+                    "candidate_cluster_count": len(clusters),
+                    "significant_cluster_count": sum(
+                        bool(candidate["significant"]) for candidate in clusters
+                    ),
+                    "cluster_id": cluster_id,
                     "direction": cluster["direction"],
                     "start_s": f"{edges[cluster['start_index']]:.6f}",
                     "end_s": f"{edges[cluster['end_index'] + 1]:.6f}",
                     "t_abs_sum": f"{cluster['t_abs_sum']:.8g}",
                     "permutation_p": f"{cluster['permutation_p']:.8g}",
-                    "significant": cluster["significant"],
+                    "cluster_significant": cluster["significant"],
                 }
             )
     write_csv(output_dir / "sliding_one_sample_t_timecourse.csv", timecourse_rows)
