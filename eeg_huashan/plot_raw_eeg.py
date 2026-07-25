@@ -18,6 +18,7 @@ import mne
 import numpy as np
 
 
+DEFAULT_DATA_ROOT = Path("/share/workspace2/tangmi")
 DEFAULT_DATES = ("20260630", "20260702")
 EXPECTED_RECORDINGS = ("BCI", "picNaming", "rest", "semantic")
 SUPPORTED_EXTENSIONS = (".vhdr", ".edf", ".bdf", ".set", ".fif")
@@ -33,8 +34,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path(__file__).resolve().parent,
-        help="Directory containing the dated data folders (default: script directory).",
+        default=DEFAULT_DATA_ROOT,
+        help=(
+            "Directory containing the dated data folders "
+            f"(default: {DEFAULT_DATA_ROOT})."
+        ),
     )
     parser.add_argument(
         "--dates",
