@@ -19,6 +19,7 @@ import numpy as np
 
 
 DEFAULT_DATA_ROOT = Path("/share/workspace2/tangmi")
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATES = ("20260630", "20260702")
 EXPECTED_RECORDINGS = ("BCI", "picNaming", "rest", "semantic")
 SUPPORTED_EXTENSIONS = (".vhdr", ".edf", ".bdf", ".set", ".fif")
@@ -28,7 +29,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Plot every EEG recording over its full duration and save a PNG "
-            "beside the source data."
+            "beside this script."
         )
     )
     parser.add_argument(
@@ -38,6 +39,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Directory containing the dated data folders "
             f"(default: {DEFAULT_DATA_ROOT})."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=(
+            "Directory where dated plot folders are written "
+            f"(default: {DEFAULT_OUTPUT_DIR})."
         ),
     )
     parser.add_argument(
@@ -205,6 +215,7 @@ def plot_recording(
 
 def process_folder(
     folder: Path,
+    output_dir: Path,
     *,
     scale_uv: float,
     max_points: int,
@@ -228,9 +239,11 @@ def process_folder(
             file=sys.stderr,
         )
 
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     failures = 0
     for source in recordings:
-        output = source.with_name(f"{source.stem}_raw_full_duration.png")
+        output = output_dir / f"{source.stem}_raw_full_duration.png"
         if output.exists() and not overwrite:
             print(f"Skipping existing plot: {output}")
             continue
@@ -263,6 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for date in args.dates:
         failures += process_folder(
             args.root / date,
+            args.output_dir / date,
             scale_uv=args.scale_uv,
             max_points=args.max_points,
             dpi=args.dpi,

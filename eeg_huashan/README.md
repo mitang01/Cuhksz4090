@@ -14,10 +14,10 @@ The EEG recordings themselves live one level up, under dated folders:
 ```
 
 `plot_raw_eeg.py` finds the recordings in those date folders and writes one
-static PNG beside each recording. Each image shows the entire recording, all
-non-trigger channels, and a 500 µV scale bar. Long traces are reduced with a
-min/max envelope, which preserves sharp extrema better than ordinary
-subsampling.
+static PNG beside this script, under matching dated subfolders. Each image
+shows the entire recording, all non-trigger channels, and a 500 µV scale bar.
+Long traces are reduced with a min/max envelope, which preserves sharp
+extrema better than ordinary subsampling.
 
 Brain Products recordings are loaded from their `.vhdr` files. Keep each
 `.vhdr`, `.vmrk`, and `.eeg` triplet together with the original file names.
@@ -31,11 +31,12 @@ python3 -m pip install -r requirements.txt
 python3 plot_raw_eeg.py
 ```
 
-By default the script reads from `/share/workspace2/tangmi`. Expected outputs:
+By default the script reads from `/share/workspace2/tangmi` and writes plots
+next to the script. Expected outputs:
 
 ```text
-/share/workspace2/tangmi/20260630/<recording>_raw_full_duration.png
-/share/workspace2/tangmi/20260702/<recording>_raw_full_duration.png
+/share/workspace2/tangmi/eeg_huashan/20260630/<recording>_raw_full_duration.png
+/share/workspace2/tangmi/eeg_huashan/20260702/<recording>_raw_full_duration.png
 ```
 
 The script checks for recording names containing `BCI`, `picNaming`, `rest`,
@@ -45,9 +46,10 @@ are left untouched; pass `--overwrite` to regenerate them.
 Useful options:
 
 ```bash
-# Explicitly select the data root and regenerate plots
+# Explicitly select the data root / output dir and regenerate plots
 python3 plot_raw_eeg.py \
   --root /share/workspace2/tangmi \
+  --output-dir /share/workspace2/tangmi/eeg_huashan \
   --scale-uv 500 \
   --overwrite
 
