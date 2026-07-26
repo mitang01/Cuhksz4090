@@ -22,7 +22,7 @@ class FrequencyBandTests(unittest.TestCase):
     def test_short_picture_window_omits_low_frequency_bands(self) -> None:
         self.assertEqual(
             frequency_bands(0.48, 30.0),
-            {"alpha": (8.0, 12.0), "beta": (13.0, 30.0)},
+            {"beta": (13.0, 30.0)},
         )
 
     def test_two_second_rest_includes_theta(self) -> None:

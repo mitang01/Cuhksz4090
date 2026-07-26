@@ -3,5 +3,6 @@ eeglabio
 mne
 mne-connectivity
 networkx
+nibabel
 numpy
 scipy

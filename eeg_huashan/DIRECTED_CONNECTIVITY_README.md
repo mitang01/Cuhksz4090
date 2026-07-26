@@ -36,9 +36,9 @@ cd /share/workspace2/tangmi/eeg_huashan
 python3 -m pip install -r requirements.txt
 ```
 
-On its first run, MNE downloads the open `fsaverage` FreeSurfer template. No
-MATLAB or SPM installation is needed. Set `SUBJECTS_DIR` or pass
-`--subjects-dir` if the template is already present.
+On its first run, MNE downloads approximately 435 MB of open `fsaverage`
+FreeSurfer template files. No MATLAB or SPM installation is needed. Set
+`SUBJECTS_DIR` or pass `--subjects-dir` if the template is already present.
 
 ## Run
 
@@ -93,7 +93,7 @@ A positive value supports the listed direction relative to its reverse.
 Time-reversal correction helps diagnose source mixing but does not eliminate
 volume-conduction or inverse-leakage bias.
 
-Picture data use only frequency bands with at least three cycles in the
+Picture data use only frequency bands with at least five cycles in the
 available pre-speech window. Rest is segmented and analyzed separately.
 Epoch bootstrapping provides participant-level 95% descriptive intervals.
 

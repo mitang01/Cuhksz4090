@@ -26,6 +26,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import mne
+import mne_connectivity
 import networkx as nx
 import numpy as np
 from mne.minimum_norm import (
@@ -34,7 +35,6 @@ from mne.minimum_norm import (
     write_inverse_operator,
 )
 from mne_connectivity import spectral_connectivity_epochs
-
 from run_dcm_pilot import (
     SCRIPT_DIR,
     annotation_events,
@@ -52,7 +52,6 @@ from run_dcm_pilot import (
     write_csv,
     write_trial_table,
 )
-
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "directed_connectivity_results"
@@ -178,9 +177,7 @@ def process_picture(
         json.dumps(audit, indent=2), encoding="utf-8"
     )
 
-    trials = classify_trials(
-        annotation_events(raw), raw.info["sfreq"], raw.first_samp
-    )
+    trials = classify_trials(annotation_events(raw), raw.info["sfreq"], raw.first_samp)
     write_trial_table(subject_dir / "picture_trials.csv", participant, trials)
 
     analyses: list[ConnectivityInput] = []
@@ -396,7 +393,6 @@ def source_time_courses(
         method="dSPM",
         pick_ori="normal",
         return_generator=False,
-        n_jobs=args.n_jobs,
         verbose="ERROR",
     )
     label_ts = np.asarray(
@@ -432,7 +428,7 @@ def source_time_courses(
 def frequency_bands(
     duration_seconds: float, h_freq: float
 ) -> dict[str, tuple[float, float]]:
-    """Use only bands with at least three cycles at their lower edge."""
+    """Use only bands with at least five cycles at their lower edge."""
     candidates = {
         "theta": (4.0, 7.0),
         "alpha": (8.0, 12.0),
@@ -441,7 +437,7 @@ def frequency_bands(
     return {
         name: bounds
         for name, bounds in candidates.items()
-        if bounds[1] > bounds[0] and duration_seconds * bounds[0] >= 3.0
+        if bounds[1] > bounds[0] and duration_seconds * bounds[0] >= 5.0
     }
 
 
@@ -463,29 +459,31 @@ def estimate_gc(
     pairs = ordered_pairs()
     seeds = np.asarray([[NODE_INDEX[source]] for source, _ in pairs])
     targets = np.asarray([[NODE_INDEX[target]] for _, target in pairs])
-    fmin = tuple(bounds[0] for bounds in bands.values())
-    fmax = tuple(bounds[1] for bounds in bands.values())
-    results = spectral_connectivity_epochs(
-        data,
-        names=list(NODE_NAMES),
-        method=["gc", "gc_tr"],
-        indices=(seeds, targets),
-        sfreq=sfreq,
-        mode="multitaper",
-        fmin=fmin,
-        fmax=fmax,
-        faverage=True,
-        gc_n_lags=gc_lags,
-        n_jobs=n_jobs,
-        verbose=False,
-    )
-    gc, gc_tr = results
-    return np.asarray(gc.get_data()), np.asarray(gc_tr.get_data())
+    gc_values = np.empty((len(pairs), len(bands)), dtype=float)
+    gc_tr_values = np.empty_like(gc_values)
+    # MNE-Connectivity currently does not support GC over multiple bands in
+    # one call, so estimate every prespecified band separately.
+    for band_index, (fmin, fmax) in enumerate(bands.values()):
+        gc, gc_tr = spectral_connectivity_epochs(
+            data,
+            names=list(NODE_NAMES),
+            method=["gc", "gc_tr"],
+            indices=(seeds, targets),
+            sfreq=sfreq,
+            mode="multitaper",
+            fmin=fmin,
+            fmax=fmax,
+            faverage=True,
+            gc_n_lags=gc_lags,
+            n_jobs=n_jobs,
+            verbose=False,
+        )
+        gc_values[:, band_index] = np.asarray(gc.get_data()).reshape(-1)
+        gc_tr_values[:, band_index] = np.asarray(gc_tr.get_data()).reshape(-1)
+    return gc_values, gc_tr_values
 
 
-def net_time_reversed_gc(
-    gc: np.ndarray, gc_tr: np.ndarray
-) -> np.ndarray:
+def net_time_reversed_gc(gc: np.ndarray, gc_tr: np.ndarray) -> np.ndarray:
     """Compute netTRGC: net original GC minus net time-reversed GC."""
     pairs = ordered_pairs()
     pair_index = {pair: index for index, pair in enumerate(pairs)}
@@ -568,9 +566,7 @@ def connectivity_rows(
                     "bootstrap_mean_net_trgc": float(values.mean()),
                     "bootstrap_ci95_low": float(ci_low),
                     "bootstrap_ci95_high": float(ci_high),
-                    "ci95_excludes_zero_descriptive": bool(
-                        ci_low > 0 or ci_high < 0
-                    ),
+                    "ci95_excludes_zero_descriptive": bool(ci_low > 0 or ci_high < 0),
                     "n_bootstraps": bootstrap.shape[0],
                 }
             )
@@ -594,9 +590,7 @@ def hypothesis_rows(
                     "hypothesis_edge_set": family,
                     "band": band,
                     "n_edges": len(indices),
-                    "mean_net_trgc": float(
-                        observed_net[indices, band_index].mean()
-                    ),
+                    "mean_net_trgc": float(observed_net[indices, band_index].mean()),
                     "bootstrap_ci95_low": float(ci_low),
                     "bootstrap_ci95_high": float(ci_high),
                     "interpretation": (
@@ -648,8 +642,7 @@ def plot_band(
         ax=network_axis,
     )
     edge_labels = {
-        (row["source"], row["target"]): f"{row['net_trgc']:.3f}"
-        for row in band_rows
+        (row["source"], row["target"]): f"{row['net_trgc']:.3f}" for row in band_rows
     }
     nx.draw_networkx_edge_labels(
         graph,
@@ -665,7 +658,7 @@ def plot_band(
     network_axis.axis("off")
 
     labels = [f"{row['source']} → {row['target']}" for row in band_rows]
-    means = np.asarray([row["net_trgc"] for row in band_rows])
+    means = np.asarray([row["bootstrap_mean_net_trgc"] for row in band_rows])
     low = means - np.asarray([row["bootstrap_ci95_low"] for row in band_rows])
     high = np.asarray([row["bootstrap_ci95_high"] for row in band_rows]) - means
     low = np.maximum(low, 0.0)
@@ -701,9 +694,7 @@ def run_connectivity(
     args: argparse.Namespace,
     forward_cache: dict[tuple[str, ...], mne.Forward],
 ) -> None:
-    LOGGER.info(
-        "Source connectivity: %s %s", analysis.participant, analysis.analysis
-    )
+    LOGGER.info("Source connectivity: %s %s", analysis.participant, analysis.analysis)
     data, sfreq = source_time_courses(
         analysis,
         labels,
@@ -716,11 +707,9 @@ def run_connectivity(
     bands = frequency_bands(duration, args.h_freq if analysis.kind == "picture" else 45)
     if not bands:
         raise RuntimeError(
-            f"No frequency band has at least three cycles in {duration:.3f} s"
+            f"No frequency band has at least five cycles in {duration:.3f} s"
         )
-    gc, gc_tr, bootstrap = bootstrap_connectivity(
-        data, sfreq, bands, args
-    )
+    gc, gc_tr, bootstrap = bootstrap_connectivity(data, sfreq, bands, args)
     rows = connectivity_rows(gc, gc_tr, bootstrap, bands)
     observed_net = net_time_reversed_gc(gc, gc_tr)
     family_rows = hypothesis_rows(observed_net, bootstrap, bands)
@@ -734,9 +723,7 @@ def run_connectivity(
     metadata = {
         "participant": analysis.participant,
         "analysis": analysis.analysis,
-        "method": (
-            "MNE-Connectivity state-space spectral GC and time-reversed GC"
-        ),
+        "method": ("MNE-Connectivity state-space spectral GC and time-reversed GC"),
         "metric": (
             "netTRGC=(GCxy-GCyx)-(GCtr_xy-GCtr_yx); positive supports the "
             "listed direction"
@@ -810,6 +797,7 @@ required for the full study.
 Software
 --------
 MNE-Python: {mne.__version__}
+MNE-Connectivity: {mne_connectivity.__version__}
 Bootstrap replicates requested: {args.connectivity_bootstraps}
 Random seed: {args.seed}
 """
@@ -819,11 +807,7 @@ Random seed: {args.seed}
 def validate_args(args: argparse.Namespace) -> None:
     if args.tmin >= 0 or args.tmax <= 0 or args.tmin >= args.tmax:
         raise ValueError("Epoch must span zero with tmin < 0 < tmax")
-    if (
-        not math.isfinite(args.reject_uv)
-        or args.reject_uv <= 0
-        or args.flat_uv < 0
-    ):
+    if not math.isfinite(args.reject_uv) or args.reject_uv <= 0 or args.flat_uv < 0:
         raise ValueError("Artifact thresholds must be finite and non-negative")
     if args.connectivity_bootstraps < 20:
         raise ValueError("--connectivity-bootstraps must be at least 20")
@@ -857,9 +841,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     analyses: list[ConnectivityInput] = []
     for dataset in datasets:
-        LOGGER.info(
-            "Processing %s %s", dataset["participant"], dataset["task"]
-        )
+        LOGGER.info("Processing %s %s", dataset["participant"], dataset["task"])
         if dataset["task"] == "picture":
             analyses.extend(process_picture(dataset, args))
         else:
@@ -870,10 +852,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     labels = make_language_labels(subjects_dir)
     (args.output_dir / "source_rois.json").write_text(
         json.dumps(
-            {
-                node: list(LABEL_COMPONENTS[node])
-                for node in NODE_NAMES
-            },
+            {node: list(LABEL_COMPONENTS[node]) for node in NODE_NAMES},
             indent=2,
         ),
         encoding="utf-8",
