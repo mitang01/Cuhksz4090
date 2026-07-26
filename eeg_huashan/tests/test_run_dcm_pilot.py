@@ -10,16 +10,19 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from run_dcm_pilot import classify_trials, holm_adjust, marker_code
+from run_dcm_pilot import (
+    classify_trials,
+    dcm_pre_speech_end_ms,
+    holm_adjust,
+    marker_code,
+)
 
 
 class MarkerParsingTests(unittest.TestCase):
     def test_marker_class_is_not_ignored(self) -> None:
         self.assertEqual(marker_code("Stimulus/S  1", ("Stimulus/",)), 1)
         self.assertIsNone(marker_code("Response/R  1", ("Stimulus/",)))
-        self.assertEqual(
-            marker_code("Response/R  2", ("Stimulus/", "Response/")), 2
-        )
+        self.assertEqual(marker_code("Response/R  2", ("Stimulus/", "Response/")), 2)
 
     def test_trial_state_machine_handles_all_outcomes(self) -> None:
         events = [
@@ -44,6 +47,18 @@ class MarkerParsingTests(unittest.TestCase):
         self.assertTrue(trials[0].picture_offset_seen)
         self.assertAlmostEqual(trials[0].response_latency_seconds, 2.0)
         self.assertFalse(trials[1].is_correct)
+
+    def test_dcm_window_stays_before_picture_offset(self) -> None:
+        events = [
+            (100, "Stimulus/S  1"),
+            (160, "Stimulus/S  3"),
+            (200, "Response/R  2"),
+        ]
+        trials = classify_trials(events, sfreq=100.0)
+        endpoint = dcm_pre_speech_end_ms(
+            trials, sfreq=100.0, correct_only=True, epoch_tmax=0.8
+        )
+        self.assertEqual(endpoint, 580.0)
 
 
 class StatisticalHelperTests(unittest.TestCase):

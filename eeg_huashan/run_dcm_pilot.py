@@ -18,9 +18,10 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import matplotlib
 
@@ -31,8 +32,8 @@ import mne
 import numpy as np
 from scipy import stats
 
-
 SCRIPT_DIR = Path(__file__).resolve().parent
+LOGGER = logging.getLogger(__name__)
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "dcm_pilot_results"
 DEFAULT_DATASETS = (
     {
@@ -47,8 +48,7 @@ DEFAULT_DATASETS = (
         "participant": "Pp1_WWL",
         "task": "rest",
         "vhdr": (
-            "/share/workspace2/tangmi/eeg_huashan/20260630/"
-            "20260630_rest_001_WWL.Vhdr"
+            "/share/workspace2/tangmi/eeg_huashan/20260630/20260630_rest_001_WWL.Vhdr"
         ),
     },
     {
@@ -63,8 +63,7 @@ DEFAULT_DATASETS = (
         "participant": "Pp2_JYP",
         "task": "rest",
         "vhdr": (
-            "/share/workspace2/tangmi/eeg_huashan/20260702/"
-            "20260702_rest_001_JYP.vhdr"
+            "/share/workspace2/tangmi/eeg_huashan/20260702/20260702_rest_001_JYP.vhdr"
         ),
     },
 )
@@ -284,19 +283,13 @@ def set_proxy_montage(raw: mne.io.BaseRaw) -> dict[str, Any]:
     egi_count = sum(bool(re.fullmatch(r"E\d+", name)) for name in eeg_names)
 
     if egi_count >= 100:
-        montage_name = (
-            "GSN-HydroCel-129"
-            if "E129" in eeg_names
-            else "GSN-HydroCel-128"
-        )
+        montage_name = "GSN-HydroCel-129" if "E129" in eeg_names else "GSN-HydroCel-128"
     else:
         montage_name = "standard_1005"
 
     montage = mne.channels.make_standard_montage(montage_name)
     montage_names_lower = {name.casefold() for name in montage.ch_names}
-    matched = [
-        name for name in eeg_names if name.casefold() in montage_names_lower
-    ]
+    matched = [name for name in eeg_names if name.casefold() in montage_names_lower]
     unmatched = [name for name in eeg_names if name not in matched]
     if len(matched) < 16:
         raise RuntimeError(
@@ -316,7 +309,7 @@ def set_proxy_montage(raw: mne.io.BaseRaw) -> dict[str, Any]:
             "actual cap placement and limit source/DCM anatomical precision."
         ),
     }
-    logging.warning(report["warning"])
+    LOGGER.warning(report["warning"])
     return report
 
 
@@ -366,16 +359,12 @@ def epoch_picture(
     flat_uv: float,
 ) -> mne.Epochs:
     selected = [
-        trial
-        for trial in trials
-        if (trial.is_correct if correct_only else True)
+        trial for trial in trials if (trial.is_correct if correct_only else True)
     ]
     if not selected:
         variant = "correct-response" if correct_only else "all-onset"
         raise RuntimeError(f"No {variant} trials were found")
-    events = np.array(
-        [[trial.onset_sample, 0, 1] for trial in selected], dtype=int
-    )
+    events = np.array([[trial.onset_sample, 0, 1] for trial in selected], dtype=int)
     return mne.Epochs(
         raw,
         events,
@@ -442,9 +431,7 @@ def select_roi_channels(
             target = np.asarray(anchors[anchor], dtype=float)
             nearest = sorted(
                 available,
-                key=lambda channel: float(
-                    np.linalg.norm(available[channel] - target)
-                ),
+                key=lambda channel: float(np.linalg.norm(available[channel] - target)),
             )[:nearest_per_anchor]
             selected.extend(nearest)
         result[roi] = list(dict.fromkeys(selected))
@@ -477,47 +464,43 @@ def temporal_cluster_statistics(
     times = epochs.times
     test_mask = (times >= 0.0) & (times <= 0.8)
     rows: list[dict[str, Any]] = []
-    significant_masks = {
-        roi: np.zeros(times.size, dtype=bool) for roi in roi_channels
-    }
+    significant_masks = {roi: np.zeros(times.size, dtype=bool) for roi in roi_channels}
 
     for roi, channels in roi_channels.items():
         trial_waveforms = (
             epochs.get_data(picks=channels).mean(axis=1)[:, test_mask] * 1e6
         )
         if trial_waveforms.shape[0] < 4:
-            logging.warning(
+            LOGGER.warning(
                 "%s has only %d epochs; skipping permutation inference",
                 roi,
                 trial_waveforms.shape[0],
             )
             continue
-        threshold = float(
-            stats.t.ppf(0.975, df=trial_waveforms.shape[0] - 1)
-        )
+        threshold = float(stats.t.ppf(0.975, df=trial_waveforms.shape[0] - 1))
         n_permutations: int | str = (
             "all" if trial_waveforms.shape[0] <= 12 else permutations
         )
-        t_obs, clusters, p_values, _ = (
-            mne.stats.permutation_cluster_1samp_test(
-                trial_waveforms,
-                threshold=threshold,
-                n_permutations=n_permutations,
-                tail=0,
-                adjacency=None,
-                out_type="mask",
-                seed=seed,
-                verbose=False,
-            )
+        t_obs, clusters, p_values, _ = mne.stats.permutation_cluster_1samp_test(
+            trial_waveforms,
+            threshold=threshold,
+            n_permutations=n_permutations,
+            tail=0,
+            adjacency=None,
+            out_type="mask",
+            seed=seed,
+            verbose=False,
         )
         test_indices = np.flatnonzero(test_mask)
         for cluster_index, (cluster, p_value) in enumerate(
             zip(clusters, p_values), start=1
         ):
-            cluster_mask = np.asarray(
-                cluster[0] if isinstance(cluster, tuple) else cluster,
-                dtype=bool,
-            )
+            cluster_component = cluster[0] if isinstance(cluster, tuple) else cluster
+            if isinstance(cluster_component, slice):
+                cluster_mask = np.zeros(test_indices.size, dtype=bool)
+                cluster_mask[cluster_component] = True
+            else:
+                cluster_mask = np.asarray(cluster_component, dtype=bool).reshape(-1)
             indices = test_indices[cluster_mask]
             rows.append(
                 {
@@ -525,9 +508,7 @@ def temporal_cluster_statistics(
                     "cluster": cluster_index,
                     "start_seconds": float(times[indices[0]]),
                     "end_seconds": float(times[indices[-1]]),
-                    "cluster_mass": float(
-                        np.abs(t_obs[cluster_mask]).sum()
-                    ),
+                    "cluster_mass": float(np.abs(t_obs[cluster_mask]).sum()),
                     "p_uncorrected": float(p_value),
                     "_indices": indices,
                 }
@@ -547,9 +528,7 @@ def descriptive_erp_statistics(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for roi, channels in roi_channels.items():
-        waveform = (
-            epochs.get_data(picks=channels).mean(axis=(0, 1)) * 1e6
-        )
+        waveform = epochs.get_data(picks=channels).mean(axis=(0, 1)) * 1e6
         for window_name, (start, end) in ERP_WINDOWS.items():
             mask = (epochs.times >= start) & (epochs.times < end)
             segment = waveform[mask]
@@ -563,9 +542,7 @@ def descriptive_erp_statistics(
                     "n_channels": len(channels),
                     "mean_amplitude_uv": float(segment.mean()),
                     "peak_amplitude_uv": float(segment[peak_index]),
-                    "peak_latency_seconds": float(
-                        segment_times[peak_index]
-                    ),
+                    "peak_latency_seconds": float(segment_times[peak_index]),
                 }
             )
     return rows
@@ -593,9 +570,7 @@ def plot_erps(
     times_ms = epochs.times * 1e3
 
     for axis, (roi, channels) in zip(axes, roi_channels.items()):
-        trial_waveforms = (
-            epochs.get_data(picks=channels).mean(axis=1) * 1e6
-        )
+        trial_waveforms = epochs.get_data(picks=channels).mean(axis=1) * 1e6
         mean = trial_waveforms.mean(axis=0)
         if len(epochs) > 1:
             sem = stats.sem(trial_waveforms, axis=0)
@@ -672,9 +647,41 @@ def write_trial_table(path: Path, participant: str, trials: Sequence[Trial]) -> 
     write_csv(path, rows)
 
 
+def dcm_pre_speech_end_ms(
+    trials: Sequence[Trial], sfreq: float, correct_only: bool, epoch_tmax: float
+) -> float:
+    """Choose a conservative DCM endpoint before offset/premature speech."""
+    selected = [
+        trial for trial in trials if (trial.is_correct if correct_only else True)
+    ]
+    boundaries = [
+        (trial.picture_offset_sample - trial.onset_sample) / sfreq
+        for trial in selected
+        if trial.picture_offset_sample is not None
+    ]
+    if not correct_only:
+        boundaries.extend(
+            trial.response_latency_seconds
+            for trial in selected
+            if trial.outcome == "response_4"
+            and trial.response_latency_seconds is not None
+        )
+    if not boundaries:
+        raise RuntimeError(
+            "No picture-offset markers are available to define a pre-speech DCM window"
+        )
+    endpoint_ms = min(epoch_tmax * 1000.0, min(boundaries) * 1000.0 - 20.0)
+    if endpoint_ms < 300.0:
+        raise RuntimeError(
+            f"Artifact-safe DCM window ends at {endpoint_ms:.1f} ms; this is "
+            "too short for the prespecified visual-language network"
+        )
+    return endpoint_ms
+
+
 def process_picture(
     dataset: dict[str, str], args: argparse.Namespace, output_dir: Path
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     participant = dataset["participant"]
     subject_dir = output_dir / participant
     subject_dir.mkdir(parents=True, exist_ok=True)
@@ -685,13 +692,23 @@ def process_picture(
         json.dumps(audit, indent=2), encoding="utf-8"
     )
 
-    trials = classify_trials(
-        annotation_events(raw), raw.info["sfreq"], raw.first_samp
-    )
+    trials = classify_trials(annotation_events(raw), raw.info["sfreq"], raw.first_samp)
     write_trial_table(subject_dir / "picture_trials.csv", participant, trials)
 
-    analyses: list[dict[str, str]] = []
+    analyses: list[dict[str, Any]] = []
     for variant, correct_only in (("picture_all", False), ("picture_correct", True)):
+        dcm_end_ms = dcm_pre_speech_end_ms(
+            trials,
+            raw.info["sfreq"],
+            correct_only=correct_only,
+            epoch_tmax=args.tmax,
+        )
+        LOGGER.info(
+            "%s %s DCM window: 0–%.1f ms (pre-offset/pre-speech)",
+            participant,
+            variant,
+            dcm_end_ms,
+        )
         epochs = epoch_picture(
             raw,
             trials,
@@ -724,15 +741,14 @@ def process_picture(
             subject_dir / f"{variant}_erp.png",
             f"{participant}: {variant.replace('_', ' ')}",
         )
-        set_path = export_epochs(
-            epochs, subject_dir / f"{variant}_clean_epochs"
-        )
+        set_path = export_epochs(epochs, subject_dir / f"{variant}_clean_epochs")
         analyses.append(
             {
                 "participant": participant,
                 "analysis": variant,
                 "kind": "ERP",
                 "set_file": str(set_path.resolve()),
+                "tdcm_end_ms": dcm_end_ms,
             }
         )
     raw.close()
@@ -741,7 +757,7 @@ def process_picture(
 
 def process_rest(
     dataset: dict[str, str], args: argparse.Namespace, output_dir: Path
-) -> dict[str, str]:
+) -> dict[str, Any]:
     participant = dataset["participant"]
     subject_dir = output_dir / participant
     subject_dir.mkdir(parents=True, exist_ok=True)
@@ -764,6 +780,7 @@ def process_rest(
         "analysis": "rest",
         "kind": "CSD",
         "set_file": str(set_path.resolve()),
+        "tdcm_end_ms": args.rest_epoch_seconds * 1000.0 - 1.0,
     }
 
 
@@ -812,6 +829,10 @@ condition or baseline in ERP-DCM. The architecture families are compared
 separately within picture_all, picture_correct, and rest. No direct
 picNaming-vs-rest ERP-DCM contrast is claimed.
 
+Picture DCM windows end before the earliest picture offset or premature
+response (20 ms safety margin, 800 ms maximum), preserving a pre-speech
+interval. picture_correct is primary; picture_all is a sensitivity analysis.
+
 Model families
 --------------
 F1: OT -> pMTG, OT -> ATL, pMTG -> IFG, ATL -> IFG
@@ -830,9 +851,7 @@ SPM12 revision and MATLAB version are written by run_spm_dcm.m at execution.
     (output_dir / "METHOD_NOTES.txt").write_text(notes, encoding="utf-8")
 
 
-def invoke_spm(
-    manifest: Path, spm_path: Path | None, matlab_command: str
-) -> None:
+def invoke_spm(manifest: Path, spm_path: Path | None, matlab_command: str) -> None:
     if spm_path is None:
         env_value = os.environ.get("SPM12_PATH")
         spm_path = Path(env_value) if env_value else None
@@ -863,11 +882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.tmin >= 0 or args.tmax <= 0 or args.tmin >= args.tmax:
         raise ValueError("Epoch must span zero with tmin < 0 < tmax")
-    if (
-        not math.isfinite(args.reject_uv)
-        or args.reject_uv <= 0
-        or args.flat_uv < 0
-    ):
+    if not math.isfinite(args.reject_uv) or args.reject_uv <= 0 or args.flat_uv < 0:
         raise ValueError("Artifact thresholds must be finite and non-negative")
     if args.output_dir.exists():
         if not args.overwrite:
@@ -890,15 +905,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not Path(dataset["vhdr"]).is_file():
             raise FileNotFoundError(dataset["vhdr"])
 
-    analyses: list[dict[str, str]] = []
+    analyses: list[dict[str, Any]] = []
     for dataset in datasets:
-        logging.info(
-            "Processing %s %s", dataset["participant"], dataset["task"]
-        )
+        LOGGER.info("Processing %s %s", dataset["participant"], dataset["task"])
         if dataset["task"] == "picture":
-            analyses.extend(
-                process_picture(dataset, args, args.output_dir)
-            )
+            analyses.extend(process_picture(dataset, args, args.output_dir))
         else:
             analyses.append(process_rest(dataset, args, args.output_dir))
 
@@ -917,7 +928,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.skip_dcm:
         invoke_spm(dcm_manifest, args.spm_path, args.matlab_command)
     else:
-        logging.warning(
+        LOGGER.warning(
             "DCM skipped by request. EEGLAB files and SPM manifest are ready."
         )
     return 0

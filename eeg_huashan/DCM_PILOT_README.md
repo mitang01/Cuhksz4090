@@ -42,6 +42,12 @@ Two picture datasets are analyzed separately:
 - `picture_all`: every marker-1 onset, including premature/missed trials
 - `picture_correct`: marker-1 onsets whose first terminal response is marker 2
 
+For DCM, the script ends each picture window before the earliest picture
+offset (or premature-response marker 4), with a 20 ms safety margin and an
+800 ms maximum. This keeps the modeled data pre-speech. If that leaves less
+than 300 ms, the script stops rather than fitting the prespecified
+visual-language network to an inadequate or speech-contaminated interval.
+
 ## Installation
 
 Python requirements:
@@ -162,4 +168,6 @@ participants. These p-values must not be presented as an N=2 population test.
 
 `picture_correct` is a subset of `picture_all`; comparing those two curves as
 independent conditions is invalid. They are reported as two requested
-descriptions, not as a condition contrast.
+descriptions, not as a condition contrast. `picture_correct` is the primary
+DCM; `picture_all` is a sensitivity analysis because premature/missed trials
+are behaviorally heterogeneous.

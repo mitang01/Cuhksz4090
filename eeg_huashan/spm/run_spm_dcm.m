@@ -25,6 +25,7 @@ for analysis_index = 1:numel(analyses)
     analysis_name = char(analysis.analysis);
     analysis_kind = char(analysis.kind);
     set_file = char(analysis.set_file);
+    tdcm_end_ms = double(analysis.tdcm_end_ms);
     analysis_dir = fullfile(output_root, participant, 'dcm', analysis_name);
     if ~exist(analysis_dir, 'dir')
         mkdir(analysis_dir);
@@ -40,14 +41,16 @@ for analysis_index = 1:numel(analyses)
         model_files{model_index} = fullfile(analysis_dir, ...
             sprintf('DCM_%s_F%d.mat', analysis_name, model_index));
         DCM = configure_dcm( ...
-            spm_file, model_files{model_index}, analysis_kind, model_index);
+            spm_file, model_files{model_index}, analysis_kind, ...
+            model_index, tdcm_end_ms);
         if strcmpi(analysis_kind, 'ERP')
             DCM = spm_dcm_erp_data(DCM);
             DCM = spm_dcm_erp_dipfit(DCM);
             DCM = spm_dcm_erp(DCM);
         elseif strcmpi(analysis_kind, 'CSD')
-            DCM = spm_dcm_csd_data(DCM);
             DCM = spm_dcm_erp_dipfit(DCM);
+            % CSD feature extraction needs channel modes from the dipfit.
+            DCM = spm_dcm_csd_data(DCM);
             DCM = spm_dcm_csd(DCM);
         else
             error('Unsupported analysis kind: %s', analysis_kind);
@@ -97,7 +100,8 @@ spm_file = fullfile(D.path, D.fname);
 end
 
 
-function DCM = configure_dcm(spm_file, output_file, kind, model_index)
+function DCM = configure_dcm( ...
+    spm_file, output_file, kind, model_index, tdcm_end_ms)
 % Four fixed, hypothesis-driven left language-network source priors (MNI mm).
 n = 4;
 DCM = struct();
@@ -139,7 +143,7 @@ DCM.xU.name = {};
 if strcmpi(kind, 'ERP')
     DCM.options.analysis = 'ERP';
     DCM.options.model = 'ERP';
-    DCM.options.Tdcm = [0 800];
+    DCM.options.Tdcm = [0 tdcm_end_ms];
     DCM.options.Fdcm = [1 30];
     DCM.options.onset = 60;
     DCM.options.dur = 16;
@@ -147,7 +151,7 @@ if strcmpi(kind, 'ERP')
 elseif strcmpi(kind, 'CSD')
     DCM.options.analysis = 'CSD';
     DCM.options.model = 'CMC';
-    DCM.options.Tdcm = [1 2000];
+    DCM.options.Tdcm = [1 tdcm_end_ms];
     DCM.options.Fdcm = [4 40];
     DCM.C = zeros(n, 1);
 else
