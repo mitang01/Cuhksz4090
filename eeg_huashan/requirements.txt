@@ -1,3 +1,5 @@
 matplotlib
+eeglabio
 mne
 numpy
+scipy
