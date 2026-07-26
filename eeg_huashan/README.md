@@ -59,3 +59,11 @@ python3 plot_raw_eeg.py --dates 20260630
 
 Matplotlib uses its non-interactive `Agg` backend, so the command works in a
 terminal without a display server and produces image files only.
+
+## Picture-naming DCM pilot
+
+The separate `run_dcm_pilot.py` pipeline processes the two supplied
+picture-naming and rest datasets, generates picture-onset ERP outputs, and
+uses MATLAB/SPM12 for actual DCM-ERP and DCM-CSD inversion. See
+[`DCM_PILOT_README.md`](DCM_PILOT_README.md) for installation, methods,
+outputs, and scientific limitations.
