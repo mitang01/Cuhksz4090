@@ -48,7 +48,7 @@ DEFAULT_DATASETS = (
         "participant": "Pp1_WWL",
         "task": "rest",
         "vhdr": (
-            "/share/workspace2/tangmi/eeg_huashan/20260630/20260630_rest_001_WWL.Vhdr"
+            "/share/workspace2/tangmi/eeg_huashan/20260630/20260630_rest_001_WWL.vhdr"
         ),
     },
     {
