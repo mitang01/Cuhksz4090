@@ -67,3 +67,8 @@ picture-naming and rest datasets, generates picture-onset ERP outputs, and
 uses MATLAB/SPM12 for actual DCM-ERP and DCM-CSD inversion. See
 [`DCM_PILOT_README.md`](DCM_PILOT_README.md) for installation, methods,
 outputs, and scientific limitations.
+
+If MATLAB/SPM is unavailable, `run_directed_conect.py` provides a Python-only
+source-space Granger and time-reversed Granger pilot while preserving the ERP
+pipeline. It is directed connectivity, not DCM. See
+[`DIRECTED_CONNECTIVITY_README.md`](DIRECTED_CONNECTIVITY_README.md).

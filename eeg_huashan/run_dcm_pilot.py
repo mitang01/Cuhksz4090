@@ -306,7 +306,7 @@ def set_proxy_montage(raw: mne.io.BaseRaw) -> dict[str, Any]:
         "unmatched_eeg_channels": unmatched,
         "warning": (
             "Template sensor coordinates do not represent this participant's "
-            "actual cap placement and limit source/DCM anatomical precision."
+            "actual cap placement and limit source-model anatomical precision."
         ),
     }
     LOGGER.warning(report["warning"])
