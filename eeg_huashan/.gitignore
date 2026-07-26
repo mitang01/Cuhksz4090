@@ -1,3 +1,5 @@
 dcm_pilot_results/
+directed_connectivity_results/
+.mne_subjects/
 __pycache__/
 *.pyc

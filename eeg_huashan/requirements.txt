@@ -1,5 +1,7 @@
 matplotlib
 eeglabio
 mne
+mne-connectivity
+networkx
 numpy
 scipy
