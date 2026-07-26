@@ -18,7 +18,7 @@ import mne
 import numpy as np
 
 
-DEFAULT_DATA_ROOT = Path("/share/workspace2/tangmi")
+DEFAULT_DATA_ROOT = Path("/share/workspace2/tangmi/eeg_huashan")
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATES = ("20260630", "20260702")
 EXPECTED_RECORDINGS = ("BCI", "picNaming", "rest", "semantic")
