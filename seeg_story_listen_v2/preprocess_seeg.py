@@ -32,10 +32,20 @@ DEFAULT_BANDS = {
     "high_gamma": (70.0, 150.0),
 }
 TIME_ALIASES = ("time", "timestamp", "seconds", "sec", "latency", "event_time")
-LABEL_ALIASES = ("trigger", "event", "event_id", "code", "value", "description")
+LABEL_ALIASES = (
+    "trigger",
+    "trigger_label",
+    "event",
+    "event_id",
+    "code",
+    "value",
+    "description",
+)
 STIMULUS_ALIASES = (
     "stimulus",
     "stimuli",
+    "stimuli_filename",
+    "stimulus_filename",
     "audio",
     "wav",
     "sound",

@@ -59,6 +59,8 @@ The event reader accepts either:
 
 Common alternative column names are detected. For nonstandard event tables,
 use `--event-time-column NAME` and `--event-label-column NAME`.
+The supplied `event_stimuli.csv` headers `trigger_label` and
+`stimuli_filename` are recognized; surrounding header whitespace is ignored.
 
 Inspect every generated `audio_trigger_duration_qc.csv`. A row fails the
 default check when the onset-to-offset interval differs from WAV duration by
