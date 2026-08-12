@@ -1,0 +1,130 @@
+# Story-listening sEEG preprocessing
+
+`preprocess_seeg.py` implements the requested preprocessing and
+speech-responsiveness analysis in Python:
+
+1. Remove 60, 120, 180, and 240 Hz line components (when below Nyquist) with
+   MNE's regression/multitaper `spectrum_fit` method.
+2. Group numbered contacts by electrode-shaft prefix and apply a
+   Laplacian-style reference. Interior contacts are referenced to the mean of
+   their two immediate neighbors; shaft endpoints are referenced to their one
+   immediate neighbor.
+3. Extract amplitude in delta (1–4 Hz), theta (4–8 Hz), alpha (8–13 Hz), beta
+   (13–30 Hz), gamma (30–70 Hz), and high gamma (70–150 Hz). Each range is
+   divided into a 1/7-octave filterbank, Hilbert magnitudes are averaged, and
+   the result is resampled to 128 Hz.
+4. Z-score each continuous band using samples pooled across the pre-track
+   baselines (default: -1.0 to -0.05 seconds).
+5. Read non-empty interval onsets from the first TextGrid `IntervalTier`,
+   excluding `story18`, and create -1 to +2 second token epochs.
+6. Compare each token's 50–200 ms mean with its -200 to -50 ms mean using a
+   one-sided paired Wilcoxon signed-rank test. Benjamini-Hochberg FDR is applied
+   across contacts separately for every recording and band at q=0.01.
+
+The script deliberately uses the requested spelling `prepocessed` in EDF
+filenames.
+
+## Install on the cluster
+
+```bash
+python3 -m venv ~/.venvs/seeg-story
+source ~/.venvs/seeg-story/bin/activate
+python3 -m pip install -r seeg_story_listen_v2/requirements.txt
+```
+
+MNE's EDF export uses `edfio`, included in the requirements.
+
+## Validate metadata first
+
+Run the metadata-only pass before filtering:
+
+```bash
+python3 seeg_story_listen_v2/preprocess_seeg.py --dry-run
+```
+
+Defaults match the cluster layout:
+
+- input: `/share/workspace3/ieeg/seeg/story_listen_v2`
+- output: `/share/home/mitan/seeg_story_listen_v2`
+- trigger map: `<input>/event_stimuli.csv`
+- WAV files: `<input>/stimuli_wav`
+- TextGrids: `<input>/stimuli_textgrid`
+
+The event reader accepts either:
+
+- one row per track with `stimulus`, `onset`, and `offset` columns; or
+- one row per trigger with `time` and `trigger` columns. Repeated
+  trigger-to-stimulus mappings are paired as onset then offset unless an
+  onset/offset phase is explicit.
+
+Common alternative column names are detected. For nonstandard event tables,
+use `--event-time-column NAME` and `--event-label-column NAME`.
+
+Inspect every generated `audio_trigger_duration_qc.csv`. A row fails the
+default check when the onset-to-offset interval differs from WAV duration by
+more than 0.1 seconds. Change this reporting threshold with
+`--duration-tolerance`.
+
+## Run preprocessing
+
+```bash
+python3 seeg_story_listen_v2/preprocess_seeg.py
+```
+
+To restart and replace existing outputs:
+
+```bash
+python3 seeg_story_listen_v2/preprocess_seeg.py --overwrite
+```
+
+To process selected bands:
+
+```bash
+python3 seeg_story_listen_v2/preprocess_seeg.py \
+  --bands delta theta alpha beta gamma high_gamma
+```
+
+The input sampling rate must exceed twice the upper edge of each requested
+band. In particular, high gamma requires a sampling rate above 300 Hz.
+
+## Outputs
+
+Input subdirectories are preserved under the output root to prevent recordings
+with identical names from overwriting each other.
+
+For each source EDF and frequency band:
+
+- `<original>_prepocessed_<band>.edf`: continuous, referenced, 128 Hz,
+  baseline-z-scored Hilbert amplitude for every valid sEEG contact.
+- `<original>_responsive_<band>.edf`: the same continuous time-domain data,
+  restricted to speech-responsive contacts.
+- `<original>_qc/<band>_speech_responsiveness.csv`: effect, raw p-value,
+  FDR-adjusted p-value, and decision for every contact.
+- `<original>_qc/<band>_mean_token_erp.npz`: time axis and mean token-locked
+  z-scored response for every contact.
+- `<original>_qc/<band>_responsive_token_epochs.npz`: individual token epochs
+  for responsive contacts.
+
+Additional QC files record audio/trigger duration agreement, TextGrid token
+counts, unmapped/unpaired event warnings, dropped channel names, reference
+details, parameters, and source paths. EDF cannot represent zero channels, so
+when no contact passes FDR the script writes
+`<band>_no_responsive_channels.txt` instead of an invalid empty responsive EDF.
+
+The derived signals are dimensionless z-scores, but EDF has no standardized
+z-score physical unit. The files therefore use the explicit convention
+**1 z-unit = 1 µV**. With MNE, recover the numeric z-score values using
+`raw.get_data(units="uV")`. This convention is also recorded in every
+`processing_metadata.json`.
+
+## Important checks
+
+- Channel labels must end in a contact number, such as `LA1`, `LA2`, or
+  `LA-01`. Labels without this structure are listed as dropped. Override
+  non-sEEG label exclusion with `--exclude-channel-regex`.
+- Missing TextGrids for non-`story18` tracks stop full preprocessing rather
+  than silently reducing the speech-token set.
+- EDF outputs are written through temporary files and reopened to verify
+  channel order and sample count before being finalized.
+- Keep the raw EDFs as the archival data. Hilbert-amplitude EDFs are derived
+  features, not conventional band-passed voltage traces.
