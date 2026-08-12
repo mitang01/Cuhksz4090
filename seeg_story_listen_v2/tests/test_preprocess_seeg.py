@@ -114,12 +114,12 @@ def test_dry_run_validates_audio_events_and_excludes_story18(tmp_path: Path) -> 
     (source / "sub001" / "recording.edf").touch()
     write_csv(
         source / "event_stimuli.csv",
-        ["trigger", "stimulus"],
+        ["trigger_label", " stimuli_filename"],
         [
-            {"trigger": "1", "stimulus": "story1.wav"},
-            {"trigger": "2", "stimulus": "story1.wav"},
-            {"trigger": "3", "stimulus": "story18.wav"},
-            {"trigger": "4", "stimulus": "story18.wav"},
+            {"trigger_label": "1", " stimuli_filename": "story1.wav"},
+            {"trigger_label": "2", " stimuli_filename": "story1.wav"},
+            {"trigger_label": "3", " stimuli_filename": "story18.wav"},
+            {"trigger_label": "4", " stimuli_filename": "story18.wav"},
         ],
     )
     write_csv(
