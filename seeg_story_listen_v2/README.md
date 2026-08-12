@@ -57,6 +57,13 @@ The event reader accepts either:
   trigger-to-stimulus mappings are paired as onset then offset unless an
   onset/offset phase is explicit.
 
+Headerless subject event files are also detected when rows have the cluster
+format `trigger_label,time,auxiliary_value`, for example
+`onset_1,16.743,0`. The first row is retained as data. Subject event files are
+matched by the exact numeric subject identifier and same-directory files are
+preferred, so digits in parent directory names such as `story_listen_v2` do
+not affect matching.
+
 Common alternative column names are detected. For nonstandard event tables,
 use `--event-time-column NAME` and `--event-label-column NAME`.
 The supplied `event_stimuli.csv` headers `trigger_label` and

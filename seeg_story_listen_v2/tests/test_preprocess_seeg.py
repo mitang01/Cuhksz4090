@@ -111,26 +111,28 @@ def test_dry_run_validates_audio_events_and_excludes_story18(tmp_path: Path) -> 
     source = tmp_path / "input"
     output = tmp_path / "output"
     (source / "sub001").mkdir(parents=True)
-    (source / "sub001" / "recording.edf").touch()
+    (source / "sub001" / "sub001.edf").touch()
     write_csv(
         source / "event_stimuli.csv",
         ["trigger_label", " stimuli_filename"],
         [
-            {"trigger_label": "1", " stimuli_filename": "story1.wav"},
-            {"trigger_label": "2", " stimuli_filename": "story1.wav"},
-            {"trigger_label": "3", " stimuli_filename": "story18.wav"},
-            {"trigger_label": "4", " stimuli_filename": "story18.wav"},
+            {"trigger_label": "onset_1", " stimuli_filename": "story1.wav"},
+            {"trigger_label": "offset_1", " stimuli_filename": "story1.wav"},
+            {"trigger_label": "onset_18", " stimuli_filename": "story18.wav"},
+            {"trigger_label": "offset_18", " stimuli_filename": "story18.wav"},
         ],
     )
-    write_csv(
-        source / "001_event.csv",
-        ["time", "trigger"],
-        [
-            {"time": 2, "trigger": 1},
-            {"time": 4, "trigger": 2},
-            {"time": 6, "trigger": 3},
-            {"time": 8, "trigger": 4},
-        ],
+    event_csv = source / "sub001" / "sub001_event.csv"
+    event_csv.write_text(
+        "onset_1, 2, 0\n"
+        "offset_1, 4, 0\n"
+        "onset_18, 6, 0\n"
+        "offset_18, 8, 0\n",
+        encoding="utf-8",
+    )
+    (source / "sub002").mkdir()
+    (source / "sub002" / "sub002_event.csv").write_text(
+        "onset_1, 100, 0\noffset_1, 102, 0\n", encoding="utf-8"
     )
     wav_dir = source / "stimuli_wav"
     wav_dir.mkdir()
@@ -168,7 +170,8 @@ item []:
     )
 
     assert result == 0
-    qc = output / "sub001" / "recording_qc"
+    assert prep.find_event_csv(source / "sub001" / "sub001.edf", source) == event_csv
+    qc = output / "sub001" / "sub001_qc"
     duration_rows = list(csv.DictReader((qc / "audio_trigger_duration_qc.csv").open()))
     token_rows = list(csv.DictReader((qc / "textgrid_token_qc.csv").open()))
     assert all(row["within_tolerance"] == "True" for row in duration_rows)
