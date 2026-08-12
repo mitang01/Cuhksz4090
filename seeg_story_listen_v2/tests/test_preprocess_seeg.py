@@ -124,10 +124,10 @@ def test_dry_run_validates_audio_events_and_excludes_story18(tmp_path: Path) -> 
     )
     event_csv = source / "sub001" / "sub001_event.csv"
     event_csv.write_text(
-        "onset_1, 2, 0\n"
-        "offset_1, 4, 0\n"
-        "onset_18, 6, 0\n"
-        "offset_18, 8, 0\n",
+        '"onset_1, 2, 0"\n'
+        '"offset_1, 4, 0"\n'
+        '"onset_18, 6, 0"\n'
+        '"offset_18, 8, 0"\n',
         encoding="utf-8",
     )
     (source / "sub002").mkdir()
