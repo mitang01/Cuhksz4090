@@ -181,11 +181,18 @@ def infer_headerless_track_csv(
 ) -> tuple[list[str], list[dict[str, str]]] | None:
     """Infer label/time columns when the first event row was mistaken for a header."""
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
-        raw_rows = [
-            [value.strip() for value in row]
-            for row in csv.reader(stream)
-            if any(value.strip() for value in row)
-        ]
+        raw_rows: list[list[str]] = []
+        for row in csv.reader(stream):
+            if not any(value.strip() for value in row):
+                continue
+            # Some subject files quote the complete comma-separated row, so
+            # the outer CSV parse yields one value such as
+            # "onset_1, 98.4135, 0". Parse that value once more.
+            if len(row) == 1 and "," in row[0]:
+                nested = next(csv.reader([row[0]], skipinitialspace=True))
+                if len(nested) > 1:
+                    row = nested
+            raw_rows.append([value.strip() for value in row])
     if not raw_rows:
         return None
     first = raw_rows[0]
