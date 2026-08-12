@@ -749,6 +749,11 @@ def process_recording(
             "dropped_channels": dropped,
             "bands_hz": {name: DEFAULT_BANDS[name] for name in args.bands},
             "target_sfreq": args.target_sfreq,
+            "edf_value_convention": (
+                "Derived data are dimensionless z-scores. EDF has no standard "
+                "z-score unit, so 1 z-unit is stored as 1 microvolt; with MNE, "
+                "use raw.get_data(units='uV') to recover numeric z-scores."
+            ),
             "track_baseline_s": [args.baseline_start, args.baseline_end],
             "epoch_s": [args.epoch_start, args.epoch_end],
             "epoch_baseline_s": [
@@ -787,7 +792,7 @@ def process_recording(
                 args.baseline_end,
             )
             band_raw = mne.io.RawArray(
-                band_data,
+                band_data * 1e-6,
                 mne.create_info(channel_names, actual_sfreq, ch_types="seeg"),
                 verbose="ERROR",
             )

@@ -111,6 +111,12 @@ details, parameters, and source paths. EDF cannot represent zero channels, so
 when no contact passes FDR the script writes
 `<band>_no_responsive_channels.txt` instead of an invalid empty responsive EDF.
 
+The derived signals are dimensionless z-scores, but EDF has no standardized
+z-score physical unit. The files therefore use the explicit convention
+**1 z-unit = 1 µV**. With MNE, recover the numeric z-score values using
+`raw.get_data(units="uV")`. This convention is also recorded in every
+`processing_metadata.json`.
+
 ## Important checks
 
 - Channel labels must end in a contact number, such as `LA1`, `LA2`, or

@@ -4,6 +4,7 @@ import csv
 import sys
 from pathlib import Path
 
+import mne
 import numpy as np
 from scipy.io import wavfile
 
@@ -175,3 +176,111 @@ item []:
         "story1": "ok",
         "story18": "excluded_story18",
     }
+
+
+def test_full_high_gamma_pipeline_exports_valid_edfs(tmp_path: Path) -> None:
+    source = tmp_path / "input"
+    output = tmp_path / "output"
+    subject_dir = source / "sub002"
+    subject_dir.mkdir(parents=True)
+    sfreq = 512.0
+    duration = 40.0
+    times = np.arange(round(duration * sfreq)) / sfreq
+    rng = np.random.default_rng(31)
+    responsive_signal = rng.normal(0, 0.1e-6, len(times))
+    relative_tokens = np.arange(1.0, 31.0)
+    for token in relative_tokens:
+        mask = (times >= 3 + token + 0.05) & (times < 3 + token + 0.2)
+        responsive_signal[mask] += np.sin(2 * np.pi * 100 * times[mask]) * 8e-6
+    data = np.vstack(
+        [
+            responsive_signal,
+            rng.normal(0, 1e-6, len(times)),
+            rng.normal(0, 1e-6, len(times)),
+            rng.normal(0, 1e-5, len(times)),
+        ]
+    )
+    raw = mne.io.RawArray(
+        data,
+        mne.create_info(["LA1", "LA2", "LA3", "ECG"], sfreq, ch_types="eeg"),
+        verbose="ERROR",
+    )
+    source_edf = subject_dir / "synthetic.edf"
+    mne.export.export_raw(
+        source_edf,
+        raw,
+        fmt="edf",
+        physical_range="channelwise",
+        overwrite=True,
+        verbose="ERROR",
+    )
+    raw.close()
+
+    write_csv(
+        source / "event_stimuli.csv",
+        ["trigger", "stimulus"],
+        [
+            {"trigger": "11", "stimulus": "story2.wav"},
+            {"trigger": "12", "stimulus": "story2.wav"},
+        ],
+    )
+    write_csv(
+        source / "002_event.csv",
+        ["time", "trigger"],
+        [{"time": 3, "trigger": 11}, {"time": 38, "trigger": 12}],
+    )
+    wav_dir = source / "stimuli_wav"
+    wav_dir.mkdir()
+    wavfile.write(wav_dir / "story2.wav", 1000, np.zeros(35000, dtype=np.int16))
+    textgrid_dir = source / "stimuli_textgrid"
+    textgrid_dir.mkdir()
+    intervals = "\n".join(
+        f"""        intervals [{index}]:
+            xmin = {onset}
+            xmax = {onset + 0.5}
+            text = "syllable{index}\""""
+        for index, onset in enumerate(relative_tokens, start=1)
+    )
+    (textgrid_dir / "story2.TextGrid").write_text(
+        f"""File type = "ooTextFile"
+Object class = "TextGrid"
+item []:
+    item [1]:
+        class = "IntervalTier"
+        name = "syllables"
+        xmin = 0
+        xmax = 35
+        intervals: size = {len(relative_tokens)}
+{intervals}
+""",
+        encoding="utf-8",
+    )
+
+    result = prep.main(
+        [
+            "--input-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+            "--bands",
+            "high_gamma",
+        ]
+    )
+
+    assert result == 0
+    processed = output / "sub002" / "synthetic_prepocessed_high_gamma.edf"
+    responsive = output / "sub002" / "synthetic_responsive_high_gamma.edf"
+    assert processed.is_file()
+    assert responsive.is_file()
+    processed_raw = mne.io.read_raw_edf(processed, preload=False, verbose="ERROR")
+    responsive_raw = mne.io.read_raw_edf(responsive, preload=False, verbose="ERROR")
+    try:
+        assert processed_raw.info["sfreq"] == 128
+        assert processed_raw.ch_names == ["LA1", "LA2", "LA3"]
+        assert 0 < len(responsive_raw.ch_names) <= 3
+    finally:
+        processed_raw.close()
+        responsive_raw.close()
+    qc = output / "sub002" / "synthetic_qc"
+    assert (qc / "high_gamma_responsive_token_epochs.npz").is_file()
+    assert (qc / "processing_metadata.json").is_file()
