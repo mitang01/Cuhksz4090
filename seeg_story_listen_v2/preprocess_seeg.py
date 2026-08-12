@@ -176,6 +176,65 @@ def classify_phase(value: str) -> str | None:
     return None
 
 
+def infer_headerless_track_csv(
+    path: Path, mapping: dict[str, MappingEntry]
+) -> tuple[list[str], list[dict[str, str]]] | None:
+    """Infer label/time columns when the first event row was mistaken for a header."""
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        raw_rows = [
+            [value.strip() for value in row]
+            for row in csv.reader(stream)
+            if any(value.strip() for value in row)
+        ]
+    if not raw_rows:
+        return None
+    first = raw_rows[0]
+    label_indices = [
+        index
+        for index, value in enumerate(first)
+        if normalize(value) in mapping or classify_phase(value) is not None
+    ]
+    if len(label_indices) != 1:
+        return None
+    label_index = label_indices[0]
+    numeric_indices: list[int] = []
+    for index, value in enumerate(first):
+        if index == label_index:
+            continue
+        try:
+            if math.isfinite(float(value)):
+                numeric_indices.append(index)
+        except ValueError:
+            pass
+    if not numeric_indices:
+        return None
+    # In the cluster files the timestamp immediately follows the trigger label
+    # (for example onset_1,16.743,0). Prefer that position over auxiliary
+    # numeric columns such as the trailing zero.
+    time_index = (
+        label_index + 1
+        if label_index + 1 in numeric_indices
+        else numeric_indices[0]
+    )
+    width = max(len(row) for row in raw_rows)
+    fields = [
+        "trigger"
+        if index == label_index
+        else "time"
+        if index == time_index
+        else f"column_{index + 1}"
+        for index in range(width)
+    ]
+    rows = [
+        {
+            field: (row[index].strip() if index < len(row) else "")
+            for index, field in enumerate(fields)
+        }
+        for row in raw_rows
+    ]
+    return fields, rows
+
+
 def load_event_stimuli(path: Path) -> dict[str, MappingEntry]:
     fields, rows = read_csv(path)
     label_column = first_column(fields, LABEL_ALIASES)
@@ -239,6 +298,18 @@ def load_track_events(
     time_column = first_column(fields, TIME_ALIASES, time_override)
     label_column = first_column(fields, LABEL_ALIASES, label_override)
     phase_column = first_column(fields, PHASE_ALIASES)
+    if (
+        time_column is None
+        and label_column is None
+        and time_override is None
+        and label_override is None
+    ):
+        inferred = infer_headerless_track_csv(path, mapping)
+        if inferred is not None:
+            fields, rows = inferred
+            time_column = first_column(fields, TIME_ALIASES)
+            label_column = first_column(fields, LABEL_ALIASES)
+            phase_column = first_column(fields, PHASE_ALIASES)
     if time_column is None or label_column is None:
         raise ValueError(
             f"{path} needs either stimulus/onset/offset columns or time/trigger "
@@ -417,17 +488,24 @@ def collect_token_onsets(
     return np.asarray(sorted(onsets), dtype=float), details
 
 
-def subject_keys(path: Path) -> set[str]:
-    keys = {normalize(path.stem)}
-    for component in (path.stem, *path.parts[-5:-1]):
-        for match in re.finditer(
-            r"(?:sub(?:ject)?[\s_-]*)?0*(\d+)", component, re.I
-        ):
-            number = match.group(1)
-            keys.update(
-                {number, number.zfill(2), number.zfill(3), f"sub{number.zfill(3)}"}
-            )
-    return keys
+def subject_number(value: str) -> int | None:
+    match = re.fullmatch(
+        r"(?:sub(?:ject)?[\s_-]*)?0*(\d+)", value.strip(), re.IGNORECASE
+    )
+    return int(match.group(1)) if match else None
+
+
+def source_subject_number(path: Path) -> int | None:
+    for component in (path.stem, *reversed(path.parent.parts)):
+        number = subject_number(component)
+        if number is not None:
+            return number
+    return None
+
+
+def event_subject_number(path: Path) -> int | None:
+    stem = re.sub(r"(?i)_event$", "", path.stem)
+    return subject_number(stem)
 
 
 def find_event_csv(source: Path, root: Path) -> Path:
@@ -436,19 +514,23 @@ def find_event_csv(source: Path, root: Path) -> Path:
         for path in root.rglob("*_event.csv")
         if path.name.casefold() != "event_stimuli.csv"
     ]
-    keys = subject_keys(source)
-    scored: list[tuple[int, int, Path]] = []
-    for path in candidates:
-        stem = normalize(path.stem.removesuffix("_event"))
-        score = max(
-            [len(key) for key in keys if stem == key or stem.startswith(key + "_")]
-            or [0]
-        )
-        if score:
-            scored.append((score, -len(str(path)), path))
-    if not scored:
+    number = source_subject_number(source)
+    matches = [
+        path for path in candidates if event_subject_number(path) == number
+    ] if number is not None else []
+    if not matches:
+        local = [path for path in candidates if path.parent == source.parent]
+        if len(local) == 1:
+            return local[0]
         raise FileNotFoundError(f"no subject-matching *_event.csv found for {source}")
-    return max(scored)[2]
+    return min(
+        matches,
+        key=lambda path: (
+            path.parent != source.parent,
+            len(path.parts),
+            str(path).casefold(),
+        ),
+    )
 
 
 def find_edfs(root: Path) -> list[Path]:
