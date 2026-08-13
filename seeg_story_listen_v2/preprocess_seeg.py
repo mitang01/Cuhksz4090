@@ -95,8 +95,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Bands to process (default: all)",
     )
     parser.add_argument("--target-sfreq", type=float, default=128.0)
-    parser.add_argument("--line-frequency", type=float, default=60.0)
-    parser.add_argument("--line-harmonics", type=int, default=4)
+    parser.add_argument("--line-frequency", type=float, default=50.0)
+    parser.add_argument("--line-harmonics", type=int, default=5)
     parser.add_argument("--filter-order", type=int, default=4)
     parser.add_argument("--baseline-start", type=float, default=-1.0)
     parser.add_argument("--baseline-end", type=float, default=-0.05)
@@ -847,6 +847,7 @@ def process_recording(
             "retained_channels": channel_names,
             "dropped_channels": dropped,
             "bands_hz": {name: DEFAULT_BANDS[name] for name in args.bands},
+            "responsive_electrode_selection_band": "high_gamma",
             "target_sfreq": args.target_sfreq,
             "edf_value_convention": (
                 "Derived data are dimensionless z-scores. EDF has no standard "
@@ -866,7 +867,15 @@ def process_recording(
             json.dumps(metadata, indent=2), encoding="utf-8"
         )
 
-        for band_name in args.bands:
+        # The cited method defines speech-responsive electrodes from high-gamma
+        # activity. Compute that band first even when the user only requests
+        # other output bands, then apply one shared electrode set to every
+        # requested band.
+        analysis_bands = ["high_gamma", *(
+            band_name for band_name in args.bands if band_name != "high_gamma"
+        )]
+        responsive: np.ndarray | None = None
+        for band_name in analysis_bands:
             low, high = DEFAULT_BANDS[band_name]
             chunks: list[np.ndarray] = []
             for first in range(0, len(channel_names), args.channel_chunk_size):
@@ -902,12 +911,13 @@ def process_recording(
                     description=raw.annotations.description,
                 )
             )
-            processed_path = base.with_name(
-                f"{base.name}_prepocessed_{band_name}.edf"
-            )
-            export_edf(band_raw, processed_path, args.overwrite)
+            if band_name in args.bands:
+                processed_path = base.with_name(
+                    f"{base.name}_prepocessed_{band_name}.edf"
+                )
+                export_edf(band_raw, processed_path, args.overwrite)
 
-            rows, responsive, epoch_times, mean_erps = speech_responsiveness(
+            rows, band_responsive, epoch_times, mean_erps = speech_responsiveness(
                 band_data,
                 actual_sfreq,
                 token_onsets,
@@ -925,6 +935,15 @@ def process_recording(
                 row["channel"] = name
                 row["track_baseline_mean_volts"] = mean
                 row["track_baseline_std_volts"] = std
+                row["passes_band_specific_fdr"] = row.pop("responsive")
+            if band_name == "high_gamma":
+                responsive = band_responsive
+            assert responsive is not None
+            responsive_set = set(responsive.tolist())
+            for row in rows:
+                row["selected_from_high_gamma"] = (
+                    int(row["channel_index"]) in responsive_set
+                )
             write_csv(qc_dir / f"{band_name}_speech_responsiveness.csv", rows)
             np.savez_compressed(
                 qc_dir / f"{band_name}_mean_token_erp.npz",
@@ -934,7 +953,69 @@ def process_recording(
                 token_onsets_s=token_onsets,
                 responsive_channel_indices=responsive,
             )
+            if band_name == "high_gamma":
+                positive_candidates = sorted(
+                    (
+                        row
+                        for row in rows
+                        if float(row["median_response_minus_baseline"]) > 0
+                    ),
+                    key=lambda row: (
+                        float(row["p_value"]),
+                        -float(row["median_response_minus_baseline"]),
+                    ),
+                )
+                write_csv(
+                    qc_dir / "high_gamma_top_candidates.csv",
+                    positive_candidates[:20],
+                )
+                finite_fdr = [
+                    float(row["fdr_p_value"])
+                    for row in rows
+                    if math.isfinite(float(row["fdr_p_value"]))
+                ]
+                diagnostics = {
+                    "selection_band": "high_gamma",
+                    "line_frequencies_hz": line_frequencies.tolist(),
+                    "n_channels_tested": len(rows),
+                    "n_speech_tokens_used": int(rows[0]["n_tokens"]),
+                    "n_responsive_channels": int(len(responsive)),
+                    "fdr_q": args.fdr_q,
+                    "minimum_raw_p_value": min(
+                        float(row["p_value"]) for row in rows
+                    ),
+                    "minimum_fdr_p_value": min(finite_fdr) if finite_fdr else None,
+                    "maximum_median_response_minus_baseline": max(
+                        float(row["median_response_minus_baseline"])
+                        for row in rows
+                    ),
+                    "interpretation": (
+                        "Selected channels pass a one-sided paired Wilcoxon test "
+                        "with positive median 50-200 ms response and "
+                        "Benjamini-Hochberg FDR correction across contacts."
+                    ),
+                    "if_none_selected": (
+                        "Inspect high_gamma_top_candidates.csv, event_warnings.txt, "
+                        "audio_trigger_duration_qc.csv, and textgrid_token_qc.csv. "
+                        "No channel is forced to pass q=0.01; persistent zero "
+                        "results can indicate incorrect token alignment, too few "
+                        "usable tokens, or absent/weak high-gamma responses."
+                    ),
+                }
+                (qc_dir / "speech_response_diagnostics.json").write_text(
+                    json.dumps(diagnostics, indent=2), encoding="utf-8"
+                )
+            if band_name not in args.bands:
+                band_raw.close()
+                continue
+            no_responsive_path = (
+                qc_dir / f"{band_name}_no_responsive_channels.txt"
+            )
+            responsive_path = base.with_name(
+                f"{base.name}_responsive_{band_name}.edf"
+            )
             if responsive.size:
+                no_responsive_path.unlink(missing_ok=True)
                 epoch_offsets = np.arange(
                     round(args.epoch_start * actual_sfreq),
                     round(args.epoch_end * actual_sfreq),
@@ -967,15 +1048,17 @@ def process_recording(
                     token_onsets_s=epoch_centers / actual_sfreq,
                 )
                 responsive_raw = band_raw.copy().pick(responsive.tolist())
-                responsive_path = base.with_name(
-                    f"{base.name}_responsive_{band_name}.edf"
-                )
                 export_edf(responsive_raw, responsive_path, args.overwrite)
                 responsive_raw.close()
             else:
-                (qc_dir / f"{band_name}_no_responsive_channels.txt").write_text(
-                    "No channels passed one-sided Wilcoxon signed-rank testing "
-                    f"with Benjamini-Hochberg FDR q={args.fdr_q}.\n",
+                if args.overwrite:
+                    responsive_path.unlink(missing_ok=True)
+                no_responsive_path.write_text(
+                    "No channels passed high-gamma one-sided Wilcoxon "
+                    "signed-rank testing with positive effect and "
+                    f"Benjamini-Hochberg FDR q={args.fdr_q}. See "
+                    "speech_response_diagnostics.json and "
+                    "high_gamma_top_candidates.csv.\n",
                     encoding="utf-8",
                 )
             band_raw.close()
