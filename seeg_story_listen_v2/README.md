@@ -17,11 +17,10 @@ speech-responsiveness analysis in Python:
    baselines (default: -1.0 to -0.05 seconds).
 5. Read non-empty interval onsets from the first TextGrid `IntervalTier`,
    excluding `story18`, and create -1 to +2 second token epochs.
-6. Use **high gamma only** to define speech-responsive electrodes: compare each
-   token's 50–200 ms mean with its -200 to -50 ms mean using a one-sided paired
-   Wilcoxon signed-rank test, then apply Benjamini-Hochberg FDR across contacts
-   separately for every recording at q=0.01. Apply that one high-gamma-selected
-   contact set to the continuous and token-level outputs for every band.
+6. Define speech-responsive electrodes independently in every band: compare
+   each token's 50–200 ms mean with its -200 to -50 ms mean using a one-sided
+   paired Wilcoxon signed-rank test, then apply Benjamini-Hochberg FDR across
+   contacts separately for every recording and band at q=0.01.
 
 The script deliberately uses the requested spelling `prepocessed` in EDF
 filenames.
@@ -109,11 +108,10 @@ For each source EDF and frequency band:
 - `<original>_prepocessed_<band>.edf`: continuous, referenced, 128 Hz,
   baseline-z-scored Hilbert amplitude for every valid sEEG contact.
 - `<original>_responsive_<band>.edf`: the same continuous time-domain data,
-  restricted to contacts selected from high gamma. Channel names are therefore
-  identical across all responsive-band EDFs for one recording.
+  restricted to contacts selected independently for that frequency band.
+  Responsive channel names can therefore differ between bands.
 - `<original>_qc/<band>_speech_responsiveness.csv`: effect, raw p-value,
-  FDR-adjusted p-value, band-specific exploratory decision, and the definitive
-  high-gamma selection decision for every contact.
+  FDR-adjusted p-value, and selection decision for every contact in that band.
 - `<original>_qc/<band>_mean_token_erp.npz`: time axis and mean token-locked
   z-scored response for every contact.
 - `<original>_qc/<band>_responsive_token_epochs.npz`: individual token epochs
@@ -124,11 +122,11 @@ counts, unmapped/unpaired event warnings, dropped channel names, reference
 details, parameters, and source paths. EDF cannot represent zero channels, so
 when no contact passes FDR the script writes
 `<band>_no_responsive_channels.txt` instead of an invalid empty responsive EDF.
-`speech_response_diagnostics.json` summarizes token count, minimum raw and
-adjusted p-values, maximum effect, and the final number selected.
-`high_gamma_top_candidates.csv` lists the 20 strongest positive candidates,
-including channels that did not pass q=0.01. These files distinguish a strict
-statistical non-result from event-alignment or token-count problems.
+`<band>_speech_response_diagnostics.json` summarizes token count, minimum raw
+and adjusted p-values, maximum effect, and the final number selected.
+`<band>_top_candidates.csv` lists the 20 strongest positive candidates,
+including channels that did not pass q=0.01. These per-band files distinguish
+a strict statistical non-result from event-alignment or token-count problems.
 
 The derived signals are dimensionless z-scores, but EDF has no standardized
 z-score physical unit. The files therefore use the explicit convention
