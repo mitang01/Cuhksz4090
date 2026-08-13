@@ -274,30 +274,33 @@ item []:
 
     assert result == 0
     processed = output / "sub002" / "synthetic_prepocessed_high_gamma.edf"
+    processed_delta = output / "sub002" / "synthetic_prepocessed_delta.edf"
     responsive = output / "sub002" / "synthetic_responsive_high_gamma.edf"
     responsive_delta = output / "sub002" / "synthetic_responsive_delta.edf"
     assert processed.is_file()
+    assert processed_delta.is_file()
     assert responsive.is_file()
-    assert responsive_delta.is_file()
+    assert not responsive_delta.exists()
     processed_raw = mne.io.read_raw_edf(processed, preload=False, verbose="ERROR")
     responsive_raw = mne.io.read_raw_edf(responsive, preload=False, verbose="ERROR")
-    responsive_delta_raw = mne.io.read_raw_edf(
-        responsive_delta, preload=False, verbose="ERROR"
-    )
     try:
         assert processed_raw.info["sfreq"] == 128
         assert processed_raw.ch_names == ["LA1", "LA2", "LA3"]
         assert 0 < len(responsive_raw.ch_names) <= 3
-        assert responsive_delta_raw.ch_names == responsive_raw.ch_names
     finally:
         processed_raw.close()
         responsive_raw.close()
-        responsive_delta_raw.close()
     qc = output / "sub002" / "synthetic_qc"
     assert (qc / "high_gamma_responsive_token_epochs.npz").is_file()
-    assert (qc / "delta_responsive_token_epochs.npz").is_file()
+    assert (qc / "delta_no_responsive_channels.txt").is_file()
     metadata = json.loads((qc / "processing_metadata.json").read_text())
     assert metadata["line_frequencies_hz"] == [50, 100, 150, 200, 250]
-    assert metadata["responsive_electrode_selection_band"] == "high_gamma"
-    diagnostics = json.loads((qc / "speech_response_diagnostics.json").read_text())
+    assert metadata["responsive_electrode_selection"] == "independent_per_band"
+    diagnostics = json.loads(
+        (qc / "high_gamma_speech_response_diagnostics.json").read_text()
+    )
     assert diagnostics["n_responsive_channels"] == len(responsive_raw.ch_names)
+    delta_diagnostics = json.loads(
+        (qc / "delta_speech_response_diagnostics.json").read_text()
+    )
+    assert delta_diagnostics["n_responsive_channels"] == 0
