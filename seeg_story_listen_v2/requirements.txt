@@ -1,5 +1,6 @@
 mne>=1.12.1
-numpy>=2.4.4
-scipy>=1.17.1
+matplotlib>=3.8
+numpy>=1.26,<3
+scipy>=1.11,<2
 edfio>=0.4.14
 pytest>=9.0.2
