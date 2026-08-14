@@ -54,6 +54,7 @@ STIMULUS_ALIASES = (
     "story",
 )
 PHASE_ALIASES = ("phase", "type", "action", "onset_offset", "start_end")
+SILENCE_ALIASES = ("silence", "silence_s", "silence_seconds")
 ONSET_ALIASES = ("onset", "start", "start_time", "onset_time")
 OFFSET_ALIASES = ("offset", "end", "end_time", "offset_time")
 NON_SEEG_DEFAULT = r"(?i)(ecg|ekg|eog|emg|stim|trig|marker|event|status|dc|ref)"
@@ -67,12 +68,17 @@ class TrackEvent:
     offset: float
     onset_trigger: str = ""
     offset_trigger: str = ""
+    onset_trigger_time: float | None = None
+    offset_trigger_time: float | None = None
+    onset_silence_s: float = 0.0
+    offset_silence_s: float = 0.0
 
 
 @dataclass(frozen=True)
 class MappingEntry:
     stimulus: str
     phase: str | None
+    silence_s: float = 0.0
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -171,7 +177,7 @@ def classify_phase(value: str) -> str | None:
     value = normalize(value)
     if re.search(r"(^|_)(onset|start|begin|play)($|_)", value):
         return "onset"
-    if re.search(r"(^|_)(offset|stop|end|finish)($|_)", value):
+    if re.search(r"(^|_)(off|offset|stop|end|finish)($|_)", value):
         return "offset"
     return None
 
@@ -247,6 +253,7 @@ def load_event_stimuli(path: Path) -> dict[str, MappingEntry]:
     label_column = first_column(fields, LABEL_ALIASES)
     stimulus_column = first_column(fields, STIMULUS_ALIASES)
     phase_column = first_column(fields, PHASE_ALIASES)
+    silence_column = first_column(fields, SILENCE_ALIASES)
     if label_column is None or stimulus_column is None:
         raise ValueError(
             f"{path} needs trigger/event and stimulus/audio columns; found {fields}"
@@ -260,7 +267,14 @@ def load_event_stimuli(path: Path) -> dict[str, MappingEntry]:
         phase = classify_phase(row[phase_column]) if phase_column else None
         if phase is None:
             phase = classify_phase(row[label_column])
-        result[label] = MappingEntry(stimulus=stimulus, phase=phase)
+        silence_s = (
+            parse_float(row[silence_column], context=f"{path.name}:{silence_column}")
+            if silence_column and row[silence_column]
+            else 0.0
+        )
+        result[label] = MappingEntry(
+            stimulus=stimulus, phase=phase, silence_s=silence_s
+        )
     if not result:
         raise ValueError(f"no usable trigger-to-stimulus rows in {path}")
     return result
@@ -324,7 +338,7 @@ def load_track_events(
             "--event-label-column when names are nonstandard."
         )
 
-    open_events: dict[str, tuple[float, str]] = {}
+    open_events: dict[str, tuple[float, str, float, float]] = {}
     events: list[TrackEvent] = []
     for row_number, row in enumerate(rows, start=2):
         label = normalize(row[label_column])
@@ -335,6 +349,7 @@ def load_track_events(
             warnings.append(f"row {row_number}: unmapped trigger {row[label_column]!r}")
             continue
         event_time = parse_float(row[time_column], context=f"{path.name}:{row_number}")
+        corrected_time = event_time + entry.silence_s
         phase = classify_phase(row[phase_column]) if phase_column else None
         phase = phase or entry.phase or classify_phase(row[label_column])
         current = open_events.get(entry.stimulus)
@@ -343,21 +358,35 @@ def load_track_events(
                 warnings.append(
                     f"row {row_number}: replaced unmatched onset for {entry.stimulus}"
                 )
-            open_events[entry.stimulus] = (event_time, row[label_column])
+            open_events[entry.stimulus] = (
+                corrected_time,
+                row[label_column],
+                event_time,
+                entry.silence_s,
+            )
         elif phase == "offset" or (phase is None and current is not None):
             if current is None:
                 warnings.append(
                     f"row {row_number}: offset without onset for {entry.stimulus}"
                 )
                 continue
-            onset, onset_trigger = open_events.pop(entry.stimulus)
+            (
+                onset,
+                onset_trigger,
+                onset_trigger_time,
+                onset_silence_s,
+            ) = open_events.pop(entry.stimulus)
             events.append(
                 TrackEvent(
                     stimulus=entry.stimulus,
                     onset=onset,
-                    offset=event_time,
+                    offset=corrected_time,
                     onset_trigger=onset_trigger,
                     offset_trigger=row[label_column],
+                    onset_trigger_time=onset_trigger_time,
+                    offset_trigger_time=event_time,
+                    onset_silence_s=onset_silence_s,
+                    offset_silence_s=entry.silence_s,
                 )
             )
     for stimulus in sorted(open_events):
@@ -839,6 +868,10 @@ def process_recording(
         metadata = {
             "source_edf": str(source),
             "event_csv": str(event_csv),
+            "event_timing_correction": (
+                "corrected onset/offset = subject trigger time + matching "
+                "event_stimuli.csv silence value"
+            ),
             "line_frequencies_hz": line_frequencies.tolist(),
             "reference": (
                 "contact minus mean of immediate shaft neighbors; endpoint minus "

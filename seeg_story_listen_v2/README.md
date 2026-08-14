@@ -70,6 +70,16 @@ Common alternative column names are detected. For nonstandard event tables,
 use `--event-time-column NAME` and `--event-label-column NAME`.
 The supplied `event_stimuli.csv` headers `trigger_label` and
 `stimuli_filename` are recognized; surrounding header whitespace is ignored.
+Its `silence` column is applied separately to every mapped onset/off trigger:
+
+```text
+corrected event time = subject trigger time + silence
+```
+
+Thus a trigger at 110 seconds with `silence=2` becomes 112 seconds. Corrected
+times drive audio-duration QC, track baselines, TextGrid token alignment, and
+speech-responsive electrode testing. Both raw trigger times and corrections
+are retained in `audio_trigger_duration_qc.csv`.
 
 Inspect every generated `audio_trigger_duration_qc.csv`. A row fails the
 default check when the onset-to-offset interval differs from WAV duration by
@@ -164,15 +174,16 @@ python3 seeg_story_listen_v2/plot_band_edfs.py
 By default it discovers
 `/share/home/mitan/seeg_story_listen_v2/**/*_prepocessed_<band>.edf` and writes
 PNG files below `/share/home/mitan/seeg_story_listen_v2/plots`, preserving
-subject subdirectories. The display range is ±0.2 mV around each channel
-baseline and traces are clipped at that range so artifacts do not flatten the
-remaining channels.
+subject subdirectories. The display range is **±0.005 mV** (±5 µV) around each
+channel baseline and traces are clipped at that range so artifacts do not
+flatten the remaining channels. For the derived EDF convention of
+1 z-unit = 1 µV, this displays approximately ±5 z-units.
 
 Useful options:
 
 ```bash
 python3 seeg_story_listen_v2/plot_band_edfs.py \
-  --scale-mv 0.2 \
+  --scale-mv 0.005 \
   --max-time-bins 1500 \
   --dpi 150 \
   --overwrite

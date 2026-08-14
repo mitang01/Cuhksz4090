@@ -14,6 +14,7 @@ import plot_band_edfs as plotter
 
 
 def test_plotter_combines_available_bands_in_one_png(tmp_path: Path) -> None:
+    assert plotter.parse_args([]).scale_mv == 0.005
     input_dir = tmp_path / "processed"
     subject_dir = input_dir / "sub001"
     output_dir = tmp_path / "pictures"

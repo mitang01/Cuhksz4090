@@ -115,20 +115,36 @@ def test_dry_run_validates_audio_events_and_excludes_story18(tmp_path: Path) -> 
     (source / "sub001" / "sub001.edf").touch()
     write_csv(
         source / "event_stimuli.csv",
-        ["trigger_label", " stimuli_filename"],
+        ["trigger_label", " stimuli_filename", " silence"],
         [
-            {"trigger_label": "onset_1", " stimuli_filename": "story1.wav"},
-            {"trigger_label": "offset_1", " stimuli_filename": "story1.wav"},
-            {"trigger_label": "onset_18", " stimuli_filename": "story18.wav"},
-            {"trigger_label": "offset_18", " stimuli_filename": "story18.wav"},
+            {
+                "trigger_label": "onset_1",
+                " stimuli_filename": "story1.wav",
+                " silence": 0.5,
+            },
+            {
+                "trigger_label": "offset_1",
+                " stimuli_filename": "story1.wav",
+                " silence": 0.5,
+            },
+            {
+                "trigger_label": "onset_18",
+                " stimuli_filename": "story18.wav",
+                " silence": 0.25,
+            },
+            {
+                "trigger_label": "offset_18",
+                " stimuli_filename": "story18.wav",
+                " silence": 0.25,
+            },
         ],
     )
     event_csv = source / "sub001" / "sub001_event.csv"
     event_csv.write_text(
-        '"onset_1, 2, 0"\n'
-        '"offset_1, 4, 0"\n'
-        '"onset_18, 6, 0"\n'
-        '"offset_18, 8, 0"\n',
+        '"onset_1, 1.5, 0"\n'
+        '"offset_1, 3.5, 0"\n'
+        '"onset_18, 5.75, 0"\n'
+        '"offset_18, 7.75, 0"\n',
         encoding="utf-8",
     )
     (source / "sub002").mkdir()
@@ -176,6 +192,15 @@ item []:
     duration_rows = list(csv.DictReader((qc / "audio_trigger_duration_qc.csv").open()))
     token_rows = list(csv.DictReader((qc / "textgrid_token_qc.csv").open()))
     assert all(row["within_tolerance"] == "True" for row in duration_rows)
+    story1_duration = next(
+        row for row in duration_rows if row["stimulus"] == "story1"
+    )
+    assert float(story1_duration["onset_trigger_time"]) == 1.5
+    assert float(story1_duration["onset_silence_s"]) == 0.5
+    assert float(story1_duration["onset"]) == 2.0
+    assert float(story1_duration["offset_trigger_time"]) == 3.5
+    assert float(story1_duration["offset_silence_s"]) == 0.5
+    assert float(story1_duration["offset"]) == 4.0
     assert {row["stimulus"]: row["status"] for row in token_rows} == {
         "story1": "ok",
         "story18": "excluded_story18",
