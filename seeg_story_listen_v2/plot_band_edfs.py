@@ -58,7 +58,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--scale-mv",
         type=float,
-        default=0.2,
+        default=0.005,
         help="Displayed amplitude above and below each channel baseline in mV",
     )
     parser.add_argument(

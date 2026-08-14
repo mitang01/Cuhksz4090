@@ -14,6 +14,7 @@ import plot_band_edfs as plotter
 
 
 def test_plotter_combines_available_bands_in_one_png(tmp_path: Path) -> None:
+    assert plotter.parse_args([]).scale_mv == 0.005
     input_dir = tmp_path / "processed"
     subject_dir = input_dir / "sub001"
     output_dir = tmp_path / "pictures"
@@ -22,9 +23,9 @@ def test_plotter_combines_available_bands_in_one_png(tmp_path: Path) -> None:
     times = np.arange(round(2 * sfreq)) / sfreq
     data = np.vstack(
         [
-            np.sin(2 * np.pi * 2 * times) * 50e-6,
-            np.sin(2 * np.pi * 6 * times) * 80e-6,
-            np.sin(2 * np.pi * 10 * times) * 100e-6,
+            np.sin(2 * np.pi * 2 * times) * 1e-6,
+            np.sin(2 * np.pi * 6 * times) * 3e-6,
+            np.sin(2 * np.pi * 10 * times) * 4e-6,
         ]
     )
     for band in ("delta", "high_gamma"):
