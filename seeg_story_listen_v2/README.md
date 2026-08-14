@@ -148,3 +148,37 @@ z-score physical unit. The files therefore use the explicit convention
   channel order and sample count before being finalized.
 - Keep the raw EDFs as the archival data. Hilbert-amplitude EDFs are derived
   features, not conventional band-passed voltage traces.
+
+## Plot full-duration band overviews
+
+`plot_band_edfs.py` uses Matplotlib's non-interactive `Agg` backend and creates
+one PNG for each subject/recording. Available bands are placed side by side in
+canonical order, with every channel shown over the complete recording.
+Min/max time-bin reduction keeps long recordings practical while retaining
+brief extrema.
+
+```bash
+python3 seeg_story_listen_v2/plot_band_edfs.py
+```
+
+By default it discovers
+`/share/home/mitan/seeg_story_listen_v2/**/*_prepocessed_<band>.edf` and writes
+PNG files below `/share/home/mitan/seeg_story_listen_v2/plots`, preserving
+subject subdirectories. The display range is ±0.2 mV around each channel
+baseline and traces are clipped at that range so artifacts do not flatten the
+remaining channels.
+
+Useful options:
+
+```bash
+python3 seeg_story_listen_v2/plot_band_edfs.py \
+  --scale-mv 0.2 \
+  --max-time-bins 1500 \
+  --dpi 150 \
+  --overwrite
+```
+
+Use `--kind responsive` to plot responsive-band EDFs instead. Because
+responsive contacts are selected independently by band, those panels can have
+different channel sets. Use `--bands delta theta high_gamma` to limit the
+included panels.
