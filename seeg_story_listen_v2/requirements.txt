@@ -1,5 +1,11 @@
 mne>=1.12.1
+<<<<<<< HEAD
 numpy>=2.2.6
 scipy>=1.15.3
+=======
+matplotlib>=3.8
+numpy>=1.26,<3
+scipy>=1.11,<2
+>>>>>>> 43bb3caca00f0cea34422a82b51b890985c9e8ef
 edfio>=0.4.14
 pytest>=9.0.2

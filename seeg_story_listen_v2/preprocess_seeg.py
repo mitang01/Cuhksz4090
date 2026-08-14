@@ -95,8 +95,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Bands to process (default: all)",
     )
     parser.add_argument("--target-sfreq", type=float, default=128.0)
-    parser.add_argument("--line-frequency", type=float, default=60.0)
-    parser.add_argument("--line-harmonics", type=int, default=4)
+    parser.add_argument("--line-frequency", type=float, default=50.0)
+    parser.add_argument("--line-harmonics", type=int, default=5)
     parser.add_argument("--filter-order", type=int, default=4)
     parser.add_argument("--baseline-start", type=float, default=-1.0)
     parser.add_argument("--baseline-end", type=float, default=-0.05)
@@ -847,6 +847,7 @@ def process_recording(
             "retained_channels": channel_names,
             "dropped_channels": dropped,
             "bands_hz": {name: DEFAULT_BANDS[name] for name in args.bands},
+            "responsive_electrode_selection": "independent_per_band",
             "target_sfreq": args.target_sfreq,
             "edf_value_convention": (
                 "Derived data are dimensionless z-scores. EDF has no standard "
@@ -907,7 +908,7 @@ def process_recording(
             )
             export_edf(band_raw, processed_path, args.overwrite)
 
-            rows, responsive, epoch_times, mean_erps = speech_responsiveness(
+            rows, band_responsive, epoch_times, mean_erps = speech_responsiveness(
                 band_data,
                 actual_sfreq,
                 token_onsets,
@@ -925,6 +926,9 @@ def process_recording(
                 row["channel"] = name
                 row["track_baseline_mean_volts"] = mean
                 row["track_baseline_std_volts"] = std
+                row["passes_band_specific_fdr"] = row.pop("responsive")
+            for row in rows:
+                row["selected_for_band"] = row["passes_band_specific_fdr"]
             write_csv(qc_dir / f"{band_name}_speech_responsiveness.csv", rows)
             np.savez_compressed(
                 qc_dir / f"{band_name}_mean_token_erp.npz",
@@ -932,9 +936,65 @@ def process_recording(
                 channel_names=np.asarray(channel_names),
                 mean_zscored_erp=mean_erps,
                 token_onsets_s=token_onsets,
-                responsive_channel_indices=responsive,
+                responsive_channel_indices=band_responsive,
             )
-            if responsive.size:
+            positive_candidates = sorted(
+                (
+                    row
+                    for row in rows
+                    if float(row["median_response_minus_baseline"]) > 0
+                ),
+                key=lambda row: (
+                    float(row["p_value"]),
+                    -float(row["median_response_minus_baseline"]),
+                ),
+            )
+            write_csv(
+                qc_dir / f"{band_name}_top_candidates.csv",
+                positive_candidates[:20],
+            )
+            finite_fdr = [
+                float(row["fdr_p_value"])
+                for row in rows
+                if math.isfinite(float(row["fdr_p_value"]))
+            ]
+            diagnostics = {
+                "selection_band": band_name,
+                "line_frequencies_hz": line_frequencies.tolist(),
+                "n_channels_tested": len(rows),
+                "n_speech_tokens_used": int(rows[0]["n_tokens"]),
+                "n_responsive_channels": int(len(band_responsive)),
+                "fdr_q": args.fdr_q,
+                "minimum_raw_p_value": min(float(row["p_value"]) for row in rows),
+                "minimum_fdr_p_value": min(finite_fdr) if finite_fdr else None,
+                "maximum_median_response_minus_baseline": max(
+                    float(row["median_response_minus_baseline"]) for row in rows
+                ),
+                "interpretation": (
+                    f"Selected {band_name} channels pass a one-sided paired "
+                    "Wilcoxon test with positive median 50-200 ms response and "
+                    "Benjamini-Hochberg FDR correction across contacts."
+                ),
+                "if_none_selected": (
+                    f"Inspect {band_name}_top_candidates.csv, "
+                    "event_warnings.txt, audio_trigger_duration_qc.csv, and "
+                    "textgrid_token_qc.csv. No channel is forced to pass "
+                    "q=0.01; persistent zero results can indicate incorrect "
+                    "token alignment, too few usable tokens, or absent/weak "
+                    f"{band_name} responses."
+                ),
+            }
+            (qc_dir / f"{band_name}_speech_response_diagnostics.json").write_text(
+                json.dumps(diagnostics, indent=2), encoding="utf-8"
+            )
+            no_responsive_path = (
+                qc_dir / f"{band_name}_no_responsive_channels.txt"
+            )
+            responsive_path = base.with_name(
+                f"{base.name}_responsive_{band_name}.edf"
+            )
+            if band_responsive.size:
+                no_responsive_path.unlink(missing_ok=True)
                 epoch_offsets = np.arange(
                     round(args.epoch_start * actual_sfreq),
                     round(args.epoch_end * actual_sfreq),
@@ -945,7 +1005,7 @@ def process_recording(
                     & (epoch_centers + epoch_offsets[-1] < band_data.shape[1])
                 ]
                 epoch_indices = epoch_centers[:, None] + epoch_offsets[None, :]
-                responsive_epochs = band_data[responsive][:, epoch_indices]
+                responsive_epochs = band_data[band_responsive][:, epoch_indices]
                 epoch_baseline = (
                     (epoch_times >= args.epoch_baseline_start)
                     & (epoch_times < args.epoch_baseline_end)
@@ -962,26 +1022,28 @@ def process_recording(
                 np.savez_compressed(
                     qc_dir / f"{band_name}_responsive_token_epochs.npz",
                     times=epoch_times,
-                    channel_names=np.asarray(channel_names)[responsive],
+                    channel_names=np.asarray(channel_names)[band_responsive],
                     zscored_epochs=responsive_epochs,
                     token_onsets_s=epoch_centers / actual_sfreq,
                 )
-                responsive_raw = band_raw.copy().pick(responsive.tolist())
-                responsive_path = base.with_name(
-                    f"{base.name}_responsive_{band_name}.edf"
-                )
+                responsive_raw = band_raw.copy().pick(band_responsive.tolist())
                 export_edf(responsive_raw, responsive_path, args.overwrite)
                 responsive_raw.close()
             else:
-                (qc_dir / f"{band_name}_no_responsive_channels.txt").write_text(
-                    "No channels passed one-sided Wilcoxon signed-rank testing "
-                    f"with Benjamini-Hochberg FDR q={args.fdr_q}.\n",
+                if args.overwrite:
+                    responsive_path.unlink(missing_ok=True)
+                no_responsive_path.write_text(
+                    f"No channels passed {band_name} one-sided Wilcoxon "
+                    "signed-rank testing with a positive effect and "
+                    f"Benjamini-Hochberg FDR q={args.fdr_q}. See "
+                    f"{band_name}_speech_response_diagnostics.json and "
+                    f"{band_name}_top_candidates.csv.\n",
                     encoding="utf-8",
                 )
             band_raw.close()
             print(
                 f"OK   {source.name} {band_name}: {len(channel_names)} contacts, "
-                f"{len(token_onsets)} tokens, {len(responsive)} responsive"
+                f"{len(token_onsets)} tokens, {len(band_responsive)} responsive"
             )
     finally:
         raw.close()

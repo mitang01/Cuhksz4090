@@ -3,7 +3,7 @@
 `preprocess_seeg.py` implements the requested preprocessing and
 speech-responsiveness analysis in Python:
 
-1. Remove 60, 120, 180, and 240 Hz line components (when below Nyquist) with
+1. Remove 50, 100, 150, 200, and 250 Hz line components (when below Nyquist) with
    MNE's regression/multitaper `spectrum_fit` method.
 2. Group numbered contacts by electrode-shaft prefix and apply a
    Laplacian-style reference. Interior contacts are referenced to the mean of
@@ -17,9 +17,10 @@ speech-responsiveness analysis in Python:
    baselines (default: -1.0 to -0.05 seconds).
 5. Read non-empty interval onsets from the first TextGrid `IntervalTier`,
    excluding `story18`, and create -1 to +2 second token epochs.
-6. Compare each token's 50–200 ms mean with its -200 to -50 ms mean using a
-   one-sided paired Wilcoxon signed-rank test. Benjamini-Hochberg FDR is applied
-   across contacts separately for every recording and band at q=0.01.
+6. Define speech-responsive electrodes independently in every band: compare
+   each token's 50–200 ms mean with its -200 to -50 ms mean using a one-sided
+   paired Wilcoxon signed-rank test, then apply Benjamini-Hochberg FDR across
+   contacts separately for every recording and band at q=0.01.
 
 The script deliberately uses the requested spelling `prepocessed` in EDF
 filenames.
@@ -107,9 +108,10 @@ For each source EDF and frequency band:
 - `<original>_prepocessed_<band>.edf`: continuous, referenced, 128 Hz,
   baseline-z-scored Hilbert amplitude for every valid sEEG contact.
 - `<original>_responsive_<band>.edf`: the same continuous time-domain data,
-  restricted to speech-responsive contacts.
+  restricted to contacts selected independently for that frequency band.
+  Responsive channel names can therefore differ between bands.
 - `<original>_qc/<band>_speech_responsiveness.csv`: effect, raw p-value,
-  FDR-adjusted p-value, and decision for every contact.
+  FDR-adjusted p-value, and selection decision for every contact in that band.
 - `<original>_qc/<band>_mean_token_erp.npz`: time axis and mean token-locked
   z-scored response for every contact.
 - `<original>_qc/<band>_responsive_token_epochs.npz`: individual token epochs
@@ -120,6 +122,11 @@ counts, unmapped/unpaired event warnings, dropped channel names, reference
 details, parameters, and source paths. EDF cannot represent zero channels, so
 when no contact passes FDR the script writes
 `<band>_no_responsive_channels.txt` instead of an invalid empty responsive EDF.
+`<band>_speech_response_diagnostics.json` summarizes token count, minimum raw
+and adjusted p-values, maximum effect, and the final number selected.
+`<band>_top_candidates.csv` lists the 20 strongest positive candidates,
+including channels that did not pass q=0.01. These per-band files distinguish
+a strict statistical non-result from event-alignment or token-count problems.
 
 The derived signals are dimensionless z-scores, but EDF has no standardized
 z-score physical unit. The files therefore use the explicit convention
@@ -134,7 +141,44 @@ z-score physical unit. The files therefore use the explicit convention
   non-sEEG label exclusion with `--exclude-channel-regex`.
 - Missing TextGrids for non-`story18` tracks stop full preprocessing rather
   than silently reducing the speech-token set.
+- Existing results made with the former 60 Hz defaults must be regenerated
+  with `--overwrite`; otherwise the script intentionally refuses to replace
+  them.
 - EDF outputs are written through temporary files and reopened to verify
   channel order and sample count before being finalized.
 - Keep the raw EDFs as the archival data. Hilbert-amplitude EDFs are derived
   features, not conventional band-passed voltage traces.
+
+## Plot full-duration band overviews
+
+`plot_band_edfs.py` uses Matplotlib's non-interactive `Agg` backend and creates
+one PNG for each subject/recording. Available bands are placed side by side in
+canonical order, with every channel shown over the complete recording.
+Min/max time-bin reduction keeps long recordings practical while retaining
+brief extrema.
+
+```bash
+python3 seeg_story_listen_v2/plot_band_edfs.py
+```
+
+By default it discovers
+`/share/home/mitan/seeg_story_listen_v2/**/*_prepocessed_<band>.edf` and writes
+PNG files below `/share/home/mitan/seeg_story_listen_v2/plots`, preserving
+subject subdirectories. The display range is ±0.2 mV around each channel
+baseline and traces are clipped at that range so artifacts do not flatten the
+remaining channels.
+
+Useful options:
+
+```bash
+python3 seeg_story_listen_v2/plot_band_edfs.py \
+  --scale-mv 0.2 \
+  --max-time-bins 1500 \
+  --dpi 150 \
+  --overwrite
+```
+
+Use `--kind responsive` to plot responsive-band EDFs instead. Because
+responsive contacts are selected independently by band, those panels can have
+different channel sets. Use `--bands delta theta high_gamma` to limit the
+included panels.
