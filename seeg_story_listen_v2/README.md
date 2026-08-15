@@ -73,13 +73,15 @@ The supplied `event_stimuli.csv` headers `trigger_label` and
 Its `silence` column is applied separately to every mapped onset/off trigger:
 
 ```text
-corrected event time = subject trigger time + silence
+corrected onset = onset trigger time - onset silence
+corrected offset = offset trigger time + offset silence
 ```
 
-Thus a trigger at 110 seconds with `silence=2` becomes 112 seconds. Corrected
-times drive audio-duration QC, track baselines, TextGrid token alignment, and
-speech-responsive electrode testing. Both raw trigger times and corrections
-are retained in `audio_trigger_duration_qc.csv`.
+Thus an onset trigger at 110 seconds with `silence=2` becomes 108 seconds,
+while an offset trigger at 110 seconds with `silence=2` becomes 112 seconds.
+Corrected times drive audio-duration QC, track baselines, TextGrid token
+alignment, and speech-responsive electrode testing. Both raw trigger times and
+corrections are retained in `audio_trigger_duration_qc.csv`.
 
 Inspect every generated `audio_trigger_duration_qc.csv`. A row fails the
 default check when the onset-to-offset interval differs from WAV duration by

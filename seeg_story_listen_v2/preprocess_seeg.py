@@ -349,11 +349,11 @@ def load_track_events(
             warnings.append(f"row {row_number}: unmapped trigger {row[label_column]!r}")
             continue
         event_time = parse_float(row[time_column], context=f"{path.name}:{row_number}")
-        corrected_time = event_time + entry.silence_s
         phase = classify_phase(row[phase_column]) if phase_column else None
         phase = phase or entry.phase or classify_phase(row[label_column])
         current = open_events.get(entry.stimulus)
         if phase == "onset" or (phase is None and current is None):
+            corrected_time = event_time - entry.silence_s
             if current is not None:
                 warnings.append(
                     f"row {row_number}: replaced unmatched onset for {entry.stimulus}"
@@ -365,6 +365,7 @@ def load_track_events(
                 entry.silence_s,
             )
         elif phase == "offset" or (phase is None and current is not None):
+            corrected_time = event_time + entry.silence_s
             if current is None:
                 warnings.append(
                     f"row {row_number}: offset without onset for {entry.stimulus}"
@@ -869,8 +870,8 @@ def process_recording(
             "source_edf": str(source),
             "event_csv": str(event_csv),
             "event_timing_correction": (
-                "corrected onset/offset = subject trigger time + matching "
-                "event_stimuli.csv silence value"
+                "corrected onset = trigger time - onset silence; corrected "
+                "offset = trigger time + offset silence"
             ),
             "line_frequencies_hz": line_frequencies.tolist(),
             "reference": (
