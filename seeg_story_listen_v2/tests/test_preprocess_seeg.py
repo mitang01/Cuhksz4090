@@ -141,9 +141,9 @@ def test_dry_run_validates_audio_events_and_excludes_story18(tmp_path: Path) -> 
     )
     event_csv = source / "sub001" / "sub001_event.csv"
     event_csv.write_text(
-        '"onset_1, 1.5, 0"\n'
+        '"onset_1, 2.5, 0"\n'
         '"offset_1, 3.5, 0"\n'
-        '"onset_18, 5.75, 0"\n'
+        '"onset_18, 6.25, 0"\n'
         '"offset_18, 7.75, 0"\n',
         encoding="utf-8",
     )
@@ -195,7 +195,7 @@ item []:
     story1_duration = next(
         row for row in duration_rows if row["stimulus"] == "story1"
     )
-    assert float(story1_duration["onset_trigger_time"]) == 1.5
+    assert float(story1_duration["onset_trigger_time"]) == 2.5
     assert float(story1_duration["onset_silence_s"]) == 0.5
     assert float(story1_duration["onset"]) == 2.0
     assert float(story1_duration["offset_trigger_time"]) == 3.5
