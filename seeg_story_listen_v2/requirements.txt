@@ -2,5 +2,6 @@ mne>=1.12.1
 matplotlib>=3.8
 numpy>=2.2.6,<3
 scipy>=1.15.3,<2
+scikit-learn>=1.9.0,<2
 edfio>=0.4.14
 pytest>=9.0.2
