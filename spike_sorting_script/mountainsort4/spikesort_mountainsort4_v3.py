@@ -291,8 +291,12 @@ def read_mat_metadata(mat_path: Path) -> MatMetadata:
         t = np.asarray(mat["t_amplifier"]).squeeze() if "t_amplifier" in mat else None
 
     source_labels = [str(label).strip() for label in labels]
+    if not source_labels or any(
+        not label or label.startswith("UNKNOWN-") for label in source_labels
+    ):
+        raise ValueError(f"{mat_path.name}: amplifier channel labels could not be decoded reliably")
     labels = [canonical_label(label) for label in source_labels]
-    if not labels or any(not label for label in labels):
+    if any(not label for label in labels):
         raise ValueError(f"{mat_path.name}: amplifier channel labels could not be decoded reliably")
     if len(set(labels)) != len(labels):
         duplicates = sorted({label for label in labels if labels.count(label) > 1})
@@ -431,7 +435,7 @@ def inspect_channel_alignment(
         }
         for item in metadata
         for channel_index, (source_label, canonical_label_value) in enumerate(
-            zip(item.source_labels, item.labels)
+            zip(item.source_labels, item.labels), start=1
         )
     ]
     pd.DataFrame(label_map_rows).to_csv(session_output / "channel_label_map.csv", index=False)
