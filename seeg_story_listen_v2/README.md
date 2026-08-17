@@ -195,3 +195,90 @@ Use `--kind responsive` to plot responsive-band EDFs instead. Because
 responsive contacts are selected independently by band, those panels can have
 different channel sets. Use `--bands delta theta high_gamma` to limit the
 included panels.
+
+## Fit L2 ridge-regularized STRFs
+
+`run_strf.py` fits five stimulus-to-neural encoding models:
+
+1. mel
+2. mel + syllable onset
+3. mel + syllable onset + boundary strength
+4. mel + syllable onset + prosodic structure depth
+5. all four feature families
+
+The neural response defaults to the preprocessed high-gamma amplitude. Contacts
+are retained when `fdr_p_value < 0.05` and the speech-response effect is
+positive. Log-mel power is extracted from each WAV, `syl_onset` impulses come
+from non-empty intervals in the first TextGrid `IntervalTier`, and prosody comes
+from `<story>.prosodic_word_depth.tsv`:
+
+- `end` supplies the boundary time;
+- `boundary_strength_after` supplies `boundary_strength`;
+- `prosodic_word_depth` supplies `struc_depth`.
+
+The estimator uses `reg_type="ridge"`, applying ordinary L2 regularization to
+all lagged coefficients without treating neighboring feature columns as a
+feature-space adjacency. Regularization strength is selected by nested,
+stimulus-grouped cross-validation. No neighboring samples from the same
+stimulus are randomly split between training and testing.
+
+Contact selection uses the responsiveness CSV generated from the complete
+recording, as requested. Predictive accuracy is therefore conditional on this
+preselected responsive-contact population; it is not an unbiased estimate for
+all implanted contacts.
+
+Before a full run, validate file discovery and annotation schemas:
+
+```bash
+python3 seeg_story_listen_v2/run_strf.py --validate-only
+```
+
+Run the complete analysis with 1,000 held-out permutations:
+
+```bash
+python3 seeg_story_listen_v2/run_strf.py --overwrite
+```
+
+Use `--max-recordings 1 --n-permutations 20` for a computational pilot. The
+cluster paths supplied to the preprocessing pipeline are also the STRF
+defaults; every path can be overridden on the command line.
+
+Each track is divided into independent fixed-duration epochs before fitting so
+that time delays never cross stimulus boundaries. The last incomplete epoch is
+excluded and its retained duration is visible in `alignment_qc.csv`.
+
+### STRF outputs
+
+The output root defaults to `/share/home/mitan/seeg_story_listen_v2/strf` and
+contains:
+
+- `recording_manifest.csv`: EDF, event, audio, TextGrid, prosody, and corrected
+  neural timing paths;
+- `analysis_config.json`: complete parameters, models, and permutation-test
+  definition;
+- `alignment_qc.csv` and `aligned_data/**/*.npz`: alignment diagnostics and
+  analysis-ready arrays;
+- `recordings/*/cv_folds.csv`: reproducible outer stimulus folds;
+- `model_metrics.csv`: held-out R², correlation, and MSE per model, fold, and
+  contact;
+- `stimulus_model_metrics.csv`: the corresponding held-out metrics per
+  stimulus, including an auxiliary training-mean `M0_null` baseline used only
+  to test the mel contribution;
+- `alpha_selection.csv`: inner-CV regularization results;
+- `model_comparisons.csv`: nested-model delta R² with outer-fold-blocked
+  sign-flip permutation p-values and BH-FDR values;
+- `feature_contributions.csv`: held-out full-versus-reduced delta R² for each
+  feature. Stimulus deltas are averaged within each outer fold, significance
+  uses 1,000 paired sign-flip permutations across those fold blocks, and
+  p-values receive BH-FDR correction across contacts and features;
+- `predictions_outer_fold_*.npz` and `model_coefficients.npz`: held-out
+  predictions and fold-specific filters;
+- `figures/*.png`: non-interactive coefficient, predictive-accuracy,
+  nested-comparison, and conditional-feature-contribution plots.
+
+Because `struc_depth` is estimated from boundary strength, those predictors can
+share substantial variance. For boundary strength and structure depth,
+feature-contribution tests compare the full model against a model lacking the
+feature of interest. These estimate unique predictive information conditional
+on the other predictors; they do not make the two annotations statistically
+independent.
