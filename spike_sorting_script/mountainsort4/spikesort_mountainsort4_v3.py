@@ -34,6 +34,12 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 import h5py
 import numpy as np
 import pandas as pd
+
+# MountainSort4 still uses the legacy spikeextractors package, whose runtime
+# spike-train validation references np.Inf. NumPy 2 removed that alias.
+if not hasattr(np, "Inf"):
+    setattr(np, "Inf", np.inf)
+
 import spikeinterface.full as si
 from probeinterface import generate_linear_probe
 from scipy.io import loadmat
@@ -100,11 +106,11 @@ SESSION_CONFIGS = [
     },
     {
         "subject": "sub11",
-        "session": "ses01",
+        "session": "ses02",
         "mat_files": [
-            Path("/share/workspace3/ieeg/micro/word_boun_perce_v2/sub-011/ses-01/Temp_260615_105330.mat"),
-            Path("/share/workspace3/ieeg/micro/word_boun_perce_v2/sub-011/ses-01/Temp_260615_110330.mat"),
-            Path("/share/workspace3/ieeg/micro/word_boun_perce_v2/sub-011/ses-01/Temp_260615_111330.mat"),
+            Path("/share/workspace3/ieeg/micro/word_boun_perce_v2/sub-011/ses-02/Temp_260615_105330.mat"),
+            Path("/share/workspace3/ieeg/micro/word_boun_perce_v2/sub-011/ses-02/Temp_260615_110330.mat"),
+            Path("/share/workspace3/ieeg/micro/word_boun_perce_v2/sub-011/ses-02/Temp_260615_111330.mat"),
         ],
         "regions": {
             "HG": (17, 32),
@@ -148,6 +154,7 @@ UNIT_META_COLUMNS = [
 @dataclass
 class MatMetadata:
     path: Path
+    source_labels: list[str]
     labels: list[str]
     shape: tuple[int, int]
     n_samples: int
@@ -191,10 +198,8 @@ def channel_number(label: str) -> int | None:
 def canonical_label(label: str) -> str:
     number = channel_number(label)
     if number is None:
-        return str(label).strip()
-    prefix_match = re.match(r"^(.*?)(\d+)$", str(label).strip())
-    prefix = prefix_match.group(1) if prefix_match else "A-"
-    return f"{prefix}{number:03d}"
+        return ""
+    return f"A-{number:03d}"
 
 
 def label_sort_key(label: str) -> tuple[int, str]:
@@ -285,12 +290,15 @@ def read_mat_metadata(mat_path: Path) -> MatMetadata:
         raw_shape = tuple(int(x) for x in np.asarray(mat["amplifier_data"]).shape)
         t = np.asarray(mat["t_amplifier"]).squeeze() if "t_amplifier" in mat else None
 
-    labels = [canonical_label(label) for label in labels]
-    if not labels or any(label.startswith("UNKNOWN-") or not label for label in labels):
+    source_labels = [str(label).strip() for label in labels]
+    labels = [canonical_label(label) for label in source_labels]
+    if not labels or any(not label for label in labels):
         raise ValueError(f"{mat_path.name}: amplifier channel labels could not be decoded reliably")
     if len(set(labels)) != len(labels):
         duplicates = sorted({label for label in labels if labels.count(label) > 1})
-        raise ValueError(f"{mat_path.name}: duplicate amplifier labels: {duplicates}")
+        raise ValueError(
+            f"{mat_path.name}: source labels collapse to duplicate canonical labels: {duplicates}"
+        )
 
     if raw_shape[1] == len(labels):
         n_samples = raw_shape[0]
@@ -305,6 +313,7 @@ def read_mat_metadata(mat_path: Path) -> MatMetadata:
     t_last = float(t[-1]) if t is not None and t.ndim == 1 and t.size else None
     return MatMetadata(
         path=mat_path,
+        source_labels=source_labels,
         labels=labels,
         shape=raw_shape,
         n_samples=n_samples,
@@ -340,12 +349,13 @@ def inspect_channel_alignment(
 
     region_labels: Dict[str, list[str]] = {}
     region_missing: Dict[str, list[str]] = {}
+    empty_regions = []
     for region, (start, end) in region_ranges.items():
         expected = [f"A-{number:03d}" for number in range(start, end + 1)]
         retained = [label for label in expected if label in common_labels]
         missing = [label for label in expected if label not in common_labels]
         if not retained:
-            raise ValueError(f"{subject}/{session}: no retained channels for region {region}")
+            empty_regions.append(region)
         region_labels[region] = retained
         region_missing[region] = missing
 
@@ -364,6 +374,10 @@ def inspect_channel_alignment(
                 "path": str(item.path),
                 "channel_count": len(item.labels),
                 "sample_count": item.n_samples,
+                "source_to_canonical_labels": [
+                    {"source_label": source, "canonical_label": canonical}
+                    for source, canonical in zip(item.source_labels, item.labels)
+                ],
                 "labels": item.labels,
                 "missing_labels_relative_to_session_union": missing_vs_union,
                 "extra_labels_relative_to_first_file": extra_vs_first,
@@ -406,6 +420,21 @@ def inspect_channel_alignment(
             }
         )
     pd.DataFrame(csv_rows).to_csv(session_output / "channel_alignment_report.csv", index=False)
+    label_map_rows = [
+        {
+            "subject": subject,
+            "session": session,
+            "mat_file": str(item.path),
+            "channel_index": channel_index,
+            "source_label": source_label,
+            "canonical_label": canonical_label_value,
+        }
+        for item in metadata
+        for channel_index, (source_label, canonical_label_value) in enumerate(
+            zip(item.source_labels, item.labels)
+        )
+    ]
+    pd.DataFrame(label_map_rows).to_csv(session_output / "channel_label_map.csv", index=False)
 
     if mismatch:
         print(
@@ -414,6 +443,11 @@ def inspect_channel_alignment(
         )
     else:
         print(f"[INFO] {subject}/{session}: channel labels match across all MAT files")
+    if empty_regions:
+        raise ValueError(
+            f"{subject}/{session}: no retained channels for region(s) "
+            f"{', '.join(empty_regions)}; inspect {session_output / 'channel_label_map.csv'}"
+        )
     return common_labels, region_labels
 
 
