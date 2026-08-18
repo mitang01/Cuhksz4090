@@ -113,6 +113,48 @@ def test_aggregate_group_tracks_uses_equal_electrode_mean_and_shortest_time() ->
     }
 
 
+def test_subject_inference_filters_current_group_members(tmp_path: Path) -> None:
+    individual_dir = tmp_path / "individual"
+    for subject in ("sub001", "sub002"):
+        recording = individual_dir / "recordings" / subject
+        recording.mkdir(parents=True)
+        (recording / "model_comparisons.csv").write_text(
+            "recording_id,channel,comparison,full_model,reduced_model,"
+            "mean_delta_r2,mean_delta_correlation\n"
+            f"{subject}/{subject},LA1,syl,M2,M1,0.1,0.2\n"
+            f"{subject}/{subject},MISC1,syl,M2,M1,1.0,1.0\n",
+            encoding="utf-8",
+        )
+        (recording / "cv_folds.csv").write_text(
+            "recording_id,stimulus_id,outer_fold\n"
+            f"{subject}/{subject},story1,0\n"
+            f"{subject}/{subject},story2,1\n"
+            f"{subject}/{subject},story3,2\n",
+            encoding="utf-8",
+        )
+    output = tmp_path / "subject_model_comparisons.csv"
+
+    group.aggregate_subject_inference(
+        individual_dir,
+        "model_comparisons.csv",
+        "comparison",
+        output,
+        n_permutations=7,
+        seed=1,
+        allowed_members={
+            ("sub001/sub001", "LA1"),
+            ("sub002/sub002", "LA1"),
+        },
+        expected_stimuli={"story1", "story2", "story3"},
+    )
+
+    rows = list(csv.DictReader(output.open()))
+    assert len(rows) == 1
+    assert int(rows[0]["n_subjects"]) == 2
+    assert float(rows[0]["mean_subject_delta_correlation"]) == 0.2
+    assert float(rows[0]["permutation_p_value_correlation"]) == 0.25
+
+
 def test_group_fit_writes_matching_metrics_and_figure_types(tmp_path: Path) -> None:
     sfreq = 20.0
     members: list[group.MemberTrack] = []
@@ -153,7 +195,7 @@ def test_group_fit_writes_matching_metrics_and_figure_types(tmp_path: Path) -> N
     group_tracks, _, _ = group.aggregate_group_tracks(members)
     args = Namespace(
         inner_folds=2,
-        outer_folds=3,
+        outer_folds=None,
         epoch_duration=2.0,
         target_sfreq=sfreq,
         tmin=0.0,
@@ -183,7 +225,7 @@ def test_group_fit_writes_matching_metrics_and_figure_types(tmp_path: Path) -> N
             f"GROUP_{model}_coefficients.png"
             for model in individual.MODEL_FAMILIES
         ),
-        *(f"GROUP_outer_fold_{fold}_prediction.png" for fold in range(3)),
+        *(f"GROUP_outer_fold_{fold}_prediction.png" for fold in range(6)),
     }
     assert expected_figures == {
         path.name for path in (result / "figures").glob("*.png")
