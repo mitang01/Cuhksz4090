@@ -45,6 +45,38 @@ def test_partition_signal_channels_excludes_misc_prefix_case_insensitively() -> 
     assert excluded == ["MISC", "misc01", " MISC_aux"]
 
 
+def test_load_fdr_channels_includes_both_effect_directions(tmp_path: Path) -> None:
+    path = tmp_path / "high_gamma_speech_responsiveness.csv"
+    path.write_text(
+        "channel,fdr_p_value,median_response_minus_baseline\n"
+        "LA1,0.01,1.2\n"
+        "LA2,0.02,-0.8\n"
+        "LA3,0.20,2.0\n",
+        encoding="utf-8",
+    )
+
+    assert group.load_fdr_channels(path, 0.05) == ["LA1", "LA2"]
+
+
+def test_group_feature_figure_omits_mel_only() -> None:
+    rows = [
+        {"channel": channel, "feature": feature}
+        for channel in ("GROUP", "LA1")
+        for feature in individual.FEATURE_FAMILIES
+    ]
+
+    group_rows = individual.feature_rows_for_plot(rows, "GROUP")
+    electrode_rows = individual.feature_rows_for_plot(rows, "LA1")
+
+    assert [row["feature"] for row in group_rows] == [
+        "syl_onset",
+        "boundary_strength",
+        "struc_depth",
+    ]
+    assert [row["feature"] for row in electrode_rows] == list(
+        individual.FEATURE_FAMILIES
+    )
+
 def test_aggregate_group_tracks_uses_equal_electrode_mean_and_shortest_time() -> None:
     X = np.arange(50, dtype=float).reshape(10, 5)
     first = make_track(

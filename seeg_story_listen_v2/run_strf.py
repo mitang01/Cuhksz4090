@@ -1082,6 +1082,21 @@ def plot_prediction_excerpt(
     for channel, channel_name in enumerate(channel_names):
         fig, ax = plt.subplots(figsize=(10, 4), layout="constrained")
         ax.plot(time, y[:n_samples, channel], color="black", alpha=0.65, label="Actual")
+        if channel_name == "GROUP":
+            residual = (
+                y[:n_samples, channel] - prediction[:n_samples, channel]
+            )
+            residual_scale = float(np.std(residual, ddof=1))
+            interval = 1.96 * residual_scale
+            ax.fill_between(
+                time,
+                prediction[:n_samples, channel] - interval,
+                prediction[:n_samples, channel] + interval,
+                color="#d1495b",
+                alpha=0.18,
+                linewidth=0,
+                label="M5 residual 95% interval",
+            )
         ax.plot(
             time,
             prediction[:n_samples, channel],
@@ -1101,6 +1116,18 @@ def plot_prediction_excerpt(
             dpi=160,
         )
         plt.close(fig)
+
+
+def feature_rows_for_plot(
+    contribution_rows: Sequence[dict[str, object]], channel_name: str
+) -> list[dict[str, object]]:
+    """Return feature rows shown for a channel's contribution figure."""
+    rows = [
+        row for row in contribution_rows if row["channel"] == channel_name
+    ]
+    if channel_name == "GROUP":
+        rows = [row for row in rows if row["feature"] != "mel"]
+    return rows
 
 
 def create_figures(
@@ -1141,7 +1168,10 @@ def create_figures(
             xticks=np.arange(len(models)),
             xticklabels=models,
             ylabel="Held-out $R^2$",
-            title=f"{channel_name}: STRF predictive accuracy",
+            title=(
+                f"{channel_name}: STRF predictive accuracy"
+                + (" (error bars: ±SEM)" if channel_name == "GROUP" else "")
+            ),
         )
         ax.tick_params(axis="x", rotation=25)
         fig.savefig(figures / f"{safe_name(channel_name)}_model_accuracy.png", dpi=160)
@@ -1152,32 +1182,67 @@ def create_figures(
         ]
         fig, ax = plt.subplots(figsize=(10, 5), layout="constrained")
         values = [float(row["mean_delta_r2"]) for row in channel_comparisons]
+        comparison_errors = (
+            [
+                1.96
+                * float(row["std_delta_r2"])
+                / math.sqrt(int(row["n_stimuli"]))
+                for row in channel_comparisons
+            ]
+            if channel_name == "GROUP"
+            else None
+        )
         colors = [
             "#2a9d8f" if row["fdr_p_value_significant_0.05"] else "#9aa0a6"
             for row in channel_comparisons
         ]
-        ax.bar(np.arange(len(values)), values, color=colors)
+        ax.bar(
+            np.arange(len(values)),
+            values,
+            color=colors,
+            yerr=comparison_errors,
+            capsize=4 if comparison_errors is not None else 0,
+        )
         ax.axhline(0, color="black", linewidth=0.8)
         ax.set(
             xticks=np.arange(len(values)),
             xticklabels=[str(row["comparison"]) for row in channel_comparisons],
             ylabel=r"Mean $\Delta R^2$",
-            title=f"{channel_name}: nested model comparisons",
+            title=(
+                f"{channel_name}: nested model comparisons"
+                + (" (95% CI)" if channel_name == "GROUP" else "")
+            ),
         )
         ax.tick_params(axis="x", rotation=25)
         fig.savefig(figures / f"{safe_name(channel_name)}_model_comparisons.png", dpi=160)
         plt.close(fig)
 
-        channel_contributions = [
-            row for row in contribution_rows if row["channel"] == channel_name
-        ]
+        channel_contributions = feature_rows_for_plot(
+            contribution_rows, channel_name
+        )
         fig, ax = plt.subplots(figsize=(8, 5), layout="constrained")
         values = [float(row["mean_delta_r2"]) for row in channel_contributions]
+        contribution_errors = (
+            [
+                1.96
+                * float(row["std_delta_r2"])
+                / math.sqrt(int(row["n_stimuli"]))
+                for row in channel_contributions
+            ]
+            if channel_name == "GROUP"
+            else None
+        )
         colors = [
             "#e76f51" if row["fdr_p_value_significant_0.05"] else "#9aa0a6"
             for row in channel_contributions
         ]
-        bars = ax.bar(np.arange(len(values)), values, color=colors)
+        bars = ax.bar(
+            np.arange(len(values)),
+            values,
+            color=colors,
+            yerr=contribution_errors,
+            capsize=4 if contribution_errors is not None else 0,
+        )
         for bar, row in zip(bars, channel_contributions):
             if row["fdr_p_value_significant_0.05"]:
                 ax.text(
@@ -1193,7 +1258,10 @@ def create_figures(
             xticks=np.arange(len(values)),
             xticklabels=[str(row["feature"]) for row in channel_contributions],
             ylabel=r"Mean held-out $\Delta R^2$",
-            title=f"{channel_name}: feature contributions",
+            title=(
+                f"{channel_name}: feature contributions"
+                + (" (95% CI)" if channel_name == "GROUP" else "")
+            ),
         )
         fig.savefig(
             figures / f"{safe_name(channel_name)}_feature_contributions.png", dpi=160
@@ -1243,12 +1311,35 @@ def create_figures(
             fig.colorbar(image, ax=axes[0, 0], label="Normalized coefficient")
             if other_indices:
                 for index in other_indices:
+                    line = coefficients[index]
                     axes[1, 0].plot(
-                        lags, coefficients[index], label=feature_names[index]
+                        lags, line, label=feature_names[index]
                     )
+                    if channel_name == "GROUP" and stacked.shape[0] > 1:
+                        fold_lines = stacked[:, channel_index, index, :]
+                        confidence = (
+                            1.96
+                            * np.std(fold_lines, axis=0, ddof=1)
+                            / math.sqrt(stacked.shape[0])
+                        )
+                        axes[1, 0].fill_between(
+                            lags,
+                            line - confidence,
+                            line + confidence,
+                            alpha=0.18,
+                            linewidth=0,
+                        )
                 axes[1, 0].axhline(0, color="black", linewidth=0.7)
                 axes[1, 0].legend()
-                axes[1, 0].set(ylabel="Coefficient", xlabel="Lag (s)")
+                axes[1, 0].set(
+                    ylabel="Coefficient",
+                    xlabel="Lag (s)",
+                    title=(
+                        "Lines with fold-wise 95% confidence bands"
+                        if channel_name == "GROUP"
+                        else ""
+                    ),
+                )
             else:
                 axes[0, 0].set_xlabel("Lag (s)")
             fig.savefig(
