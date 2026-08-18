@@ -11,6 +11,7 @@ per-recording analysis.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import shutil
 import sys
@@ -50,6 +51,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--event-stimuli", type=Path)
     parser.add_argument("--stimuli-wav-dir", type=Path)
     parser.add_argument("--textgrid-dir", type=Path)
+    parser.add_argument(
+        "--individual-strf-dir",
+        type=Path,
+        help="Revised individual STRF results used for subject-level inference",
+    )
     parser.add_argument("--band", default="high_gamma")
     parser.add_argument("--fdr-threshold", type=float, default=0.05)
     parser.add_argument("--target-sfreq", type=float, default=128.0)
@@ -57,8 +63,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fmin", type=float, default=50.0)
     parser.add_argument("--fmax", type=float, default=8000.0)
     parser.add_argument("--mel-window-s", type=float, default=0.025)
-    parser.add_argument("--tmin", type=float, default=-0.1)
-    parser.add_argument("--tmax", type=float, default=0.6)
+    parser.add_argument("--tmin", type=float, default=-0.3)
+    parser.add_argument("--tmax", type=float, default=0.3)
     parser.add_argument("--epoch-duration", type=float, default=10.0)
     parser.add_argument(
         "--group-duration-tolerance",
@@ -66,13 +72,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0.1,
         help="Maximum duration difference across copies of one stimulus (seconds)",
     )
-    parser.add_argument("--outer-folds", type=int, default=5)
+    parser.add_argument(
+        "--outer-folds",
+        type=int,
+        help="Outer story folds (default: leave one story out)",
+    )
     parser.add_argument("--inner-folds", type=int, default=4)
     parser.add_argument(
         "--alphas",
         type=float,
         nargs="+",
-        default=np.logspace(-3, 3, 7).tolist(),
+        default=np.logspace(-1, 8, 10).tolist(),
     )
     parser.add_argument("--n-permutations", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20260817)
@@ -141,6 +151,7 @@ class StimulusAccumulator:
     response_sum: np.ndarray
     n_electrodes: int
     recordings: set[str]
+    prosody_event_mask: np.ndarray
 
 
 class GroupAggregator:
@@ -175,6 +186,11 @@ class GroupAggregator:
                 response_sum=response_sum.copy(),
                 n_electrodes=track.y.shape[1],
                 recordings={member.recording_id},
+                prosody_event_mask=(
+                    track.prosody_event_mask.copy()
+                    if track.prosody_event_mask is not None
+                    else np.zeros(len(track.X), dtype=bool)
+                ),
             )
         else:
             if track.feature_names != accumulator.feature_names:
@@ -219,8 +235,24 @@ class GroupAggregator:
                     f"stimulus features disagree across recordings for "
                     f"{track.stimulus_id}"
                 )
+            track_event_mask = (
+                track.prosody_event_mask
+                if track.prosody_event_mask is not None
+                else np.zeros(len(track.X), dtype=bool)
+            )
+            if not np.array_equal(
+                track_event_mask[:minimum_samples],
+                accumulator.prosody_event_mask[:minimum_samples],
+            ):
+                raise ValueError(
+                    f"prosody event grids disagree across recordings for "
+                    f"{track.stimulus_id}"
+                )
             accumulator.X = accumulator.X[:minimum_samples]
             accumulator.time = accumulator.time[:minimum_samples]
+            accumulator.prosody_event_mask = (
+                accumulator.prosody_event_mask[:minimum_samples]
+            )
             accumulator.response_sum = (
                 accumulator.response_sum[:minimum_samples]
                 + response_sum[:minimum_samples]
@@ -260,6 +292,7 @@ class GroupAggregator:
                     feature_names=accumulator.feature_names,
                     channel_names=["GROUP"],
                     time=accumulator.time,
+                    prosody_event_mask=accumulator.prosody_event_mask,
                 )
             )
             aggregation_rows.append(
@@ -316,6 +349,9 @@ def resolve_args(args: argparse.Namespace) -> None:
     args.textgrid_dir = (
         args.textgrid_dir or args.input_dir / "stimuli_textgrid"
     ).expanduser().resolve()
+    args.individual_strf_dir = (
+        args.individual_strf_dir or args.preprocessed_dir / "strf"
+    ).expanduser().resolve()
 
 
 def validate_configuration(args: argparse.Namespace) -> None:
@@ -329,12 +365,17 @@ def validate_configuration(args: argparse.Namespace) -> None:
         args.event_stimuli,
         args.stimuli_wav_dir,
         args.textgrid_dir,
+        args.individual_strf_dir,
     }
     if any(
         input_path == args.output_dir or input_path.is_relative_to(args.output_dir)
         for input_path in protected_inputs
     ):
         raise ValueError("--output-dir must not equal or contain an input path")
+    if not args.individual_strf_dir.is_dir():
+        raise FileNotFoundError(
+            f"individual STRF results do not exist: {args.individual_strf_dir}"
+        )
 
 
 def initialize_output(args: argparse.Namespace) -> None:
@@ -374,6 +415,156 @@ def validate_manifest_cohort(
     return stimuli_by_recording
 
 
+def _subject_id(recording_id: str) -> str:
+    number = individual.prep.source_subject_number(Path(recording_id))
+    return f"sub{number:03d}" if number is not None else recording_id.split("/")[0]
+
+
+def aggregate_subject_inference(
+    individual_strf_dir: Path,
+    filename: str,
+    hypothesis_column: str,
+    output_path: Path,
+    *,
+    n_permutations: int,
+    seed: int,
+    allowed_members: set[tuple[str, str]],
+    expected_stimuli: set[str],
+) -> None:
+    """Aggregate electrode effects within subject, then test across subjects."""
+    paths = sorted(
+        (individual_strf_dir / "recordings").glob(f"*/{filename}")
+    )
+    if not paths:
+        raise FileNotFoundError(
+            f"no {filename} files below {individual_strf_dir / 'recordings'}"
+        )
+    subject_values: dict[
+        tuple[str, str], dict[str, list[float]]
+    ] = defaultdict(lambda: {"r2": [], "correlation": []})
+    model_names: dict[str, tuple[str, str]] = {}
+    seen_members: set[tuple[str, str]] = set()
+    for path in paths:
+        with path.open("r", encoding="utf-8", newline="") as stream:
+            result_rows = list(csv.DictReader(stream))
+        relevant_rows = [
+            row
+            for row in result_rows
+            if (row["recording_id"], row["channel"]) in allowed_members
+        ]
+        if not relevant_rows:
+            continue
+        fold_path = path.parent / "cv_folds.csv"
+        if not fold_path.is_file():
+            raise FileNotFoundError(f"missing individual CV folds: {fold_path}")
+        with fold_path.open("r", encoding="utf-8", newline="") as stream:
+            fold_stimuli = {
+                row["stimulus_id"] for row in csv.DictReader(stream)
+            }
+        if fold_stimuli != expected_stimuli:
+            raise ValueError(
+                f"individual/group stimulus cohort mismatch in {fold_path}: "
+                f"expected={sorted(expected_stimuli)}, got={sorted(fold_stimuli)}"
+            )
+        for row in relevant_rows:
+            seen_members.add((row["recording_id"], row["channel"]))
+            hypothesis = row[hypothesis_column]
+            subject = _subject_id(row["recording_id"])
+            subject_values[(hypothesis, subject)]["r2"].append(
+                float(row["mean_delta_r2"])
+            )
+            subject_values[(hypothesis, subject)]["correlation"].append(
+                float(row["mean_delta_correlation"])
+            )
+            model_names[hypothesis] = (
+                row["full_model"],
+                row["reduced_model"],
+            )
+    subjects = sorted({key[1] for key in subject_values})
+    missing_members = sorted(allowed_members - seen_members)
+    if missing_members:
+        raise ValueError(
+            f"individual {filename} is missing current group members: "
+            f"{missing_members[:10]}"
+        )
+    if not subjects:
+        raise ValueError(
+            f"no individual {filename} rows match the current group cohort"
+        )
+    hypotheses = sorted(model_names)
+    rows: list[dict[str, object]] = []
+    for hypothesis in hypotheses:
+        available_subjects = [
+            subject
+            for subject in subjects
+            if (hypothesis, subject) in subject_values
+        ]
+        if len(available_subjects) < 2:
+            raise ValueError(
+                f"{hypothesis} has fewer than two subjects for group inference"
+            )
+        deltas_r2 = np.asarray(
+            [
+                np.mean(subject_values[(hypothesis, subject)]["r2"])
+                for subject in available_subjects
+            ]
+        )
+        deltas_correlation = np.asarray(
+            [
+                np.mean(
+                    subject_values[(hypothesis, subject)]["correlation"]
+                )
+                for subject in available_subjects
+            ]
+        )
+        full_model, reduced_model = model_names[hypothesis]
+        rows.append(
+            {
+                hypothesis_column: hypothesis,
+                "full_model": full_model,
+                "reduced_model": reduced_model,
+                "n_subjects": len(available_subjects),
+                "mean_subject_delta_r2": float(np.mean(deltas_r2)),
+                "std_subject_delta_r2": float(
+                    np.std(deltas_r2, ddof=1)
+                ),
+                "mean_subject_delta_correlation": float(
+                    np.mean(deltas_correlation)
+                ),
+                "std_subject_delta_correlation": float(
+                    np.std(deltas_correlation, ddof=1)
+                ),
+                "positive_subjects_r2": int(np.sum(deltas_r2 > 0)),
+                "positive_subjects_correlation": int(
+                    np.sum(deltas_correlation > 0)
+                ),
+                "permutation_p_value_r2": individual.sign_flip_pvalue(
+                    deltas_r2,
+                    n_permutations,
+                    individual.stable_seed(seed, filename, hypothesis, "r2"),
+                ),
+                "permutation_p_value_correlation": individual.sign_flip_pvalue(
+                    deltas_correlation,
+                    n_permutations,
+                    individual.stable_seed(
+                        seed, filename, hypothesis, "correlation"
+                    ),
+                ),
+                "independent_unit": "subject",
+                "electrode_handling": "mean within subject",
+            }
+        )
+    individual.fdr_bh_rows(
+        rows, "permutation_p_value_r2", "fdr_p_value_r2"
+    )
+    individual.fdr_bh_rows(
+        rows,
+        "permutation_p_value_correlation",
+        "fdr_p_value_correlation",
+    )
+    individual.write_csv(output_path, rows)
+
+
 def run(args: argparse.Namespace) -> int:
     resolve_args(args)
     validate_configuration(args)
@@ -399,8 +590,10 @@ def run(args: argparse.Namespace) -> int:
             "models": individual.MODEL_FAMILIES,
             "regularization": "ridge",
             "permutation_test": (
-                "Outer-fold-blocked sign flips of held-out delta R2 between "
-                "full and reduced models."
+                "Leave-one-story-out delta Pearson correlation and delta R2; "
+                "exact story-level sign flips for <=20 stories. Population "
+                "inference averages electrodes within subject and sign-flips "
+                "subject effects."
             ),
         }
     )
@@ -502,6 +695,30 @@ def run(args: argparse.Namespace) -> int:
         args.output_dir / "group_aggregation.csv", aggregation_rows
     )
     individual.fit_recording("GROUP", group_tracks, args.output_dir, args)
+    allowed_members = {
+        (str(row["recording_id"]), str(row["channel"]))
+        for row in membership_rows
+    }
+    aggregate_subject_inference(
+        args.individual_strf_dir,
+        "model_comparisons.csv",
+        "comparison",
+        args.output_dir / "subject_model_comparisons.csv",
+        n_permutations=args.n_permutations,
+        seed=args.seed,
+        allowed_members=allowed_members,
+        expected_stimuli={track.stimulus_id for track in group_tracks},
+    )
+    aggregate_subject_inference(
+        args.individual_strf_dir,
+        "feature_contributions.csv",
+        "feature",
+        args.output_dir / "subject_feature_contributions.csv",
+        n_permutations=args.n_permutations,
+        seed=args.seed,
+        allowed_members=allowed_members,
+        expected_stimuli={track.stimulus_id for track in group_tracks},
+    )
     print(
         f"OK GROUP: {len(group_tracks)} stimuli, "
         f"{len({row['recording_id'] for row in membership_rows})} recordings, "

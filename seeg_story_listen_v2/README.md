@@ -207,8 +207,8 @@ included panels.
 5. all four feature families
 
 The neural response defaults to the preprocessed high-gamma amplitude. Contacts
-are retained when `fdr_p_value < 0.05` and the speech-response effect is
-positive. Log-mel power is extracted from each WAV, `syl_onset` impulses come
+are retained when `fdr_p_value < 0.05`, regardless of effect direction.
+Log-mel power is extracted from each WAV, `syl_onset` impulses come
 from non-empty intervals in the first TextGrid `IntervalTier`, and prosody comes
 from `<story>.prosodic_word_depth.tsv`:
 
@@ -221,6 +221,18 @@ all lagged coefficients without treating neighboring feature columns as a
 feature-space adjacency. Regularization strength is selected by nested,
 stimulus-grouped cross-validation. No neighboring samples from the same
 stimulus are randomly split between training and testing.
+
+Defaults follow the reference-style predictive analysis more closely:
+
+- lags are −300 to +300 ms;
+- the outer loop is leave-one-story-out;
+- inner CV searches ridge alpha from 0.1 through 100,000,000 and reports when
+  the winner is on a grid edge;
+- exact sign-flip inference is used when there are at most 20 stories;
+- both held-out ΔR² and ΔPearson correlation are saved, with correlation as the
+  primary reference-style metric;
+- planned comparisons are syllable onset after mel, joint prosody after
+  syllable onset, and conditional boundary/structure contributions.
 
 Contact selection uses the responsiveness CSV generated from the complete
 recording, as requested. Predictive accuracy is therefore conditional on this
@@ -265,12 +277,10 @@ contains:
   stimulus, including an auxiliary training-mean `M0_null` baseline used only
   to test the mel contribution;
 - `alpha_selection.csv`: inner-CV regularization results;
-- `model_comparisons.csv`: nested-model delta R² with outer-fold-blocked
-  sign-flip permutation p-values and BH-FDR values;
-- `feature_contributions.csv`: held-out full-versus-reduced delta R² for each
-  feature. Stimulus deltas are averaged within each outer fold, significance
-  uses 1,000 paired sign-flip permutations across those fold blocks, and
-  p-values receive BH-FDR correction across contacts and features;
+- `model_comparisons.csv`: nested-model ΔR² and ΔPearson correlation with
+  story-level sign-flip p-values and BH-FDR values;
+- `feature_contributions.csv`: corresponding held-out full-versus-reduced
+  feature tests;
 - `predictions_outer_fold_*.npz` and `model_coefficients.npz`: held-out
   predictions and fold-specific filters;
 - `figures/*.png`: non-interactive coefficient, predictive-accuracy,
@@ -301,6 +311,12 @@ The resulting STRF describes the response averaged over all included electrodes
 and subjects. It is a pooled descriptive model, not a subject-level random
 effects model. Because the preprocessed responses are baseline z-scores, each
 electrode enters the average on a comparable scale.
+
+The pooled group response remains descriptive. Population inference is written
+to `subject_model_comparisons.csv` and `subject_feature_contributions.csv` by
+first averaging electrode effects within each subject and then sign-flipping
+the subject effects. Run the revised individual STRF pipeline before the group
+pipeline so `--individual-strf-dir` contains matching subject results.
 
 For the group analysis, the FDR threshold is applied without an additional
 effect-direction filter, so significant negative and positive contacts are both
@@ -335,7 +351,47 @@ pipeline under `recordings/GROUP/`, including `GROUP_*_coefficients.png`,
 Group figures include uncertainty wherever the plotted quantity is a bar or
 line: model-accuracy bars show SEM, model-comparison and feature-contribution
 bars show 95% confidence intervals across stimuli, event-feature coefficient
-lines show 95% confidence bands across outer folds, and prediction lines show
-a residual-based 95% interval. The group feature-contribution figure omits
+lines show descriptive ±1.96 SEM variability bands across dependent outer
+folds (not inferential confidence intervals), and prediction lines show a
+residual-based 95% interval. The group feature-contribution figure omits
 `mel` and displays only `syl_onset`, `boundary_strength`, and `struc_depth`;
 the mel STRF remains available in every coefficient figure.
+
+## Syllable-offset prosody separability
+
+After rerunning the revised individual STRFs, extract event-related high-gamma
+and held-out model predictions:
+
+```bash
+python3 seeg_story_listen_v2/run_prosody_epochs.py --overwrite
+python3 seeg_story_listen_v2/run_prosody_epochs_group.py --overwrite
+```
+
+`run_prosody_epochs.py` aligns −500 to +500 ms epochs to prosody TSV `end`
+(syllable offset), analyzes −300 to +300 ms, and deliberately applies **no
+baseline correction**. It tests:
+
+- continuous boundary strength with a time-resolved one-predictor F statistic;
+- categorical structure depth with a time-resolved one-way F statistic;
+- the observed high-gamma response; and
+- residual high gamma after subtracting held-out M2 (`mel + syl_onset`)
+  predictions; and
+- every model's held-out predicted high-gamma response.
+
+Labels are permuted within story 10,000 times so q=0.01 FDR across the 77
+analysis samples has sufficient p-value resolution. Only runs of at least four
+contiguous 128-Hz samples (31.25 ms) are retained as significant clusters. The
+script also compares observed and held-out predicted event-related high gamma
+for every STRF model. Boundary quartiles are used only for visualization;
+statistical tests retain continuous boundary strength.
+
+Outputs under `prosody_epochs/recordings/*` include raw `epoch_data.npz`,
+`timepoint_statistics.csv`, `significant_clusters.csv`,
+`model_epoch_accuracy.csv`, and non-interactive observed/predicted epoch plots.
+
+`run_prosody_epochs_group.py` consumes those individual epoch files. It averages
+electrode statistics within subject and then performs label-permutation
+inference across subjects, preserving subjects—not electrodes or the pooled
+group waveform—as the independent population units. It writes group
+time-point/cluster tables, membership counts, and subject-level confidence
+plots under `prosody_epochs_group`.
