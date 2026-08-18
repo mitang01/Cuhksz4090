@@ -1,0 +1,21 @@
+recording_id,channel,feature,full_model,reduced_model,mean_delta_r2,std_delta_r2,positive_stimuli,n_stimuli,n_permutation_blocks,permutation_p_value,n_permutations,test,fdr_p_value,fdr_p_value_significant_0.05
+sub004/sub004,EEG f12,mel,M1_mel,M0_null,0.008234895515848054,0.017794227284386798,11,13,5,0.0999000999000999,1000,outer-fold-blocked sign flip of held-out delta R2,0.22866022866022867,False
+sub004/sub004,EEG u5,mel,M1_mel,M0_null,0.2322392217921719,0.10793668264228987,13,13,5,0.03796203796203796,1000,outer-fold-blocked sign flip of held-out delta R2,0.13653013653013654,False
+sub004/sub004,EEG u6,mel,M1_mel,M0_null,0.2580603433974786,0.12500917092174005,12,13,5,0.03596403596403597,1000,outer-fold-blocked sign flip of held-out delta R2,0.13653013653013654,False
+sub004/sub004,EEG u7,mel,M1_mel,M0_null,0.21810015213614597,0.108894839011738,12,13,5,0.025974025974025976,1000,outer-fold-blocked sign flip of held-out delta R2,0.13653013653013654,False
+sub004/sub004,EEG u8,mel,M1_mel,M0_null,0.21829183036265443,0.10375301439887571,12,13,5,0.03596403596403597,1000,outer-fold-blocked sign flip of held-out delta R2,0.13653013653013654,False
+sub004/sub004,EEG f12,syl_onset,M2_mel_syl,M1_mel,0.001788021271284626,0.006772049065811016,10,13,5,0.1028971028971029,1000,outer-fold-blocked sign flip of held-out delta R2,0.22866022866022867,False
+sub004/sub004,EEG u5,syl_onset,M2_mel_syl,M1_mel,0.005027643825230397,0.009199375630329708,9,13,5,0.21078921078921078,1000,outer-fold-blocked sign flip of held-out delta R2,0.3442711135018828,False
+sub004/sub004,EEG u6,syl_onset,M2_mel_syl,M1_mel,0.009828877487838748,0.010605917773421914,11,13,5,0.1028971028971029,1000,outer-fold-blocked sign flip of held-out delta R2,0.22866022866022867,False
+sub004/sub004,EEG u7,syl_onset,M2_mel_syl,M1_mel,0.060019285499220094,0.02323749662898417,13,13,5,0.029970029970029972,1000,outer-fold-blocked sign flip of held-out delta R2,0.13653013653013654,False
+sub004/sub004,EEG u8,syl_onset,M2_mel_syl,M1_mel,0.06652278851953566,0.024946959302822525,13,13,5,0.04095904095904096,1000,outer-fold-blocked sign flip of held-out delta R2,0.13653013653013654,False
+sub004/sub004,EEG f12,boundary_strength,M5_full,M4_mel_syl_structure,0.0001436067285721227,0.002276311687217121,6,13,5,0.35364635364635366,1000,outer-fold-blocked sign flip of held-out delta R2,0.47152847152847155,False
+sub004/sub004,EEG u5,boundary_strength,M5_full,M4_mel_syl_structure,0.00036824066194170917,0.00444449405053452,8,13,5,0.3946053946053946,1000,outer-fold-blocked sign flip of held-out delta R2,0.4748192983487101,False
+sub004/sub004,EEG u6,boundary_strength,M5_full,M4_mel_syl_structure,0.0007282899318173344,0.0034785515165508883,9,13,5,0.2807192807192807,1000,outer-fold-blocked sign flip of held-out delta R2,0.4010275438846867,False
+sub004/sub004,EEG u7,boundary_strength,M5_full,M4_mel_syl_structure,0.00043055589700934625,0.0024323642864706864,8,13,5,0.22377622377622378,1000,outer-fold-blocked sign flip of held-out delta R2,0.3442711135018828,False
+sub004/sub004,EEG u8,boundary_strength,M5_full,M4_mel_syl_structure,0.00028223132933853537,0.0016813989544114233,8,13,5,0.2077922077922078,1000,outer-fold-blocked sign flip of held-out delta R2,0.3442711135018828,False
+sub004/sub004,EEG f12,struc_depth,M5_full,M3_mel_syl_boundary,-0.0006177208034872863,0.0014726180488935992,5,13,5,1.0,1000,outer-fold-blocked sign flip of held-out delta R2,1.0,False
+sub004/sub004,EEG u5,struc_depth,M5_full,M3_mel_syl_boundary,-2.921224609301417e-05,0.0035738398181223963,8,13,5,1.0,1000,outer-fold-blocked sign flip of held-out delta R2,1.0,False
+sub004/sub004,EEG u6,struc_depth,M5_full,M3_mel_syl_boundary,0.00012613743689554162,0.005039717867626129,6,13,5,0.5334665334665335,1000,outer-fold-blocked sign flip of held-out delta R2,0.5927405927405928,False
+sub004/sub004,EEG u7,struc_depth,M5_full,M3_mel_syl_boundary,0.001719428208439579,0.00587013076041012,9,13,5,0.1928071928071928,1000,outer-fold-blocked sign flip of held-out delta R2,0.3442711135018828,False
+sub004/sub004,EEG u8,struc_depth,M5_full,M3_mel_syl_boundary,0.0007523293327065336,0.006053657273830811,8,13,5,0.4035964035964036,1000,outer-fold-blocked sign flip of held-out delta R2,0.4748192983487101,False
