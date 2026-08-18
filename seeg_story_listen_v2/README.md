@@ -331,3 +331,11 @@ Model outputs and figures use the same names and formats as the individual
 pipeline under `recordings/GROUP/`, including `GROUP_*_coefficients.png`,
 `GROUP_model_accuracy.png`, `GROUP_model_comparisons.png`,
 `GROUP_feature_contributions.png`, and held-out prediction plots.
+
+Group figures include uncertainty wherever the plotted quantity is a bar or
+line: model-accuracy bars show SEM, model-comparison and feature-contribution
+bars show 95% confidence intervals across stimuli, event-feature coefficient
+lines show 95% confidence bands across outer folds, and prediction lines show
+a residual-based 95% interval. The group feature-contribution figure omits
+`mel` and displays only `syl_onset`, `boundary_strength`, and `struc_depth`;
+the mel STRF remains available in every coefficient figure.
