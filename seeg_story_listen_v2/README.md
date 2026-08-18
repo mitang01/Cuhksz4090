@@ -282,3 +282,52 @@ feature-contribution tests compare the full model against a model lacking the
 feature of interest. These estimate unique predictive information conditional
 on the other predictors; they do not make the two annotations statistically
 independent.
+
+## Fit one group STRF across subjects and electrodes
+
+`run_strf_group.py` uses the same alignment, five models, L2 ridge estimator,
+nested story-level cross-validation, permutation tests, and figure generation
+as `run_strf.py`. Instead of fitting each recording and contact separately, it:
+
+1. selects contacts with `fdr_p_value < 0.05`;
+2. excludes every channel whose stripped, case-insensitive label starts with
+   `MISC`;
+3. requires the same stimulus set in every included recording and aligns all
+   remaining subject-electrode responses by stimulus;
+4. truncates copies of a stimulus to their shortest common duration; and
+5. computes an equal-electrode-weight group mean at every sample.
+
+The resulting STRF describes the response averaged over all included electrodes
+and subjects. It is a pooled descriptive model, not a subject-level random
+effects model. Because the preprocessed responses are baseline z-scores, each
+electrode enters the average on a comparable scale.
+
+For the group analysis, the FDR threshold is applied without an additional
+effect-direction filter, so significant negative and positive contacts are both
+included. Copies of a stimulus may differ in duration by at most 0.1 seconds
+(`--group-duration-tolerance`) before the run fails rather than silently
+truncating an anomalous recording.
+
+Validate and run it with:
+
+```bash
+python3 seeg_story_listen_v2/run_strf_group.py --validate-only
+python3 seeg_story_listen_v2/run_strf_group.py --overwrite
+```
+
+The default output is `/share/home/mitan/seeg_story_listen_v2/strf_group`.
+`recording_manifest.csv`, `analysis_config.json`, `alignment_qc.csv`, and the
+standard model outputs are retained. Additional group audit files are:
+
+- `recording_inclusion.csv`: included/skipped recording counts;
+- `excluded_channels.csv`: all excluded `MISC*` labels;
+- `group_membership.csv`: every recording, electrode, and stimulus entering
+  the mean;
+- `group_aggregation.csv`: subject/electrode counts and common duration for
+  each stimulus;
+- `aligned_group_data/*.npz`: the final group feature and response arrays.
+
+Model outputs and figures use the same names and formats as the individual
+pipeline under `recordings/GROUP/`, including `GROUP_*_coefficients.png`,
+`GROUP_model_accuracy.png`, `GROUP_model_comparisons.png`,
+`GROUP_feature_contributions.png`, and held-out prediction plots.
