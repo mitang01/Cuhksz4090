@@ -57,6 +57,31 @@ python3 seeg_story_listen_v2/print_edf_info.py \
 Processed filenames containing `_prepocessed_` or `_responsive_` are skipped by
 default. Pass `--include-processed` to report those as well.
 
+## Decode StudyInfo `.dat` files
+
+`print_studyinfo_dat.py` finds each subject's `StudyInfo.dat` under the story-
+listening tree (for example
+`sub002/sub002/postseegct/StudyInfo.dat`), auto-detects Chinese encodings such
+as GB18030/GBK/`cp936`, and writes one readable UTF-8 summary. Files that look
+scrambled in VS Code are usually GBK-family text opened as UTF-8; this script
+decodes them before summarizing.
+
+```bash
+# Default: search the cluster tree and write studyinfo_dat_summary.txt
+# beside this script
+python3 seeg_story_listen_v2/print_studyinfo_dat.py
+
+# Explicit paths
+python3 seeg_story_listen_v2/print_studyinfo_dat.py \
+  --input-dir /share/workspace3/ieeg/seeg/story_listen_v2 \
+  --output /share/home/mitan/seeg_story_listen_v2/studyinfo_dat_summary.txt
+```
+
+By default only files named `StudyInfo.dat` are included. Pass `--all-dat` to
+include other `.dat` files while still skipping temporary `*_preload.dat`
+mmap files. Force an encoding with `--encoding gb18030` when auto-detection is
+wrong.
+
 ## Validate metadata first
 
 Run the metadata-only pass before filtering:
