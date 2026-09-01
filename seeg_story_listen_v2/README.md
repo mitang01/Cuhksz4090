@@ -35,6 +35,28 @@ python3 -m pip install -r seeg_story_listen_v2/requirements.txt
 
 MNE's EDF export uses `edfio`, included in the requirements.
 
+## Print EDF Raw / Info metadata
+
+`print_edf_info.py` recursively finds converted EDF files under the story-
+listening tree and prints the same text that `print(raw)` and `print(raw.info)`
+show interactively: sampling frequency, highpass/lowpass, channel names and
+types, participant/`subject_info` fields, measurement date, and other non-empty
+Info entries. Samples are not preloaded, so the script is suitable for a remote
+Linux shell.
+
+```bash
+# Print every converted raw EDF under the default cluster path
+python3 seeg_story_listen_v2/print_edf_info.py
+
+# Save the report to a text file
+python3 seeg_story_listen_v2/print_edf_info.py \
+  --input-dir /share/workspace3/ieeg/seeg/story_listen_v2 \
+  --output /share/home/mitan/seeg_story_listen_v2/edf_info_report.txt
+```
+
+Processed filenames containing `_prepocessed_` or `_responsive_` are skipped by
+default. Pass `--include-processed` to report those as well.
+
 ## Validate metadata first
 
 Run the metadata-only pass before filtering:
