@@ -1,0 +1,12 @@
+model:
+  name: hubert
+  checkpoint: facebook/hubert-large-ls960-ft
+  revision: main
+  sample_rate_hz: 16000
+  device: cpu
+  dtype: float32
+  batch_seconds: 30
+  store: outputs/activations.h5
+  # Runtime inspection, not this expectation, determines hidden-state count/dimensions.
+  expected_frame_rate_hz: 50.0
+
