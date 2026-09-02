@@ -40,13 +40,14 @@ def write_run_manifest(
     input_hash = None
     if input_manifest_path and Path(input_manifest_path).exists():
         input_hash = hashlib.sha256(Path(input_manifest_path).read_bytes()).hexdigest()
+    configured_revision = config.get("model", {}).get("revision")
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "config_path": str(config_path),
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "random_seed": config.get("random_seed"),
         "git_commit": commit,
-        "model_revision": model_revision,
+        "model_revision": model_revision or configured_revision,
         "input_manifest_sha256": input_hash,
         "package_versions": packages,
         **(extra or {}),

@@ -49,9 +49,18 @@ def main():
     )
     observed = {}
     for row in manifest.to_dict("records"):
-        observed[row["recording_id"]] = extract_recording(
+        details = extract_recording(
             adapter, row["audio_path"], row["recording_id"], config["store"]
         )
+        observed_rate = details["model"]["observed_frame_rate_hz"]
+        if abs(observed_rate - config["expected_frame_rate_hz"]) > config[
+            "frame_rate_tolerance_hz"
+        ]:
+            raise RuntimeError(
+                f"{row['recording_id']} observed frame rate {observed_rate:.3f} Hz "
+                f"outside configured tolerance"
+            )
+        observed[row["recording_id"]] = details
     write_run_manifest(
         args.config,
         Path(config["store"]).parent,

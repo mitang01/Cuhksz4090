@@ -1,3 +1,4 @@
+random_seed: 17
 model:
   name: hubert
   checkpoint: facebook/hubert-large-ls960-ft
@@ -9,4 +10,5 @@ model:
   store: outputs/activations.h5
   # Runtime inspection, not this expectation, determines hidden-state count/dimensions.
   expected_frame_rate_hz: 50.0
+  frame_rate_tolerance_hz: 1.0
 

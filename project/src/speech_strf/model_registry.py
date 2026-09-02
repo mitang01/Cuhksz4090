@@ -49,6 +49,17 @@ class HubertAdapter:
         lengths = {array.shape[0] for array in arrays}
         if len(dimensions) != 1 or len(lengths) != 1:
             raise RuntimeError("Hidden-state shapes are inconsistent across layers")
+        expected_count = getattr(self.model.config, "num_hidden_layers", None)
+        if expected_count is not None and len(arrays) != expected_count + 1:
+            raise RuntimeError(
+                f"Expected {expected_count + 1} representations from runtime config, "
+                f"received {len(arrays)}"
+            )
+        expected_width = getattr(self.model.config, "hidden_size", None)
+        if expected_width is not None and next(iter(dimensions)) != expected_width:
+            raise RuntimeError(
+                f"Expected hidden width {expected_width}, received {next(iter(dimensions))}"
+            )
         names = ["layer_00_input"] + [
             f"layer_{index:02d}_transformer" for index in range(1, len(arrays))
         ]

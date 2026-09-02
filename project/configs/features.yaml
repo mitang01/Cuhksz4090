@@ -1,4 +1,6 @@
+random_seed: 17
 analysis_rate_hz: 50
+audio_sample_rate_hz: 16000
 features:
   log_mel:
     enabled: true

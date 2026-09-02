@@ -1,3 +1,4 @@
+random_seed: 17
 data:
   audio_root: /share/workspace3/ieeg/seeg/story_listen_v2/stimuli_wav
   alignment_root: /share/workspace3/ieeg/seeg/story_listen_v2/stimuli_textgrid

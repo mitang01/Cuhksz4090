@@ -10,11 +10,11 @@ not an exact replication.
 
 ```bash
 cd project
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[test]'
+python3 -m pip install -e '.[test]'
 pytest
-python scripts/smoke_test.py --config configs/smoke_test.yaml
+python3 scripts/smoke_test.py --config configs/smoke_test.yaml
 ```
 
 The smoke command uses generated audio-like fixtures and makes a nested
@@ -23,12 +23,12 @@ group-CV results table plus SVG/PDF diagnostics without downloading a model.
 ## Real-data sequence
 
 ```bash
-python scripts/build_manifest.py --config configs/data.yaml
-python scripts/extract_features.py --config configs/features.yaml
+python3 scripts/build_manifest.py --config configs/data.yaml
+python3 scripts/extract_features.py --config configs/features.yaml
 # Run only after reviewing the storage estimate and obtaining download approval:
-python scripts/extract_activations.py --config configs/models.yaml --confirm-download
-python scripts/fit_strf.py --config configs/analysis.yaml --layer layer_00_input
-python scripts/make_figures.py --config configs/analysis.yaml
+python3 scripts/extract_activations.py --config configs/models.yaml --confirm-download
+python3 scripts/fit_strf.py --config configs/analysis.yaml --layer layer_00_input
+python3 scripts/make_figures.py --config configs/analysis.yaml
 ```
 
 Extraction refuses to run unless the validation report is valid. The checkpoint

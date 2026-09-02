@@ -38,10 +38,11 @@ def main():
         }
     )
     for row in rows:
-        audio, metadata = load_standardized(row["audio_path"], 16000)
+        sample_rate = int(config["audio_sample_rate_hz"])
+        audio, metadata = load_standardized(row["audio_path"], sample_rate)
         result = extract_features(
             audio,
-            16000,
+            sample_rate,
             metadata["original_duration_seconds"],
             parsed[row["recording_id"]],
             config,
