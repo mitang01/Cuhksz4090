@@ -1,0 +1,221 @@
+{
+  "created_at": "2026-09-02T17:32:20.976705+00:00",
+  "manifest_sha256": "55de131ccaed8065b3d9e888bc15f806611f0d1a9c17c2fb6781d9fc46f493c3",
+  "valid": false,
+  "record_count": 14,
+  "issue_count": 28,
+  "records": [
+    {
+      "recording_id": "chs_story4_pt8_1",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "chs_story4_pt8_2",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "chs_story4_pt8_3",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story01",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story03",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story04",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story06",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story08",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story13",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story17",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "story18",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "szdt1",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "szdt2",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    },
+    {
+      "recording_id": "szdt3",
+      "audio_filename": null,
+      "alignment_filename": null,
+      "audio_metadata": null,
+      "issue_count": 2
+    }
+  ],
+  "issues": [
+    {
+      "recording_id": "chs_story4_pt8_1",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "chs_story4_pt8_1",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "chs_story4_pt8_2",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "chs_story4_pt8_2",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "chs_story4_pt8_3",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "chs_story4_pt8_3",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story01",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story01",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story03",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story03",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story04",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story04",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story06",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story06",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story08",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story08",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story13",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story13",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story17",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story17",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "story18",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "story18",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "szdt1",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "szdt1",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "szdt2",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "szdt2",
+      "code": "missing_or_duplicate_alignment"
+    },
+    {
+      "recording_id": "szdt3",
+      "code": "missing_or_duplicate_audio"
+    },
+    {
+      "recording_id": "szdt3",
+      "code": "missing_or_duplicate_alignment"
+    }
+  ]
+}
