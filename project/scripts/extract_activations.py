@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from speech_strf.extract_activations import estimate_storage_bytes, extract_recording
@@ -18,13 +19,29 @@ def main():
     parser.add_argument("--manifest", default="outputs/manifest.csv")
     parser.add_argument("--validation-report", default="outputs/validation_report.json")
     parser.add_argument("--confirm-download", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--recording-id",
+        action="append",
+        help="Extract only this recording (repeatable); completed compatible records resume",
+    )
     args = parser.parse_args()
     report = json.loads(Path(args.validation_report).read_text())
     if not report["valid"]:
         raise SystemExit("Validation report is invalid; extraction refused")
     config = load_config(args.config)["model"]
     manifest = pd.read_csv(args.manifest)
-    durations = [row["audio_metadata"]["duration_seconds"] for row in report["records"]]
+    if args.recording_id:
+        requested = set(args.recording_id)
+        available = set(manifest["recording_id"])
+        if missing := requested - available:
+            raise SystemExit(f"Unknown recording IDs: {sorted(missing)}")
+        manifest = manifest[manifest["recording_id"].isin(requested)]
+    report_records = {row["recording_id"]: row for row in report["records"]}
+    durations = [
+        report_records[recording_id]["audio_metadata"]["duration_seconds"]
+        for recording_id in manifest["recording_id"]
+    ]
     model_config = None
     try:
         from transformers import AutoConfig
@@ -40,17 +57,34 @@ def main():
     width = int(model_config.hidden_size)
     layers = int(model_config.num_hidden_layers) + 1
     estimate = estimate_storage_bytes(
-        durations, config["expected_frame_rate_hz"], layers, width
+        durations,
+        config["expected_frame_rate_hz"],
+        layers,
+        width,
+        np.dtype(config["dtype"]).itemsize,
     )
-    print(f"Estimated uncompressed activation storage: {estimate / 2**30:.2f} GiB")
+    print(
+        f"Estimated uncompressed {config['dtype']} activation storage: "
+        f"{estimate / 2**30:.2f} GiB",
+        flush=True,
+    )
     adapter = HubertAdapter(
         ModelSpec(config["checkpoint"], config["revision"], config["sample_rate_hz"]),
         config["device"],
+        config["dtype"],
+        local_files_only=not args.confirm_download,
     )
     observed = {}
     for row in manifest.to_dict("records"):
+        print(f"Extracting {row['recording_id']}...", flush=True)
         details = extract_recording(
-            adapter, row["audio_path"], row["recording_id"], config["store"]
+            adapter,
+            row["audio_path"],
+            row["recording_id"],
+            config["store"],
+            batch_seconds=float(config["batch_seconds"]),
+            overlap_seconds=float(config["chunk_overlap_seconds"]),
+            overwrite=args.overwrite,
         )
         observed_rate = details["model"]["observed_frame_rate_hz"]
         if abs(observed_rate - config["expected_frame_rate_hz"]) > config[
@@ -61,6 +95,12 @@ def main():
                 f"outside configured tolerance"
             )
         observed[row["recording_id"]] = details
+        print(
+            f"{row['recording_id']}: {details['status']}, "
+            f"{details['model']['frame_count']} frames, "
+            f"{len(details['layers'])} representations",
+            flush=True,
+        )
     write_run_manifest(
         args.config,
         Path(config["store"]).parent,
@@ -68,6 +108,7 @@ def main():
         model_revision=config["revision"],
         extra={"observed_model_details": observed},
     )
+    print(f"Activation extraction complete: {config['store']}", flush=True)
 
 
 if __name__ == "__main__":

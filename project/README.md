@@ -26,7 +26,10 @@ group-CV results table plus SVG/PDF diagnostics without downloading a model.
 python3 scripts/build_manifest.py --config configs/data.yaml
 python3 scripts/extract_features.py --config configs/features.yaml
 # Run only after reviewing the storage estimate and obtaining download approval:
-python3 scripts/extract_activations.py --config configs/models.yaml --confirm-download
+python3 scripts/extract_activations.py --config configs/models.yaml \
+  --confirm-download --recording-id szdt1
+# If the one-recording check succeeds, run all; szdt1 is safely skipped:
+python3 scripts/extract_activations.py --config configs/models.yaml
 python3 scripts/fit_strf.py --config configs/analysis.yaml --layer layer_00_input
 python3 scripts/make_figures.py --config configs/analysis.yaml
 ```
@@ -36,6 +39,12 @@ command first tries the local Hugging Face cache and otherwise requires the
 explicit `--confirm-download` switch. Audio remains read-only; outputs contain
 paths and derived data only. Do not commit or upload audio, annotations,
 transcripts, or activations.
+
+The default 4090D extraction configuration uses CUDA FP16 with 20-second core
+windows and one second of context on both sides. Activation frames are stitched
+by their convolutional receptive-field centers; overlap frames are retained
+exactly once. Completed recording groups are skipped on rerun. Use
+`--overwrite` only to intentionally recompute them.
 
 Input validation treats a configured overhang of at most 30 ms as a warning only
 when the interval label is empty. Original TextGrid times remain unchanged.
