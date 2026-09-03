@@ -8,6 +8,8 @@ data:
   validation_report: outputs/validation_report.json
   language: zh
   split_group: story_id
+  # Praat grids are rounded to 1 ms; known empty terminal intervals exceed WAVs by ~26 ms.
+  empty_annotation_end_tolerance_seconds: 0.03
   sample_ids:
     - chs_story4_pt8_1
     - chs_story4_pt8_3

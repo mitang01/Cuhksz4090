@@ -1,4 +1,4 @@
-from speech_strf.alignments import parse_textgrid, validate_intervals
+from speech_strf.alignments import Interval, parse_textgrid, validate_intervals
 
 
 def test_textgrid_conversion_and_validation(tmp_path):
@@ -31,5 +31,21 @@ item []:
     intervals = parse_textgrid(path)
     assert [row.label for row in intervals] == ["你好", "世界"]
     assert validate_intervals(intervals, 2.0) == []
-    assert validate_intervals(intervals, 1.5)[0]["code"] == "outside_audio_duration"
+    finding = validate_intervals(intervals, 1.5)[0]
+    assert finding["code"] == "outside_audio_duration"
+    assert finding["severity"] == "error"
+
+
+def test_only_small_empty_terminal_overhang_is_a_warning():
+    empty = Interval("words", 9.0, 10.026, "")
+    finding = validate_intervals([empty], 10.0, 0.03)[0]
+    assert finding["code"] == "empty_trailing_interval_overhang"
+    assert finding["severity"] == "warning"
+
+    assert validate_intervals(
+        [Interval("words", 9.0, 10.026, "spoken")], 10.0, 0.03
+    )[0]["severity"] == "error"
+    assert validate_intervals(
+        [Interval("words", 9.0, 10.031, "")], 10.0, 0.03
+    )[0]["severity"] == "error"
 
