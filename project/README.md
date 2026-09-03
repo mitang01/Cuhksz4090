@@ -55,6 +55,10 @@ contextual embeddings are disabled and unavailable until suitable Mandarin
 transcripts/resources are supplied. Default temporal lags and ridge
 hyperparameters are project choices, not claims about the paper.
 
+The retained initial pool contains 12 recordings. `story17` and `story18` are
+explicitly excluded in `configs/data.yaml` because they are nonsemantic control
+conditions, not stimulus stories for this encoding analysis.
+
 ## Current scaling blockers
 
 The configured `/share/workspace3/...` and `/share/home/mitan/...` mounts are

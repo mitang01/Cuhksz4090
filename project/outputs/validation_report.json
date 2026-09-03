@@ -1,9 +1,9 @@
 {
-  "created_at": "2026-09-02T17:32:20.976705+00:00",
-  "manifest_sha256": "55de131ccaed8065b3d9e888bc15f806611f0d1a9c17c2fb6781d9fc46f493c3",
+  "created_at": "2026-09-03T11:21:48.396411+00:00",
+  "manifest_sha256": "7511664715e9da905ecd28735731907453f4f26185f0fceb51938de7d2628b94",
   "valid": false,
-  "record_count": 14,
-  "issue_count": 28,
+  "record_count": 12,
+  "issue_count": 24,
   "records": [
     {
       "recording_id": "chs_story4_pt8_1",
@@ -63,20 +63,6 @@
     },
     {
       "recording_id": "story13",
-      "audio_filename": null,
-      "alignment_filename": null,
-      "audio_metadata": null,
-      "issue_count": 2
-    },
-    {
-      "recording_id": "story17",
-      "audio_filename": null,
-      "alignment_filename": null,
-      "audio_metadata": null,
-      "issue_count": 2
-    },
-    {
-      "recording_id": "story18",
       "audio_filename": null,
       "alignment_filename": null,
       "audio_metadata": null,
@@ -175,22 +161,6 @@
     },
     {
       "recording_id": "story13",
-      "code": "missing_or_duplicate_alignment"
-    },
-    {
-      "recording_id": "story17",
-      "code": "missing_or_duplicate_audio"
-    },
-    {
-      "recording_id": "story17",
-      "code": "missing_or_duplicate_alignment"
-    },
-    {
-      "recording_id": "story18",
-      "code": "missing_or_duplicate_audio"
-    },
-    {
-      "recording_id": "story18",
       "code": "missing_or_duplicate_alignment"
     },
     {
