@@ -20,13 +20,28 @@ def main():
     parser.add_argument("--validation-report", default="outputs/validation_report.json")
     parser.add_argument("--confirm-download", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--recording-id",
+        action="append",
+        help="Extract only this recording (repeatable); completed compatible records resume",
+    )
     args = parser.parse_args()
     report = json.loads(Path(args.validation_report).read_text())
     if not report["valid"]:
         raise SystemExit("Validation report is invalid; extraction refused")
     config = load_config(args.config)["model"]
     manifest = pd.read_csv(args.manifest)
-    durations = [row["audio_metadata"]["duration_seconds"] for row in report["records"]]
+    if args.recording_id:
+        requested = set(args.recording_id)
+        available = set(manifest["recording_id"])
+        if missing := requested - available:
+            raise SystemExit(f"Unknown recording IDs: {sorted(missing)}")
+        manifest = manifest[manifest["recording_id"].isin(requested)]
+    report_records = {row["recording_id"]: row for row in report["records"]}
+    durations = [
+        report_records[recording_id]["audio_metadata"]["duration_seconds"]
+        for recording_id in manifest["recording_id"]
+    ]
     model_config = None
     try:
         from transformers import AutoConfig

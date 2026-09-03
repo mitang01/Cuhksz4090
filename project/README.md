@@ -26,7 +26,10 @@ group-CV results table plus SVG/PDF diagnostics without downloading a model.
 python3 scripts/build_manifest.py --config configs/data.yaml
 python3 scripts/extract_features.py --config configs/features.yaml
 # Run only after reviewing the storage estimate and obtaining download approval:
-python3 scripts/extract_activations.py --config configs/models.yaml --confirm-download
+python3 scripts/extract_activations.py --config configs/models.yaml \
+  --confirm-download --recording-id szdt1
+# If the one-recording check succeeds, run all; szdt1 is safely skipped:
+python3 scripts/extract_activations.py --config configs/models.yaml
 python3 scripts/fit_strf.py --config configs/analysis.yaml --layer layer_00_input
 python3 scripts/make_figures.py --config configs/analysis.yaml
 ```
