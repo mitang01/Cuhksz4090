@@ -37,6 +37,12 @@ explicit `--confirm-download` switch. Audio remains read-only; outputs contain
 paths and derived data only. Do not commit or upload audio, annotations,
 transcripts, or activations.
 
+The default 4090D extraction configuration uses CUDA FP16 with 20-second core
+windows and one second of context on both sides. Activation frames are stitched
+by their convolutional receptive-field centers; overlap frames are retained
+exactly once. Completed recording groups are skipped on rerun. Use
+`--overwrite` only to intentionally recompute them.
+
 Input validation treats a configured overhang of at most 30 ms as a warning only
 when the interval label is empty. Original TextGrid times remain unchanged.
 Labeled intervals, larger overruns, missing files, and malformed timing remain

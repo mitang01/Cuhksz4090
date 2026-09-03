@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import h5py
@@ -33,8 +32,9 @@ def main():
                 raise ValueError("Feature columns differ across recordings")
             families = current_families
             group = store[recording_id]
-            metadata = json.loads(group.attrs["model_metadata_json"])
-            activation_times = np.arange(metadata["frame_count"]) / metadata["observed_frame_rate_hz"]
+            if not group.attrs.get("complete", False):
+                raise RuntimeError(f"Incomplete activation group: {recording_id}")
+            activation_times = group["_frame_times_seconds"][:]
             y = resample_continuous(group[args.layer][:], activation_times, times)
             xs.append(x)
             ys.append(y)
