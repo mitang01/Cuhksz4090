@@ -14,13 +14,14 @@ data:
     - story03
     - story06
     - story13
-    - story18
     - szdt2
     - chs_story4_pt8_2
     - story01
     - story04
     - story08
-    - story17
     - szdt1
     - szdt3
+  excluded_ids:
+    story17: control_condition_nonsemantic_audio
+    story18: control_condition_nonsemantic_audio
 
