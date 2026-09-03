@@ -37,6 +37,11 @@ explicit `--confirm-download` switch. Audio remains read-only; outputs contain
 paths and derived data only. Do not commit or upload audio, annotations,
 transcripts, or activations.
 
+Input validation treats a configured overhang of at most 30 ms as a warning only
+when the interval label is empty. Original TextGrid times remain unchanged.
+Labeled intervals, larger overruns, missing files, and malformed timing remain
+errors that block extraction.
+
 ## Method choices
 
 Paper-compatible choices explicitly represented in configuration are the 50 Hz

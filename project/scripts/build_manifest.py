@@ -20,9 +20,17 @@ def main():
     destination = Path(config["manifest_path"])
     destination.parent.mkdir(parents=True, exist_ok=True)
     manifest.to_csv(destination, index=False)
-    report = write_validation_report(manifest, config["validation_report"])
+    report = write_validation_report(
+        manifest,
+        config["validation_report"],
+        float(config.get("empty_annotation_end_tolerance_seconds", 0.0)),
+    )
     write_run_manifest(args.config, destination.parent, input_manifest_path=destination)
-    print(f"Wrote {destination} and {config['validation_report']}; valid={report['valid']}")
+    print(
+        f"Wrote {destination} and {config['validation_report']}; "
+        f"valid={report['valid']}; errors={report['issue_count']}; "
+        f"warnings={report['warning_count']}"
+    )
     raise SystemExit(0 if report["valid"] else 2)
 
 

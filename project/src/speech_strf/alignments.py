@@ -38,21 +38,43 @@ def parse_textgrid(path: str | Path) -> list[Interval]:
     return rows
 
 
-def validate_intervals(intervals: list[Interval], audio_duration: float) -> list[dict]:
+def validate_intervals(
+    intervals: list[Interval],
+    audio_duration: float,
+    empty_end_tolerance_seconds: float = 0.0,
+) -> list[dict]:
+    if empty_end_tolerance_seconds < 0:
+        raise ValueError("empty_end_tolerance_seconds must be nonnegative")
     issues: list[dict] = []
     by_tier: dict[str, list[Interval]] = {}
     for interval in intervals:
         by_tier.setdefault(interval.tier, []).append(interval)
         if interval.start < 0 or interval.end < interval.start:
-            issues.append({"code": "negative_or_reversed_duration", **asdict(interval)})
+            issues.append(
+                {"severity": "error", "code": "negative_or_reversed_duration",
+                 **asdict(interval)}
+            )
         if interval.end > audio_duration + 1e-6:
-            issues.append({"code": "outside_audio_duration", **asdict(interval)})
+            overhang = interval.end - audio_duration
+            tolerated = not interval.label.strip() and overhang <= empty_end_tolerance_seconds
+            issues.append(
+                {
+                    "severity": "warning" if tolerated else "error",
+                    "code": (
+                        "empty_trailing_interval_overhang"
+                        if tolerated
+                        else "outside_audio_duration"
+                    ),
+                    "overhang_seconds": overhang,
+                    **asdict(interval),
+                }
+            )
     for tier, rows in by_tier.items():
         for previous, current in zip(rows, rows[1:]):
             if current.start < previous.start:
                 issues.append(
-                    {"code": "non_monotonic_times", "tier": tier, "previous": asdict(previous),
-                     "current": asdict(current)}
+                    {"severity": "error", "code": "non_monotonic_times", "tier": tier,
+                     "previous": asdict(previous), "current": asdict(current)}
                 )
     return issues
 
