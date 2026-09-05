@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 
 from speech_strf.extract_activations import estimate_storage_bytes, extract_recording
-from speech_strf.model_registry import HubertAdapter, ModelSpec
-from speech_strf.provenance import load_config, write_run_manifest
+from speech_strf.model_registry import HubertAdapter, ModelSpec, get_model_entry
+from speech_strf.provenance import write_run_manifest
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--model")
     parser.add_argument("--manifest", default="outputs/manifest.csv")
     parser.add_argument("--validation-report", default="outputs/validation_report.json")
     parser.add_argument("--confirm-download", action="store_true")
@@ -29,7 +30,29 @@ def main():
     report = json.loads(Path(args.validation_report).read_text())
     if not report["valid"]:
         raise SystemExit("Validation report is invalid; extraction refused")
-    config = load_config(args.config)["model"]
+    entry = get_model_entry(args.config, args.model)
+    if entry.values.get("locked_reference"):
+        raise SystemExit(
+            "The completed HuBERT output is locked. Use run_model_pipeline.py with "
+            "--output outputs/hubert_large_refactor_smoke for a regression rerun."
+        )
+    if entry.adapter != "generic_speech":
+        raise SystemExit(
+            f"Legacy extraction supports generic_speech only; use "
+            f"run_model_pipeline.py for {entry.key}"
+        )
+    config = {
+        "checkpoint": entry.model_id,
+        "revision": entry.revision,
+        "sample_rate_hz": entry.sample_rate_hz,
+        "device": entry.device,
+        "dtype": entry.dtype,
+        "batch_seconds": entry.batch_seconds,
+        "chunk_overlap_seconds": entry.chunk_overlap_seconds,
+        "store": "outputs/activations.h5",
+        "expected_frame_rate_hz": entry.values.get("expected_frame_rate_hz", 50.0),
+        "frame_rate_tolerance_hz": entry.values.get("frame_rate_tolerance_hz", 1.0),
+    }
     manifest = pd.read_csv(args.manifest)
     if args.recording_id:
         requested = set(args.recording_id)
@@ -73,6 +96,7 @@ def main():
         config["device"],
         config["dtype"],
         local_files_only=not args.confirm_download,
+        loading_class=entry.loading_class,
     )
     observed = {}
     for row in manifest.to_dict("records"):
