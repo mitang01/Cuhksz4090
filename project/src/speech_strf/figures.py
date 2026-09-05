@@ -17,7 +17,13 @@ def _save(fig, path: Path):
     plt.close(fig)
 
 
-def make_result_figures(results: pd.DataFrame, kernels: dict, output_dir: str | Path) -> None:
+def make_result_figures(
+    results: pd.DataFrame,
+    kernels: dict,
+    output_dir: str | Path,
+    title_prefix: str = "",
+) -> None:
+    prefix = f"{title_prefix}: " if title_prefix else ""
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     summary = layer_summary(results)
@@ -31,20 +37,28 @@ def make_result_figures(results: pd.DataFrame, kernels: dict, output_dir: str | 
     image = ax.imshow(heat.fillna(0), aspect="auto", cmap="coolwarm")
     ax.set(xticks=np.arange(len(heat.columns)), xticklabels=heat.columns, ylabel="layer")
     ax.set_yticks(np.arange(len(heat.index)), labels=heat.index)
-    ax.set_title("Held-out conditional unique contribution (ΔR²)")
+    ax.set_title(f"{prefix}Held-out conditional unique contribution (ΔR²)")
     fig.colorbar(image, ax=ax)
     _save(fig, output / "layer_feature_heatmap")
 
     full = summary[summary.feature_family == "full"]
     fig, ax = plt.subplots()
     ax.plot(full.layer, full.mean_full_r2, marker="o")
-    ax.set(xlabel="Layer", ylabel="Held-out R²", title="Full-model layerwise performance")
+    ax.set(
+        xlabel="Layer",
+        ylabel="Held-out R²",
+        title=f"{prefix}Full-model layerwise performance",
+    )
     _save(fig, output / "layerwise_full_r2")
 
     fig, ax = plt.subplots()
     for family, rows in contributions.groupby("feature_family"):
         ax.plot(rows.layer, rows.mean_conditional_delta_r2, marker="o", label=family)
-    ax.set(xlabel="Layer", ylabel="Held-out ΔR²", title="Conditional contribution by family")
+    ax.set(
+        xlabel="Layer",
+        ylabel="Held-out ΔR²",
+        title=f"{prefix}Conditional contribution by family",
+    )
     ax.legend()
     _save(fig, output / "layerwise_contributions")
 
@@ -52,14 +66,22 @@ def make_result_figures(results: pd.DataFrame, kernels: dict, output_dir: str | 
     fold_full = results[results.feature_family == "full"]
     ax.scatter(fold_full.outer_fold, fold_full.full_r2)
     ax.axhline(fold_full.full_r2.mean(), color="black", linestyle="--")
-    ax.set(xlabel="Outer fold", ylabel="Held-out R²", title="Held-out-fold reliability")
+    ax.set(
+        xlabel="Outer fold",
+        ylabel="Held-out R²",
+        title=f"{prefix}Held-out-fold reliability",
+    )
     _save(fig, output / "fold_reliability")
 
     key = sorted(kernels)[0]
     kernel = np.asarray(kernels[key])
     fig, ax = plt.subplots()
     ax.plot(kernel[0] if kernel.ndim == 2 else kernel)
-    ax.set(xlabel="Lagged predictor index", ylabel="Ridge coefficient", title=f"Diagnostic kernel: {key}")
+    ax.set(
+        xlabel="Lagged predictor index",
+        ylabel="Ridge coefficient",
+        title=f"{prefix}Diagnostic kernel: {key}",
+    )
     _save(fig, output / "diagnostic_kernel")
 
 

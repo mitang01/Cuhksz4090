@@ -25,26 +25,108 @@ group-CV results table plus SVG/PDF diagnostics without downloading a model.
 ```bash
 python3 scripts/build_manifest.py --config configs/data.yaml
 python3 scripts/extract_features.py --config configs/features.yaml
-# Run only after reviewing the storage estimate and obtaining download approval:
-python3 scripts/extract_activations.py --config configs/models.yaml \
-  --confirm-download --recording-id szdt1
-# If the one-recording check succeeds, run all; szdt1 is safely skipped:
-python3 scripts/extract_activations.py --config configs/models.yaml
-python3 scripts/fit_strf.py --config configs/analysis.yaml --layer layer_00_input
-python3 scripts/make_figures.py --config configs/analysis.yaml
+# The completed legacy HuBERT extraction/fit/figures are now a locked reference.
+python3 scripts/validate_model_registry.py
 ```
 
-Extraction refuses to run unless the validation report is valid. The checkpoint
-command first tries the local Hugging Face cache and otherwise requires the
-explicit `--confirm-download` switch. Audio remains read-only; outputs contain
-paths and derived data only. Do not commit or upload audio, annotations,
-transcripts, or activations.
+Extraction refuses to run unless the validation report is valid. Models are
+local-cache-only unless `--allow-download` is explicit. Audio remains read-only;
+do not commit or upload audio, annotations, transcripts, or activations.
 
 The default 4090D extraction configuration uses CUDA FP16 with 20-second core
 windows and one second of context on both sides. Activation frames are stitched
 by their convolutional receptive-field centers; overlap frames are retained
 exactly once. Completed recording groups are skipped on rerun. Use
 `--overwrite` only to intentionally recompute them.
+
+## Multi-model benchmark
+
+`configs/models.yaml` is the model registry. Every nonreference model writes to
+`outputs/<model-key>/`; the existing legacy `outputs/activations.h5`, fit
+results, and figures are never modified. All adapters preserve native
+timestamps and linearly interpolate audio-model states onto the same 50 Hz
+audio-relative grid used by HuBERT. Downstream fitting uses only canonical-grid
+states and the existing feature files, lags, grouped folds, metrics, reduced
+models, and figure functions.
+
+Validate registry structure and installed Transformers classes:
+
+```bash
+python3 scripts/validate_model_registry.py
+```
+
+Run one model after staging its checkpoint locally (use `--checkpoint PATH`):
+
+```bash
+python3 scripts/run_model_pipeline.py --model wavlm_base_plus --stage extract
+python3 scripts/run_model_pipeline.py --model wavlm_base_plus --stage fit
+python3 scripts/run_model_pipeline.py --model wavlm_base_plus --stage figures
+python3 scripts/compare_to_hubert_reference.py --model wavlm_base_plus
+```
+
+The same command pattern applies to these enabled keys:
+
+```text
+hubert_base
+wav2vec2_base
+wav2vec2_large
+wavlm_base_plus
+wavlm_large
+data2vec_audio_base
+xls_r_300m
+w2v_bert_2
+whisper_medium_encoder
+bert_base_uncased
+```
+
+For example:
+
+```bash
+python3 scripts/run_model_pipeline.py --model bert_base_uncased --stage all
+python3 scripts/compare_to_hubert_reference.py --model bert_base_uncased
+```
+
+`mms_1b_all` is registered but disabled pending license review. The resolved
+public W2V-BERT identifier is `facebook/w2v-bert-2.0`, pinned in the registry.
+
+To add a model, add one registry entry. Reuse `generic_speech` for waveform
+encoders with a Hugging Face hidden-state model and convolutional timing. Add a
+new adapter only for a genuinely different input/timing contract.
+
+### BERT baseline
+
+BERT uses labeled forced-aligned word intervals. A fast tokenizer retains
+word-to-wordpiece ownership; wordpieces are mean-pooled per layer. Context is
+split at punctuation or a configured 0.5-second gap. Each word vector is held
+constant over its `[start, end)` interval on the canonical grid, with zeros
+outside aligned words. Coverage and unknown-token fraction are recorded.
+BERT-derived values are targets only and are explicitly forbidden from the
+predictor feature set. Figures label BERT as a text-only baseline. Because the
+checkpoint is English uncased while the stimuli are Mandarin, its tokenizer
+coverage requires careful interpretation.
+
+### Comparability and HuBERT regression
+
+Every completed fit writes `comparability_contract.json` and
+`run_metadata.json`. Comparison checks stimulus IDs, canonical grid, feature
+order/configuration, lag grid, held-out groups, reduced models, metrics, and
+result schema. `comparability_report.json` is machine-readable.
+
+For a non-destructive HuBERT refactor rerun, provide a separate output:
+
+```bash
+python3 scripts/run_model_pipeline.py \
+  --model hubert_large_reference \
+  --output outputs/hubert_large_refactor_rerun \
+  --stage all
+python3 scripts/compare_to_hubert_reference.py \
+  --model hubert_large_reference \
+  --candidate-root outputs/hubert_large_refactor_rerun \
+  --run-hubert-regression
+```
+
+Regression tolerances are `2e-3` absolute for FP16 activations, `1e-6` seconds
+for timestamps, and `1e-4` for downstream summaries.
 
 Input validation treats a configured overhang of at most 30 ms as a warning only
 when the interval label is empty. Original TextGrid times remain unchanged.

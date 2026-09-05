@@ -15,6 +15,10 @@ def load_config(path: str | Path) -> dict:
         return yaml.safe_load(stream)
 
 
+def sha256_file(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def write_run_manifest(
     config_path: str | Path,
     output_dir: str | Path,
@@ -55,6 +59,49 @@ def write_run_manifest(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     destination = output / "run_manifest.json"
+    destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return destination
+
+
+def write_model_run_metadata(
+    output_dir: str | Path,
+    model: dict,
+    *,
+    manifest_path: str | Path,
+    model_config_path: str | Path,
+    feature_config_path: str | Path,
+    analysis_config_path: str | Path,
+    split_definition_hash: str | None,
+    random_seed: int,
+    extra: dict | None = None,
+) -> Path:
+    packages = {}
+    for name in ("speech-strf", "numpy", "pandas", "scikit-learn", "torch", "transformers"):
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        commit = None
+    payload = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "git_commit": commit,
+        "stimulus_manifest_sha256": sha256_file(manifest_path),
+        "model_config_sha256": sha256_file(model_config_path),
+        "feature_config_sha256": sha256_file(feature_config_path),
+        "analysis_config_sha256": sha256_file(analysis_config_path),
+        "split_definition_sha256": split_definition_hash,
+        "random_seed": random_seed,
+        "package_versions": packages,
+        **(extra or {}),
+    }
+    destination = Path(output_dir) / "run_metadata.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return destination
 
