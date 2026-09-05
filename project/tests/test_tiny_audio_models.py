@@ -60,6 +60,10 @@ def test_short_whisper_encoder_hidden_state_contract():
         decoder_ffn_dim=16,
         max_source_positions=20,
         max_target_positions=8,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        decoder_start_token_id=1,
     )
     encoder = WhisperModel(config).get_encoder().eval()
     with torch.inference_mode():
