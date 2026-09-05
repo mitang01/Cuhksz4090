@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 import yaml
 
@@ -26,6 +27,7 @@ class FakeEncoding(dict):
 class FakeFastTokenizer:
     is_fast = True
     unk_token_id = 99
+    model_max_length = 8
 
     def __call__(self, labels, **kwargs):
         return FakeEncoding(labels)
@@ -71,4 +73,25 @@ def test_bert_words_are_held_on_audio_grid_without_becoming_predictors():
     assert not feature_config["features"]["optional"]["contextual_text_embeddings"][
         "enabled"
     ]
+
+
+def test_bert_overlength_sentence_fails_without_silent_truncation():
+    registry = Path(__file__).parents[1] / "configs" / "models.yaml"
+    entry = get_model_entry(registry, "bert_base_uncased")
+    entry.values.update({"device": "cpu", "dtype": "float32", "canonical_rate_hz": 10})
+    adapter = BertTextAdapter(entry)
+    adapter.processor = FakeFastTokenizer()
+    adapter.processor.model_max_length = 4
+    adapter.model = FakeBert()
+    record = StimulusRecord(
+        "too_long",
+        duration_seconds=1,
+        intervals=[
+            Interval("words", 0.0, 0.2, "one"),
+            Interval("words", 0.2, 0.4, "two"),
+            Interval("words", 0.4, 0.6, "three"),
+        ],
+    )
+    with pytest.raises(ValueError, match="requires 5 BERT tokens"):
+        adapter.extract_hidden_states(record)
 

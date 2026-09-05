@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from .adapters import StimulusRecord, build_adapter
+from .adapters import StimulusRecord, build_adapter, configured_extraction_signature
 from .alignments import parse_textgrid
 from .audio import inspect_audio, load_standardized
 from .comparability import build_comparability_contract, write_json
@@ -34,9 +34,13 @@ def extract_model(
     output_dir: str | Path | None = None,
 ) -> Path:
     output = Path(output_dir) if output_dir else model_output_dir(entry)
-    if entry.values.get("locked_reference") and output == model_output_dir(entry):
+    locked_destinations = {
+        Path("outputs").resolve(),
+        model_output_dir(entry).resolve(),
+    }
+    if entry.values.get("locked_reference") and output.resolve() in locked_destinations:
         raise RuntimeError(
-            f"{entry.key} is a locked reference; provide a different --output directory "
+            f"{entry.key} is a locked reference; provide a new --output directory "
             "for a regression rerun"
         )
     validation = json.loads(Path(validation_report_path).read_text())
@@ -50,6 +54,8 @@ def extract_model(
         manifest = manifest[manifest["recording_id"].isin(recording_ids)]
     adapter = build_adapter(entry)
     adapter.load_model(local_files_only=not allow_download)
+    resolved_revision = getattr(getattr(adapter.model, "config", None), "_commit_hash", None)
+    expected_signature = adapter.extraction_signature(resolved_revision)
     store_path = output / "activations.h5"
     rows = []
     first_metadata = None
@@ -62,20 +68,11 @@ def extract_model(
                 ].attrs.get("complete", False):
                     group = store[row["recording_id"]]
                     cached = json.loads(group.attrs["metadata_json"])
-                    expected = {
-                        "model_key": entry.key,
-                        "model_id": entry.model_id,
-                        "requested_revision": entry.revision,
-                        "canonical_rate_hz": entry.canonical_rate_hz,
-                    }
-                    mismatch = {
-                        key: (cached.get(key), value)
-                        for key, value in expected.items()
-                        if cached.get(key) != value
-                    }
-                    if mismatch:
+                    cached_signature = cached.get("extraction_signature")
+                    if cached_signature != expected_signature:
                         raise RuntimeError(
-                            f"Incompatible cached {row['recording_id']}: {mismatch}; "
+                            f"Incompatible cached {row['recording_id']} extraction "
+                            "signature; "
                             "use --overwrite to recompute"
                         )
                     first_metadata = first_metadata or cached
@@ -128,7 +125,13 @@ def extract_model(
             }
         )
     output.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(output / "extraction_manifest.csv", index=False)
+    extraction_manifest = output / "extraction_manifest.csv"
+    current = pd.DataFrame(rows)
+    if extraction_manifest.exists():
+        current = pd.concat(
+            [pd.read_csv(extraction_manifest), current], ignore_index=True
+        ).drop_duplicates("recording_id", keep="last")
+    current.sort_values("recording_id").to_csv(extraction_manifest, index=False)
     if first_metadata:
         write_json(
             {
@@ -166,6 +169,7 @@ def fit_model(
     recording_ids = sorted(manifest["recording_id"].astype(str))
     xs, groups, families = [], [], None
     feature_times = {}
+    expected_signature = configured_extraction_signature(entry)
     for recording_id in recording_ids:
         feature = np.load(Path(features_dir) / f"{recording_id}.npz")
         current_families = feature["families"].tolist()
@@ -193,6 +197,18 @@ def fit_model(
         layers = json.loads(first.attrs["layer_names_json"])
         for recording_id in recording_ids:
             group = store[recording_id]
+            stored_metadata = json.loads(group.attrs["metadata_json"])
+            stored_signature = stored_metadata.get("extraction_signature", {})
+            mismatches = {
+                key: (stored_signature.get(key), value)
+                for key, value in expected_signature.items()
+                if key != "resolved_revision" and stored_signature.get(key) != value
+            }
+            if mismatches:
+                raise ValueError(
+                    f"{recording_id} activation identity differs from registry: "
+                    f"{mismatches}"
+                )
             times = group["canonical_timestamps"][:]
             if times.shape != feature_times[recording_id].shape or not np.allclose(
                 times, feature_times[recording_id], atol=1e-8, rtol=0

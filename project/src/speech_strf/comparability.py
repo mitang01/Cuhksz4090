@@ -18,6 +18,7 @@ COMPARABILITY_FIELDS = [
     "canonical_grid_sha256",
     "feature_columns",
     "feature_families",
+    "feature_matrix_sha256",
     "feature_config_sha256",
     "feature_preprocessing",
     "analysis_config_sha256",
@@ -48,6 +49,7 @@ def build_comparability_contract(
     names = families = None
     groups: list[str] = []
     grid_hashes = {}
+    matrix_hashes = {}
     for recording_id in stimulus_ids:
         feature = np.load(Path(features_dir) / f"{recording_id}.npz")
         current_names = feature["names"].tolist()
@@ -58,6 +60,9 @@ def build_comparability_contract(
             raise ValueError(f"Feature schema mismatch for {recording_id}")
         grid_hashes[recording_id] = hashlib.sha256(
             np.asarray(feature["times"], dtype=np.float64).tobytes()
+        ).hexdigest()
+        matrix_hashes[recording_id] = hashlib.sha256(
+            np.ascontiguousarray(feature["matrix"]).tobytes()
         ).hexdigest()
         groups.extend([recording_id] * len(feature["times"]))
     analysis_config = load_config(analysis_config_path)
@@ -74,6 +79,7 @@ def build_comparability_contract(
         "canonical_grid_sha256": grid_hashes,
         "feature_columns": names,
         "feature_families": families,
+        "feature_matrix_sha256": matrix_hashes,
         "feature_config_sha256": file_sha256(feature_config_path),
         "feature_preprocessing": {
             "definition": feature_config,
@@ -207,17 +213,24 @@ def compare_hubert_regression(
                         "candidate_shape": list(candidate_values.shape),
                     }
                 )
-    reference_summary = _result_summary(reference_results)
-    candidate_summary = _result_summary(candidate_results)
-    aligned = reference_summary.merge(
-        candidate_summary,
-        on=["layer", "feature_family"],
+    reference_rows = _result_rows(reference_results)
+    candidate_rows = _result_rows(candidate_results)
+    key_columns = ["layer", "outer_fold", "feature_family"]
+    aligned = reference_rows.merge(
+        candidate_rows,
+        on=key_columns,
         suffixes=("_reference", "_candidate"),
         how="outer",
         indicator=True,
     )
     same_keys = bool((aligned["_merge"] == "both").all())
-    value_columns = ["full_r2", "conditional_delta_r2"]
+    value_columns = [
+        "alpha",
+        "full_r2",
+        "reduced_r2",
+        "conditional_delta_r2",
+        "conditional_proportion",
+    ]
     summary_match = same_keys and all(
         np.allclose(
             aligned[f"{column}_reference"],
@@ -230,9 +243,10 @@ def compare_hubert_regression(
     )
     checks.append(
         {
-            "kind": "downstream_summary",
+            "kind": "downstream_fold_rows",
             "match": bool(summary_match),
             "absolute_tolerance": summary_atol,
+            "compared_columns": key_columns + value_columns,
         }
     )
     return {
@@ -265,11 +279,21 @@ def _layer_values(group, layer: str) -> np.ndarray:
     return group["native"][layer][:] if "native" in group else group[layer][:]
 
 
-def _result_summary(path: str | Path) -> pd.DataFrame:
+def _result_rows(path: str | Path) -> pd.DataFrame:
+    columns = [
+        "layer",
+        "outer_fold",
+        "feature_family",
+        "alpha",
+        "full_r2",
+        "reduced_r2",
+        "conditional_delta_r2",
+        "conditional_proportion",
+    ]
     frame = pd.read_csv(path)
-    return (
-        frame.groupby(["layer", "feature_family"], as_index=False)[
-            ["full_r2", "conditional_delta_r2"]
-        ]
-        .mean()
+    missing = set(columns) - set(frame)
+    if missing:
+        raise ValueError(f"Regression result table lacks columns: {sorted(missing)}")
+    return frame[columns].sort_values(
+        ["layer", "outer_fold", "feature_family"]
     )

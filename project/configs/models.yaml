@@ -124,9 +124,9 @@ models:
     adapter: feature_speech
     loading_class: Wav2Vec2BertModel
     layers: all
-    enabled: true
+    enabled: false
     license_notes: Public MIT-licensed Hugging Face checkpoint.
-    limitations: 600M parameters; feature-extractor input and Conformer timing need smoke validation.
+    limitations: Public identifier confirmed; disabled until native frontend timing is runtime-validated.
 
   whisper_medium_encoder:
     model_id: openai/whisper-medium
@@ -169,6 +169,7 @@ models:
     sentence_gap_seconds: 0.5
     wordpiece_pooling: mean
     outside_word_policy: zeros
+    overlength_sentence_policy: error
     license_notes: Apache-2.0 model card.
     limitations: Text-only baseline; uncased English vocabulary is poorly matched to Mandarin.
 

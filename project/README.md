@@ -74,7 +74,6 @@ wavlm_base_plus
 wavlm_large
 data2vec_audio_base
 xls_r_300m
-w2v_bert_2
 whisper_medium_encoder
 bert_base_uncased
 ```
@@ -87,7 +86,9 @@ python3 scripts/compare_to_hubert_reference.py --model bert_base_uncased
 ```
 
 `mms_1b_all` is registered but disabled pending license review. The resolved
-public W2V-BERT identifier is `facebook/w2v-bert-2.0`, pinned in the registry.
+public W2V-BERT identifier is `facebook/w2v-bert-2.0`, pinned in the registry,
+but `w2v_bert_2` remains disabled until its native frontend timing is validated
+with the actual checkpoint.
 
 To add a model, add one registry entry. Reuse `generic_speech` for waveform
 encoders with a Hugging Face hidden-state model and convolutional timing. Add a
@@ -111,6 +112,12 @@ Every completed fit writes `comparability_contract.json` and
 `run_metadata.json`. Comparison checks stimulus IDs, canonical grid, feature
 order/configuration, lag grid, held-out groups, reduced models, metrics, and
 result schema. `comparability_report.json` is machine-readable.
+
+Freeze a contract beside the completed legacy HuBERT outputs once:
+
+```bash
+python3 scripts/freeze_hubert_reference.py
+```
 
 For a non-destructive HuBERT refactor rerun, provide a separate output:
 

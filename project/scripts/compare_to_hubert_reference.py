@@ -8,7 +8,6 @@ from pathlib import Path
 import h5py
 
 from speech_strf.comparability import (
-    build_comparability_contract,
     compare_contracts,
     compare_hubert_regression,
     write_json,
@@ -48,24 +47,19 @@ def main():
     if not candidate_contract_path.exists():
         raise SystemExit(f"Missing candidate contract: {candidate_contract_path}")
     candidate_contract = json.loads(candidate_contract_path.read_text())
-    reference_contract_path = reference_root / "comparability_contract.json"
-    if reference_contract_path.exists():
-        reference_contract = json.loads(reference_contract_path.read_text())
-        reference_contract_source = str(reference_contract_path)
-    else:
-        reference_contract = build_comparability_contract(
-            args.manifest,
-            args.features,
-            args.feature_config,
-            args.analysis_config,
+    reference_contract_path = reference_root / "hubert_reference_contract.json"
+    if not reference_contract_path.exists():
+        raise SystemExit(
+            f"Missing frozen HuBERT contract: {reference_contract_path}. Run "
+            "scripts/freeze_hubert_reference.py against the completed reference first."
         )
-        reference_contract_source = "reconstructed_from_locked_common_inputs"
+    reference_contract = json.loads(reference_contract_path.read_text())
     report = compare_contracts(reference_contract, candidate_contract)
     report.update(
         {
             "model_key": entry.key,
             "reference_model": "hubert_large_reference",
-            "reference_contract_source": reference_contract_source,
+            "reference_contract_source": str(reference_contract_path),
         }
     )
     candidate_store = candidate_root / "activations.h5"

@@ -60,15 +60,23 @@ def test_saved_hubert_regression_contract_accepts_tolerance(tmp_path):
         [
             {
                 "layer": "layer_00_input",
+                "outer_fold": 0,
                 "feature_family": "full",
+                "alpha": 1.0,
                 "full_r2": 0.5,
+                "reduced_r2": np.nan,
                 "conditional_delta_r2": np.nan,
+                "conditional_proportion": np.nan,
             },
             {
                 "layer": "layer_00_input",
+                "outer_fold": 0,
                 "feature_family": "acoustic",
+                "alpha": 1.0,
                 "full_r2": 0.5,
+                "reduced_r2": 0.4,
                 "conditional_delta_r2": 0.1,
+                "conditional_proportion": 0.2,
             },
         ]
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,56 @@ import numpy as np
 from .alignments import Interval
 from .model_registry import HubertAdapter, ModelSpec, RegistryEntry
 from .timebase import make_time_grid, resample_continuous
+
+
+def checkpoint_fingerprint(model_id: str) -> str | None:
+    path = Path(model_id)
+    if not path.exists():
+        return None
+    files = []
+    if path.is_file():
+        files = [path]
+    else:
+        for pattern in ("*.json", "*.bin", "*.safetensors"):
+            files.extend(path.glob(pattern))
+    digest = hashlib.sha256()
+    for file_path in sorted(set(files)):
+        digest.update(file_path.name.encode())
+        with file_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def configured_extraction_signature(
+    entry: RegistryEntry, resolved_revision: str | None = None
+) -> dict[str, Any]:
+    keys = [
+        "model_id",
+        "revision",
+        "family",
+        "input_modality",
+        "sample_rate_hz",
+        "adapter",
+        "loading_class",
+        "layers",
+        "device",
+        "dtype",
+        "batch_seconds",
+        "chunk_overlap_seconds",
+        "canonical_rate_hz",
+        "context_policy",
+        "sentence_source",
+        "sentence_gap_seconds",
+        "wordpiece_pooling",
+        "outside_word_policy",
+        "overlength_sentence_policy",
+    ]
+    signature = {"model_key": entry.key}
+    signature.update({key: entry.values.get(key) for key in keys})
+    signature["resolved_revision"] = resolved_revision
+    signature["local_checkpoint_sha256"] = checkpoint_fingerprint(entry.model_id)
+    return signature
 
 
 @dataclass
@@ -65,13 +116,9 @@ def save_activation_artifacts(
                 existing = json.loads(
                     store[record.recording_id].attrs["metadata_json"]
                 )
-                keys = [
-                    "model_key",
-                    "model_id",
-                    "requested_revision",
-                    "canonical_rate_hz",
-                ]
-                if any(existing.get(key) != result.metadata.get(key) for key in keys):
+                if existing.get("extraction_signature") != result.metadata.get(
+                    "extraction_signature"
+                ):
                     raise RuntimeError(
                         f"Incompatible completed cache for {record.recording_id}; "
                         "use overwrite=True to recompute"
@@ -118,6 +165,12 @@ class ModelAdapter(ABC):
         self.model = None
         self.processor = None
         self._last_result: ActivationResult | None = None
+        self._configured_signature = configured_extraction_signature(entry)
+
+    def extraction_signature(self, resolved_revision: str | None = None) -> dict:
+        signature = dict(self._configured_signature)
+        signature["resolved_revision"] = resolved_revision
+        return signature
 
     @abstractmethod
     def load_model(self, local_files_only: bool = True) -> None:
@@ -204,11 +257,13 @@ class GenericSpeechEncoderAdapter(ModelAdapter):
         import torch
         import transformers
 
+        resolved_revision = getattr(self.model.config, "_commit_hash", None)
         return {
             "model_key": self.entry.key,
             "model_id": self.entry.model_id,
             "requested_revision": self.entry.revision,
-            "resolved_revision": getattr(self.model.config, "_commit_hash", None),
+            "resolved_revision": resolved_revision,
+            "extraction_signature": self.extraction_signature(resolved_revision),
             "family": self.entry.family,
             "input_modality": "audio",
             "input_sample_rate_hz": self.entry.sample_rate_hz,
@@ -334,6 +389,9 @@ class FeatureSpeechEncoderAdapter(ModelAdapter):
         metadata["resolved_revision"] = getattr(
             getattr(self.model, "config", None), "_commit_hash", None
         )
+        metadata["extraction_signature"] = self.extraction_signature(
+            metadata["resolved_revision"]
+        )
         metadata.update(
             {
                 "native_timing_rule": (
@@ -392,9 +450,9 @@ class WhisperEncoderAdapter(FeatureSpeechEncoderAdapter):
                 output.hidden_states[0].shape[1],
                 int(np.ceil(context_duration * native_rate)),
             )
-            local_times = context_start / sample_rate + (
-                np.arange(valid_frames) + 0.5
-            ) / native_rate
+            local_times = (
+                context_start / sample_rate + np.arange(valid_frames) / native_rate
+            )
             keep = (local_times >= core_start / sample_rate) & (
                 local_times < core_end / sample_rate
             )
@@ -417,11 +475,14 @@ class WhisperEncoderAdapter(FeatureSpeechEncoderAdapter):
         metadata["resolved_revision"] = getattr(
             getattr(self.model, "config", None), "_commit_hash", None
         )
+        metadata["extraction_signature"] = self.extraction_signature(
+            metadata["resolved_revision"]
+        )
         metadata.update(
             {
                 "encoder_only": True,
                 "native_timing_rule": (
-                    "actual_padded_encoder_length_divided_by_frontend_chunk_duration"
+                    "runtime_encoder_rate_with_zero-centered-STFT/conv frame origin"
                 ),
                 "native_rate_hz_from_runtime": native_rate,
                 "chunk_count": len(collected_times),
@@ -522,6 +583,23 @@ class BertTextAdapter(ModelAdapter):
                     return_tensors="pt",
                     truncation=False,
                 )
+                token_count = int(encoded["input_ids"].shape[1])
+                tokenizer_limit = int(
+                    getattr(self.processor, "model_max_length", 10**9)
+                )
+                model_limit = int(
+                    getattr(
+                        getattr(self.model, "config", None),
+                        "max_position_embeddings",
+                        tokenizer_limit,
+                    )
+                )
+                limit = min(tokenizer_limit, model_limit)
+                if token_count > limit:
+                    raise ValueError(
+                        f"Sentence requires {token_count} BERT tokens but the model "
+                        f"limit is {limit}; overlength_sentence_policy=error"
+                    )
                 word_ids = encoded.word_ids(batch_index=0)
                 model_inputs = {
                     key: value.to(self.entry.device)
@@ -577,6 +655,9 @@ class BertTextAdapter(ModelAdapter):
         )
         metadata["resolved_revision"] = getattr(
             getattr(self.model, "config", None), "_commit_hash", None
+        )
+        metadata["extraction_signature"] = self.extraction_signature(
+            metadata["resolved_revision"]
         )
         metadata.update(
             {

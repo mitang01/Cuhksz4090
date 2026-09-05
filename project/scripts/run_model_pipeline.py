@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,7 @@ from speech_strf.pipeline import (
     fit_model,
     model_output_dir,
 )
-from speech_strf.provenance import load_config
+from speech_strf.provenance import load_config, sha256_file
 
 
 def main():
@@ -50,6 +51,33 @@ def main():
         raise SystemExit(
             "--recording-id is an extraction smoke-test option; use --stage extract"
         )
+    prior_metadata_path = output / "run_metadata.json"
+    if prior_metadata_path.exists() and "extract" not in stages:
+        prior = json.loads(prior_metadata_path.read_text())
+        expected = {
+            "model_key": entry.key,
+            "model_id": entry.model_id,
+            "revision": entry.revision,
+        }
+        observed_model = prior.get("model", {})
+        mismatches = {
+            key: (observed_model.get(key), value)
+            for key, value in expected.items()
+            if observed_model.get(key) != value
+        }
+        hashes = {
+            "feature_config_sha256": sha256_file(args.feature_config),
+            "analysis_config_sha256": sha256_file(args.analysis_config),
+        }
+        mismatches.update(
+            {
+                key: (prior.get(key), value)
+                for key, value in hashes.items()
+                if prior.get(key) != value
+            }
+        )
+        if mismatches:
+            raise SystemExit(f"Existing output identity mismatch: {mismatches}")
     activation_store = output / "activations.h5"
     kernels = None
     if "extract" in stages:

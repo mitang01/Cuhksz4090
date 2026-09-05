@@ -69,6 +69,23 @@ def validate_registry(config: dict) -> list[str]:
             errors.append(f"{key}: unsupported adapter {values['adapter']!r}")
         if values.get("locked_reference") and not values.get("output_dir"):
             errors.append(f"{key}: locked references require output_dir")
+        if values["adapter"] == "whisper_encoder":
+            batch = config.get("runtime_defaults", {}).get("batch_seconds")
+            if not batch or batch > 30:
+                errors.append(f"{key}: Whisper batch_seconds must be in (0, 30]")
+        if values["adapter"] == "bert_text":
+            required = {
+                "context_policy",
+                "sentence_source",
+                "sentence_gap_seconds",
+                "wordpiece_pooling",
+                "outside_word_policy",
+                "overlength_sentence_policy",
+            }
+            if missing_text := required - set(values):
+                errors.append(f"{key}: missing BERT fields {sorted(missing_text)}")
+        if values["layers"] != "all" and not isinstance(values["layers"], list):
+            errors.append(f"{key}: layers must be 'all' or a list of layer names")
     return errors
 
 
