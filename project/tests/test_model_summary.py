@@ -1,3 +1,8 @@
+import json
+from pathlib import Path
+import subprocess
+import sys
+
 import numpy as np
 import pandas as pd
 
@@ -89,4 +94,37 @@ def test_cross_model_summary_is_hubert_relative_and_fold_preserving(tmp_path):
         "summary_metadata.json",
     }
     assert expected <= {path.name for path in (tmp_path / "summary").iterdir()}
+
+
+def test_summary_cli_rejects_model_without_comparability_report(tmp_path):
+    reference_contract = tmp_path / "reference_contract.json"
+    reference_contract.write_text(
+        json.dumps(
+            {"locked_reference": {"model_key": "hubert_large_reference"}}
+        )
+    )
+    reference_results = tmp_path / "reference.csv"
+    _results(
+        {"layer_00": [0.2, 0.3]}, {"layer_00": [0.1, 0.1]}
+    ).to_csv(reference_results, index=False)
+    project = Path(__file__).parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/summarize_model_comparison.py",
+            "--model",
+            "wavlm_base_plus",
+            "--model-root",
+            f"wavlm_base_plus={tmp_path / 'candidate'}",
+            "--reference-contract",
+            str(reference_contract),
+            "--reference-results",
+            str(reference_results),
+        ],
+        cwd=project,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "has no comparability report" in completed.stderr
 
