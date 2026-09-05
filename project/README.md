@@ -55,12 +55,21 @@ Validate registry structure and installed Transformers classes:
 python3 scripts/validate_model_registry.py
 ```
 
-Run one model after staging its checkpoint locally (use `--checkpoint PATH`):
+A complete `hf download MODEL_ID --local-dir DIRECTORY` snapshot already
+contains model weights, `config.json`, and the processor/tokenizer metadata.
+No separate calculation creates these files. Transfer the entire directory;
+manually copying only `pytorch_model.bin` or `model.safetensors` is insufficient.
+BERT needs its tokenizer files and Whisper needs `preprocessor_config.json`.
+
+Run one model after staging its checkpoint locally. Pass the same local
+checkpoint identity to every stage:
 
 ```bash
-python3 scripts/run_model_pipeline.py --model wavlm_base_plus --stage extract
-python3 scripts/run_model_pipeline.py --model wavlm_base_plus --stage fit
-python3 scripts/run_model_pipeline.py --model wavlm_base_plus --stage figures
+MODEL=wavlm_base_plus
+CHECKPOINT=/share/home/mitan/models/wavlm-base-plus
+python3 scripts/run_model_pipeline.py --model "$MODEL" --checkpoint "$CHECKPOINT" --stage extract
+python3 scripts/run_model_pipeline.py --model "$MODEL" --checkpoint "$CHECKPOINT" --stage fit
+python3 scripts/run_model_pipeline.py --model "$MODEL" --checkpoint "$CHECKPOINT" --stage figures
 python3 scripts/compare_to_hubert_reference.py --model wavlm_base_plus
 ```
 
@@ -134,6 +143,25 @@ python3 scripts/compare_to_hubert_reference.py \
 
 Regression tolerances are `2e-3` absolute for FP16 activations, `1e-6` seconds
 for timestamps, and `1e-4` for downstream summaries.
+
+### Cross-model predictability summary
+
+After each candidate has passed `compare_to_hubert_reference.py`, aggregate any
+completed set without rerunning a model:
+
+```bash
+python3 scripts/summarize_model_comparison.py \
+  --model hubert_base \
+  --model wavlm_base_plus \
+  --model whisper_medium_encoder
+```
+
+The command writes `outputs/model_comparison/model_comparison_summary.csv`,
+layer and feature-family detail tables, paired fold differences from HuBERT
+Large, SVG/PDF predictability figures, and source hashes. It refuses candidates
+whose comparability report did not pass. “Higher predictability” means the fixed
+feature set explains more variance in that representation; it is not a general
+model-quality or causal claim.
 
 Input validation treats a configured overhang of at most 30 ms as a warning only
 when the interval label is empty. Original TextGrid times remain unchanged.
