@@ -2,8 +2,114 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import numpy as np
+import yaml
+
+
+REQUIRED_MODEL_FIELDS = {
+    "model_id",
+    "revision",
+    "family",
+    "input_modality",
+    "sample_rate_hz",
+    "adapter",
+    "loading_class",
+    "layers",
+    "enabled",
+    "license_notes",
+    "limitations",
+}
+SUPPORTED_ADAPTERS = {
+    "generic_speech",
+    "feature_speech",
+    "whisper_encoder",
+    "bert_text",
+}
+
+
+@dataclass(frozen=True)
+class RegistryEntry:
+    key: str
+    values: dict[str, Any]
+
+    def __getattr__(self, name: str):
+        try:
+            return self.values[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"key": self.key, **self.values}
+
+
+def validate_registry(config: dict) -> list[str]:
+    errors: list[str] = []
+    models = config.get("models")
+    if not isinstance(models, dict) or not models:
+        return ["models must be a non-empty mapping"]
+    if config.get("default_model") not in models:
+        errors.append("default_model must name a registry entry")
+    for key, values in models.items():
+        if not key or key.lower() != key or " " in key:
+            errors.append(f"{key!r}: stable key must be lowercase and contain no spaces")
+        missing = REQUIRED_MODEL_FIELDS - set(values)
+        if missing:
+            errors.append(f"{key}: missing fields {sorted(missing)}")
+            continue
+        if values["input_modality"] not in {"audio", "text"}:
+            errors.append(f"{key}: input_modality must be audio or text")
+        if values["input_modality"] == "audio" and not values["sample_rate_hz"]:
+            errors.append(f"{key}: audio models require sample_rate_hz")
+        if values["input_modality"] == "text" and values["sample_rate_hz"] is not None:
+            errors.append(f"{key}: text models must use null sample_rate_hz")
+        if values["adapter"] not in SUPPORTED_ADAPTERS:
+            errors.append(f"{key}: unsupported adapter {values['adapter']!r}")
+        if values.get("locked_reference") and not values.get("output_dir"):
+            errors.append(f"{key}: locked references require output_dir")
+        if values["adapter"] == "whisper_encoder":
+            batch = config.get("runtime_defaults", {}).get("batch_seconds")
+            if not batch or batch > 30:
+                errors.append(f"{key}: Whisper batch_seconds must be in (0, 30]")
+        if values["adapter"] == "bert_text":
+            required = {
+                "context_policy",
+                "sentence_source",
+                "sentence_gap_seconds",
+                "wordpiece_pooling",
+                "outside_word_policy",
+                "overlength_sentence_policy",
+            }
+            if missing_text := required - set(values):
+                errors.append(f"{key}: missing BERT fields {sorted(missing_text)}")
+        if values["layers"] != "all" and not isinstance(values["layers"], list):
+            errors.append(f"{key}: layers must be 'all' or a list of layer names")
+    return errors
+
+
+def load_model_registry(path: str | Path) -> tuple[dict, dict[str, RegistryEntry]]:
+    with Path(path).open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    errors = validate_registry(config)
+    if errors:
+        raise ValueError("Invalid model registry:\n- " + "\n- ".join(errors))
+    defaults = dict(config.get("runtime_defaults", {}))
+    defaults["default_model"] = config["default_model"]
+    entries = {
+        key: RegistryEntry(key, {**defaults, **values})
+        for key, values in config["models"].items()
+    }
+    return defaults, entries
+
+
+def get_model_entry(path: str | Path, key: str | None = None) -> RegistryEntry:
+    defaults, entries = load_model_registry(path)
+    selected = key or defaults["default_model"]
+    if selected not in entries:
+        raise KeyError(f"Unknown model {selected!r}; available: {sorted(entries)}")
+    return entries[selected]
 
 
 @dataclass(frozen=True)
@@ -22,6 +128,7 @@ class HubertAdapter:
         device: str = "cpu",
         dtype: str = "float32",
         local_files_only: bool = False,
+        loading_class: str = "HubertModel",
         processor=None,
         model=None,
     ) -> None:
@@ -39,14 +146,18 @@ class HubertAdapter:
         self.torch_dtype = getattr(torch, dtype)
         self.numpy_dtype = np.dtype(dtype)
         if processor is None or model is None:
-            from transformers import AutoFeatureExtractor, HubertModel
+            import transformers
 
-            processor = AutoFeatureExtractor.from_pretrained(
+            processor = transformers.AutoFeatureExtractor.from_pretrained(
                 spec.checkpoint,
                 revision=spec.revision,
                 local_files_only=local_files_only,
             )
-            model = HubertModel.from_pretrained(
+            try:
+                model_class = getattr(transformers, loading_class)
+            except AttributeError as exc:
+                raise ValueError(f"Unknown Transformers loading class {loading_class}") from exc
+            model = model_class.from_pretrained(
                 spec.checkpoint,
                 revision=spec.revision,
                 local_files_only=local_files_only,
