@@ -14,8 +14,9 @@ from speech_strf.pipeline import (
     finalize_metadata,
     fit_model,
     model_output_dir,
+    output_identity_mismatches,
 )
-from speech_strf.provenance import load_config, sha256_file
+from speech_strf.provenance import load_config
 
 
 def main():
@@ -54,31 +55,20 @@ def main():
     prior_metadata_path = output / "run_metadata.json"
     if prior_metadata_path.exists() and "extract" not in stages:
         prior = json.loads(prior_metadata_path.read_text())
-        expected = {
-            "model_key": entry.key,
-            "model_id": entry.model_id,
-            "revision": entry.revision,
-        }
-        observed_model = prior.get("model", {})
-        mismatches = {
-            key: (observed_model.get(key), value)
-            for key, value in expected.items()
-            if observed_model.get(key) != value
-        }
-        hashes = {
-            "feature_config_sha256": sha256_file(args.feature_config),
-            "analysis_config_sha256": sha256_file(args.analysis_config),
-        }
-        mismatches.update(
-            {
-                key: (prior.get(key), value)
-                for key, value in hashes.items()
-                if prior.get(key) != value
-            }
+        mismatches = output_identity_mismatches(
+            entry,
+            prior,
+            args.feature_config,
+            args.analysis_config,
         )
         if mismatches:
             raise SystemExit(f"Existing output identity mismatch: {mismatches}")
     activation_store = output / "activations.h5"
+    if "fit" in stages and "extract" not in stages and not activation_store.is_file():
+        raise SystemExit(
+            f"Missing activation store: {activation_store}. "
+            "Run this model and output with --stage extract first."
+        )
     kernels = None
     if "extract" in stages:
         activation_store = extract_model(
