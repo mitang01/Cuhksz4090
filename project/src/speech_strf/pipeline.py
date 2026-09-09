@@ -16,11 +16,44 @@ from .design_matrix import lagged_design
 from .figures import make_result_figures
 from .fit_encoding import nested_group_encoding
 from .model_registry import RegistryEntry
-from .provenance import load_config, write_model_run_metadata
+from .provenance import load_config, sha256_file, write_model_run_metadata
 
 
 def model_output_dir(entry: RegistryEntry) -> Path:
     return Path(entry.values.get("output_dir", f"outputs/{entry.key}"))
+
+
+def output_identity_mismatches(
+    entry: RegistryEntry,
+    prior_metadata: dict,
+    feature_config_path: str | Path,
+    analysis_config_path: str | Path,
+) -> dict[str, tuple[object, object]]:
+    """Compare an existing run with the requested model and analysis identity."""
+    observed_model = prior_metadata.get("model", {})
+    observed_key = observed_model.get("key", observed_model.get("model_key"))
+    expected_model = {
+        "model_key": (observed_key, entry.key),
+        "model_id": (observed_model.get("model_id"), entry.model_id),
+        "revision": (observed_model.get("revision"), entry.revision),
+    }
+    mismatches = {
+        key: values
+        for key, values in expected_model.items()
+        if values[0] != values[1]
+    }
+    expected_hashes = {
+        "feature_config_sha256": sha256_file(feature_config_path),
+        "analysis_config_sha256": sha256_file(analysis_config_path),
+    }
+    mismatches.update(
+        {
+            key: (prior_metadata.get(key), value)
+            for key, value in expected_hashes.items()
+            if prior_metadata.get(key) != value
+        }
+    )
+    return mismatches
 
 
 def extract_model(

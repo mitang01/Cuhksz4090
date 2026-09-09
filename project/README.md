@@ -131,15 +131,32 @@ python3 scripts/freeze_hubert_reference.py
 For a non-destructive HuBERT refactor rerun, provide a separate output:
 
 ```bash
+export HUBERT=/share/home/mitan/models/hubert-large-ls960-ft/hubert-large-ls960-ft
 python3 scripts/run_model_pipeline.py \
   --model hubert_large_reference \
+  --checkpoint "$HUBERT" \
   --output outputs/hubert_large_refactor_rerun \
-  --stage all
+  --stage extract
+python3 scripts/run_model_pipeline.py \
+  --model hubert_large_reference \
+  --checkpoint "$HUBERT" \
+  --output outputs/hubert_large_refactor_rerun \
+  --stage fit
+python3 scripts/run_model_pipeline.py \
+  --model hubert_large_reference \
+  --checkpoint "$HUBERT" \
+  --output outputs/hubert_large_refactor_rerun \
+  --stage figures
 python3 scripts/compare_to_hubert_reference.py \
   --model hubert_large_reference \
   --candidate-root outputs/hubert_large_refactor_rerun \
   --run-hubert-regression
 ```
+
+`--stage fit` consumes `activations.h5` produced by `--stage extract` in the
+same output directory; it does not load or extract the checkpoint itself. In a
+Slurm script using `set -u`, define or export `HUBERT` before the first
+`"$HUBERT"` expansion.
 
 Regression tolerances are `2e-3` absolute for FP16 activations, `1e-6` seconds
 for timestamps, and `1e-4` for downstream summaries.
