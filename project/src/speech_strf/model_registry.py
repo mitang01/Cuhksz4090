@@ -145,6 +145,11 @@ class HubertAdapter:
         self.spec, self.device, self.dtype = spec, device, dtype
         self.torch_dtype = getattr(torch, dtype)
         self.numpy_dtype = np.dtype(dtype)
+        self.loading_info = {
+            "missing_keys": [],
+            "unexpected_keys": [],
+            "mismatched_keys": [],
+        }
         if processor is None or model is None:
             import transformers
 
@@ -157,18 +162,50 @@ class HubertAdapter:
                 model_class = getattr(transformers, loading_class)
             except AttributeError as exc:
                 raise ValueError(f"Unknown Transformers loading class {loading_class}") from exc
-            model = model_class.from_pretrained(
+            config = transformers.AutoConfig.from_pretrained(
                 spec.checkpoint,
                 revision=spec.revision,
                 local_files_only=local_files_only,
             )
+            original_masking = {
+                name: getattr(config, name, None)
+                for name in ("mask_time_prob", "mask_feature_prob")
+            }
+            for name in original_masking:
+                if hasattr(config, name):
+                    setattr(config, name, 0.0)
+            # region agent log
+            import json; open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "E", "location": "model_registry.py:174", "message": "disabled pretraining masking in evaluation config", "data": {"loading_class": loading_class, "original_masking": original_masking, "effective_masking": {name: getattr(config, name, None) for name in original_masking}}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
+            # endregion
+            # region agent log
+            import json; open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,D", "location": "model_registry.py:160", "message": "loading checkpoint through configured class", "data": {"loading_class": loading_class, "checkpoint_is_local": Path(spec.checkpoint).exists(), "local_files_only": local_files_only}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
+            # endregion
+            model, loading_info = model_class.from_pretrained(
+                spec.checkpoint,
+                revision=spec.revision,
+                local_files_only=local_files_only,
+                config=config,
+                output_loading_info=True,
+            )
+            loading_info = {
+                key: sorted(value) if isinstance(value, set) else value
+                for key, value in loading_info.items()
+            }
+            # region agent log
+            open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,D", "location": "model_registry.py:169", "message": "checkpoint load result", "data": {"model_class": type(model).__name__, "architectures": getattr(model.config, "architectures", None), "missing_keys": loading_info.get("missing_keys", []), "unexpected_keys": loading_info.get("unexpected_keys", []), "mismatched_keys": loading_info.get("mismatched_keys", [])}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
+            # endregion
+            self.loading_info = loading_info
         self.processor = processor
         self.model = model.to(device=device, dtype=self.torch_dtype).eval()
+        # Keep the checkpoint's native task wrapper for faithful loading and
+        # provenance, but run extraction against its underlying speech encoder.
+        # For bare encoder classes, ``base_model`` is the model itself.
+        self.encoder = self.model.base_model
 
     def frame_timing_samples(self) -> tuple[int, float]:
         """Return convolutional frame stride and receptive-field center in samples."""
-        kernels = tuple(self.model.config.conv_kernel)
-        strides = tuple(self.model.config.conv_stride)
+        kernels = tuple(self.encoder.config.conv_kernel)
+        strides = tuple(self.encoder.config.conv_stride)
         if len(kernels) != len(strides):
             raise RuntimeError("HuBERT convolution kernel and stride lengths differ")
         jump, receptive_field = 1, 1
@@ -204,13 +241,16 @@ class HubertAdapter:
     def _forward(self, input_values):
         import torch
 
+        # region agent log
+        import json; open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C,D", "location": "model_registry.py:213", "message": "encoder forward entry", "data": {"model_class": type(self.model).__name__, "training": self.model.training, "input_shape": list(input_values.shape), "mask_time_prob": getattr(self.model.config, "mask_time_prob", None), "masked_spec_embed_norm": float(self.model.masked_spec_embed.detach().float().norm()) if hasattr(self.model, "masked_spec_embed") else None}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
+        # endregion
         autocast = (
             torch.autocast(device_type="cuda", dtype=self.torch_dtype)
             if self.device.startswith("cuda") and self.dtype == "float16"
             else nullcontext()
         )
         with torch.inference_mode(), autocast:
-            output = self.model(
+            output = self.encoder(
                 input_values=input_values.to(self.device),
                 output_hidden_states=True,
                 return_dict=True,
@@ -218,6 +258,9 @@ class HubertAdapter:
         states = output.hidden_states
         if not states:
             raise RuntimeError("Model returned no hidden states")
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C,D", "location": "model_registry.py:230", "message": "encoder forward exit", "data": {"hidden_state_count": len(states), "hidden_shapes": [list(state.shape) for state in states], "last_hidden_checksum": float(states[-1].detach().float().sum())}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
+        # endregion
         arrays = [
             state[0].detach().cpu().numpy().astype(self.numpy_dtype, copy=False)
             for state in states
@@ -226,13 +269,13 @@ class HubertAdapter:
         lengths = {array.shape[0] for array in arrays}
         if len(dimensions) != 1 or len(lengths) != 1:
             raise RuntimeError("Hidden-state shapes are inconsistent across layers")
-        expected_count = getattr(self.model.config, "num_hidden_layers", None)
+        expected_count = getattr(self.encoder.config, "num_hidden_layers", None)
         if expected_count is not None and len(arrays) != expected_count + 1:
             raise RuntimeError(
                 f"Expected {expected_count + 1} representations from runtime config, "
                 f"received {len(arrays)}"
             )
-        expected_width = getattr(self.model.config, "hidden_size", None)
+        expected_width = getattr(self.encoder.config, "hidden_size", None)
         if expected_width is not None and next(iter(dimensions)) != expected_width:
             raise RuntimeError(
                 f"Expected hidden width {expected_width}, received {next(iter(dimensions))}"

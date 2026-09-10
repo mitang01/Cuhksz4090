@@ -60,6 +60,10 @@ def configured_extraction_signature(
     ]
     signature = {"model_key": entry.key}
     signature.update({key: entry.values.get(key) for key in keys})
+    if signature["loading_class"] == "Wav2Vec2ForCTC":
+        # Extraction bypasses the CTC head and uses the same nested encoder as
+        # Wav2Vec2Model, so both loading routes have the same activation identity.
+        signature["loading_class"] = "Wav2Vec2Model"
     signature["resolved_revision"] = resolved_revision
     signature["local_checkpoint_sha256"] = checkpoint_fingerprint(entry.model_id)
     return signature

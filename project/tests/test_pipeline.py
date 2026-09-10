@@ -2,6 +2,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from speech_strf.adapters import configured_extraction_signature
+from speech_strf.model_registry import RegistryEntry
 from speech_strf.model_registry import get_model_entry
 from speech_strf.pipeline import output_identity_mismatches
 from speech_strf.provenance import sha256_file
@@ -43,6 +45,31 @@ def test_output_identity_accepts_legacy_model_key_alias():
         FEATURE_CONFIG,
         ANALYSIS_CONFIG,
     )
+
+
+def test_wav2vec2_ctc_signature_accepts_legacy_encoder_cache_for_fit_and_resume():
+    ctc_entry = get_model_entry(REGISTRY, "wav2vec2_base")
+    encoder_entry = RegistryEntry(
+        ctc_entry.key,
+        {**ctc_entry.values, "loading_class": "Wav2Vec2Model"},
+    )
+
+    cached_signature = configured_extraction_signature(
+        encoder_entry, resolved_revision="checkpoint-commit"
+    )
+    resume_signature = configured_extraction_signature(
+        ctc_entry, resolved_revision="checkpoint-commit"
+    )
+    assert cached_signature == resume_signature
+    assert resume_signature["loading_class"] == "Wav2Vec2Model"
+
+    fit_signature = configured_extraction_signature(ctc_entry)
+    fit_mismatches = {
+        key: (cached_signature.get(key), value)
+        for key, value in fit_signature.items()
+        if key != "resolved_revision" and cached_signature.get(key) != value
+    }
+    assert fit_mismatches == {}
 
 
 def test_fit_without_extraction_reports_actionable_error(tmp_path):
