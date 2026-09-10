@@ -162,39 +162,34 @@ class HubertAdapter:
                 model_class = getattr(transformers, loading_class)
             except AttributeError as exc:
                 raise ValueError(f"Unknown Transformers loading class {loading_class}") from exc
-            config = transformers.AutoConfig.from_pretrained(
-                spec.checkpoint,
-                revision=spec.revision,
-                local_files_only=local_files_only,
-            )
-            original_masking = {
-                name: getattr(config, name, None)
-                for name in ("mask_time_prob", "mask_feature_prob")
-            }
-            for name in original_masking:
-                if hasattr(config, name):
-                    setattr(config, name, 0.0)
-            # region agent log
-            import json; open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "E", "location": "model_registry.py:174", "message": "disabled pretraining masking in evaluation config", "data": {"loading_class": loading_class, "original_masking": original_masking, "effective_masking": {name: getattr(config, name, None) for name in original_masking}}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
-            # endregion
-            # region agent log
-            import json; open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,D", "location": "model_registry.py:160", "message": "loading checkpoint through configured class", "data": {"loading_class": loading_class, "checkpoint_is_local": Path(spec.checkpoint).exists(), "local_files_only": local_files_only}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
-            # endregion
-            model, loading_info = model_class.from_pretrained(
-                spec.checkpoint,
-                revision=spec.revision,
-                local_files_only=local_files_only,
-                config=config,
-                output_loading_info=True,
-            )
-            loading_info = {
-                key: sorted(value) if isinstance(value, set) else value
-                for key, value in loading_info.items()
-            }
-            # region agent log
-            open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,D", "location": "model_registry.py:169", "message": "checkpoint load result", "data": {"model_class": type(model).__name__, "architectures": getattr(model.config, "architectures", None), "missing_keys": loading_info.get("missing_keys", []), "unexpected_keys": loading_info.get("unexpected_keys", []), "mismatched_keys": loading_info.get("mismatched_keys", [])}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
-            # endregion
-            self.loading_info = loading_info
+            if loading_class == "Wav2Vec2ForCTC":
+                config = transformers.AutoConfig.from_pretrained(
+                    spec.checkpoint,
+                    revision=spec.revision,
+                    local_files_only=local_files_only,
+                )
+                # SpecAugment is inactive in eval mode. Disabling it before model
+                # construction also avoids creating a random masked-spec vector
+                # that fine-tuned CTC checkpoints intentionally do not contain.
+                config.mask_time_prob = 0.0
+                config.mask_feature_prob = 0.0
+                model, loading_info = model_class.from_pretrained(
+                    spec.checkpoint,
+                    revision=spec.revision,
+                    local_files_only=local_files_only,
+                    config=config,
+                    output_loading_info=True,
+                )
+                self.loading_info = {
+                    key: sorted(value) if isinstance(value, set) else value
+                    for key, value in loading_info.items()
+                }
+            else:
+                model = model_class.from_pretrained(
+                    spec.checkpoint,
+                    revision=spec.revision,
+                    local_files_only=local_files_only,
+                )
         self.processor = processor
         self.model = model.to(device=device, dtype=self.torch_dtype).eval()
         # Keep the checkpoint's native task wrapper for faithful loading and
@@ -241,9 +236,6 @@ class HubertAdapter:
     def _forward(self, input_values):
         import torch
 
-        # region agent log
-        import json; open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C,D", "location": "model_registry.py:213", "message": "encoder forward entry", "data": {"model_class": type(self.model).__name__, "training": self.model.training, "input_shape": list(input_values.shape), "mask_time_prob": getattr(self.model.config, "mask_time_prob", None), "masked_spec_embed_norm": float(self.model.masked_spec_embed.detach().float().norm()) if hasattr(self.model, "masked_spec_embed") else None}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
-        # endregion
         autocast = (
             torch.autocast(device_type="cuda", dtype=self.torch_dtype)
             if self.device.startswith("cuda") and self.dtype == "float16"
@@ -258,9 +250,6 @@ class HubertAdapter:
         states = output.hidden_states
         if not states:
             raise RuntimeError("Model returned no hidden states")
-        # region agent log
-        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C,D", "location": "model_registry.py:230", "message": "encoder forward exit", "data": {"hidden_state_count": len(states), "hidden_shapes": [list(state.shape) for state in states], "last_hidden_checksum": float(states[-1].detach().float().sum())}, "timestamp": __import__("time").time_ns() // 1_000_000}) + "\n")
-        # endregion
         arrays = [
             state[0].detach().cpu().numpy().astype(self.numpy_dtype, copy=False)
             for state in states
