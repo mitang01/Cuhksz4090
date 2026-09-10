@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 import torch
+from safetensors.torch import load_file, save_file
 from transformers import (
     HubertConfig,
     HubertModel,
@@ -104,11 +105,11 @@ def test_generic_adapter_preserves_ctc_wrapper_but_extracts_nested_encoder(tmp_p
         num_conv_pos_embedding_groups=2,
         num_conv_pos_embeddings=4,
     )
-    Wav2Vec2ForCTC(config).save_pretrained(checkpoint, safe_serialization=False)
-    weights_path = checkpoint / "pytorch_model.bin"
-    weights = torch.load(weights_path, map_location="cpu", weights_only=True)
+    Wav2Vec2ForCTC(config).save_pretrained(checkpoint)
+    weights_path = checkpoint / "model.safetensors"
+    weights = load_file(weights_path)
     del weights["wav2vec2.masked_spec_embed"]
-    torch.save(weights, weights_path)
+    save_file(weights, weights_path, metadata={"format": "pt"})
     Wav2Vec2FeatureExtractor(
         sampling_rate=16000, do_normalize=False
     ).save_pretrained(checkpoint)
