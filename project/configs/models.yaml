@@ -44,7 +44,7 @@ models:
     input_modality: audio
     sample_rate_hz: 16000
     adapter: generic_speech
-    loading_class: Wav2Vec2Model
+    loading_class: Wav2Vec2ForCTC
     layers: all
     enabled: true
     license_notes: Apache-2.0 model card.
@@ -57,7 +57,7 @@ models:
     input_modality: audio
     sample_rate_hz: 16000
     adapter: generic_speech
-    loading_class: Wav2Vec2Model
+    loading_class: Wav2Vec2ForCTC
     layers: all
     enabled: true
     license_notes: MIT model card.

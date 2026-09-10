@@ -34,6 +34,8 @@ def test_planned_registry_identifiers_are_exact():
         "bert_base_uncased": "google-bert/bert-base-uncased",
     }
     assert {key: entry.model_id for key, entry in entries.items()} == expected
+    assert entries["wav2vec2_base"].loading_class == "Wav2Vec2ForCTC"
+    assert entries["wav2vec2_large"].loading_class == "Wav2Vec2ForCTC"
     assert not entries["mms_1b_all"].enabled
     assert entries["hubert_large_reference"].locked_reference
 

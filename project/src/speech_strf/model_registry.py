@@ -145,6 +145,11 @@ class HubertAdapter:
         self.spec, self.device, self.dtype = spec, device, dtype
         self.torch_dtype = getattr(torch, dtype)
         self.numpy_dtype = np.dtype(dtype)
+        self.loading_info = {
+            "missing_keys": [],
+            "unexpected_keys": [],
+            "mismatched_keys": [],
+        }
         if processor is None or model is None:
             import transformers
 
@@ -157,18 +162,45 @@ class HubertAdapter:
                 model_class = getattr(transformers, loading_class)
             except AttributeError as exc:
                 raise ValueError(f"Unknown Transformers loading class {loading_class}") from exc
-            model = model_class.from_pretrained(
-                spec.checkpoint,
-                revision=spec.revision,
-                local_files_only=local_files_only,
-            )
+            if loading_class == "Wav2Vec2ForCTC":
+                config = transformers.AutoConfig.from_pretrained(
+                    spec.checkpoint,
+                    revision=spec.revision,
+                    local_files_only=local_files_only,
+                )
+                # SpecAugment is inactive in eval mode. Disabling it before model
+                # construction also avoids creating a random masked-spec vector
+                # that fine-tuned CTC checkpoints intentionally do not contain.
+                config.mask_time_prob = 0.0
+                config.mask_feature_prob = 0.0
+                model, loading_info = model_class.from_pretrained(
+                    spec.checkpoint,
+                    revision=spec.revision,
+                    local_files_only=local_files_only,
+                    config=config,
+                    output_loading_info=True,
+                )
+                self.loading_info = {
+                    key: sorted(value) if isinstance(value, set) else value
+                    for key, value in loading_info.items()
+                }
+            else:
+                model = model_class.from_pretrained(
+                    spec.checkpoint,
+                    revision=spec.revision,
+                    local_files_only=local_files_only,
+                )
         self.processor = processor
         self.model = model.to(device=device, dtype=self.torch_dtype).eval()
+        # Keep the checkpoint's native task wrapper for faithful loading and
+        # provenance, but run extraction against its underlying speech encoder.
+        # For bare encoder classes, ``base_model`` is the model itself.
+        self.encoder = self.model.base_model
 
     def frame_timing_samples(self) -> tuple[int, float]:
         """Return convolutional frame stride and receptive-field center in samples."""
-        kernels = tuple(self.model.config.conv_kernel)
-        strides = tuple(self.model.config.conv_stride)
+        kernels = tuple(self.encoder.config.conv_kernel)
+        strides = tuple(self.encoder.config.conv_stride)
         if len(kernels) != len(strides):
             raise RuntimeError("HuBERT convolution kernel and stride lengths differ")
         jump, receptive_field = 1, 1
@@ -210,7 +242,7 @@ class HubertAdapter:
             else nullcontext()
         )
         with torch.inference_mode(), autocast:
-            output = self.model(
+            output = self.encoder(
                 input_values=input_values.to(self.device),
                 output_hidden_states=True,
                 return_dict=True,
@@ -226,13 +258,13 @@ class HubertAdapter:
         lengths = {array.shape[0] for array in arrays}
         if len(dimensions) != 1 or len(lengths) != 1:
             raise RuntimeError("Hidden-state shapes are inconsistent across layers")
-        expected_count = getattr(self.model.config, "num_hidden_layers", None)
+        expected_count = getattr(self.encoder.config, "num_hidden_layers", None)
         if expected_count is not None and len(arrays) != expected_count + 1:
             raise RuntimeError(
                 f"Expected {expected_count + 1} representations from runtime config, "
                 f"received {len(arrays)}"
             )
-        expected_width = getattr(self.model.config, "hidden_size", None)
+        expected_width = getattr(self.encoder.config, "hidden_size", None)
         if expected_width is not None and next(iter(dimensions)) != expected_width:
             raise RuntimeError(
                 f"Expected hidden width {expected_width}, received {next(iter(dimensions))}"

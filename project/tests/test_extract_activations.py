@@ -5,14 +5,22 @@ import numpy as np
 import pytest
 import soundfile as sf
 import torch
-from transformers import HubertConfig, HubertModel
+from safetensors.torch import load_file, save_file
+from transformers import (
+    HubertConfig,
+    HubertModel,
+    Wav2Vec2Config,
+    Wav2Vec2FeatureExtractor,
+    Wav2Vec2ForCTC,
+)
 
+from speech_strf.adapters import GenericSpeechEncoderAdapter, StimulusRecord
 from speech_strf.extract_activations import (
     estimate_storage_bytes,
     extract_chunked,
     extract_recording,
 )
-from speech_strf.model_registry import HubertAdapter, ModelSpec
+from speech_strf.model_registry import HubertAdapter, ModelSpec, RegistryEntry
 
 
 class FakeAdapter:
@@ -81,6 +89,73 @@ def test_real_hubert_class_returns_explicit_input_and_transformer_layers():
     assert metadata["representation_count"] == 3
     assert metadata["hidden_dimension"] == 8
     assert adapter.frame_timing_samples() == (2, 1.5)
+
+
+def test_generic_adapter_preserves_ctc_wrapper_but_extracts_nested_encoder(tmp_path):
+    checkpoint = tmp_path / "tiny-wav2vec2-ctc"
+    config = Wav2Vec2Config(
+        vocab_size=8,
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+        conv_dim=(8,),
+        conv_stride=(2,),
+        conv_kernel=(4,),
+        num_conv_pos_embedding_groups=2,
+        num_conv_pos_embeddings=4,
+    )
+    Wav2Vec2ForCTC(config).save_pretrained(checkpoint)
+    weights_path = checkpoint / "model.safetensors"
+    weights = load_file(weights_path)
+    del weights["wav2vec2.masked_spec_embed"]
+    save_file(weights, weights_path, metadata={"format": "pt"})
+    Wav2Vec2FeatureExtractor(
+        sampling_rate=16000, do_normalize=False
+    ).save_pretrained(checkpoint)
+    entry = RegistryEntry(
+        "tiny_wav2vec2",
+        {
+            "model_id": str(checkpoint),
+            "revision": "main",
+            "family": "wav2vec2",
+            "sample_rate_hz": 16000,
+            "loading_class": "Wav2Vec2ForCTC",
+            "device": "cpu",
+            "dtype": "float32",
+            "batch_seconds": 1,
+            "chunk_overlap_seconds": 0,
+            "layers": "all",
+            "canonical_rate_hz": 50,
+        },
+    )
+    adapter = GenericSpeechEncoderAdapter(entry)
+    adapter.load_model()
+
+    assert isinstance(adapter.model, Wav2Vec2ForCTC)
+    assert adapter.backend.encoder is adapter.model.wav2vec2
+    assert adapter.model.config.mask_time_prob == 0.0
+    assert adapter.model.config.mask_feature_prob == 0.0
+    assert adapter.backend.loading_info["missing_keys"] == []
+    assert adapter.backend.loading_info["unexpected_keys"] == []
+    assert adapter.backend.loading_info["mismatched_keys"] == []
+    assert adapter.backend.frame_timing_samples() == (2, 1.5)
+
+    result = adapter.extract_hidden_states(
+        StimulusRecord(
+            "tiny",
+            duration_seconds=64 / 16000,
+            audio=np.linspace(-1, 1, 64, dtype=np.float32),
+        )
+    )
+    assert list(result.native_states) == [
+        "layer_00_input",
+        "layer_01_transformer",
+    ]
+    assert {values.shape for values in result.native_states.values()} == {(31, 8)}
+    np.testing.assert_allclose(
+        result.native_times, (1.5 + np.arange(31) * 2) / 16000
+    )
 
 
 def test_device_typo_is_rejected_before_model_loading():
