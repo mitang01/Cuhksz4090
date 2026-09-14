@@ -37,6 +37,7 @@ REQUIRED_MODEL_ARTIFACTS = (
 PHONE_TIERS = frozenset({"phone", "phones", "phoneme", "phonemes"})
 WORD_TIERS = frozenset({"word", "words"})
 STATUS_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
+NUMERICAL_ENDPOINT_TOLERANCE_SECONDS = 1e-6
 
 
 def _status(reasons: Iterable[dict[str, str]]) -> str:
@@ -156,6 +157,14 @@ def _annotation_qc(
         or row.end < -1e-9
         or row.end > duration + 1e-9
     ]
+    tolerated_numerical_overhangs = [
+        row
+        for row in out_of_bounds
+        if row.start >= -1e-9
+        and row.start <= duration + 1e-9
+        and row.end >= -1e-9
+        and row.end <= duration + NUMERICAL_ENDPOINT_TOLERANCE_SECONDS
+    ]
     tolerated_empty_overhangs = [
         row
         for row in out_of_bounds
@@ -165,7 +174,12 @@ def _annotation_qc(
         and row.end >= -1e-9
         and row.end <= duration + endpoint_tolerance_seconds
     ]
-    fatal_out_of_bounds_count = len(out_of_bounds) - len(tolerated_empty_overhangs)
+    tolerated_out_of_bounds = set(tolerated_numerical_overhangs) | set(
+        tolerated_empty_overhangs
+    )
+    fatal_out_of_bounds_count = sum(
+        row not in tolerated_out_of_bounds for row in out_of_bounds
+    )
     out_of_bounds_count = len(out_of_bounds)
     overlap_count = 0
     by_tier: dict[str, list[Interval]] = {}
@@ -195,6 +209,14 @@ def _annotation_qc(
             reasons.append(_reason("FAIL", code, f"{count} interval(s)"))
     if empty_count:
         reasons.append(_reason("WARN", "empty_labels", f"{empty_count} interval(s)"))
+    if tolerated_numerical_overhangs:
+        reasons.append(
+            _reason(
+                "WARN",
+                "tolerated_numerical_endpoint_overhang",
+                f"{len(tolerated_numerical_overhangs)} interval(s)",
+            )
+        )
     if tolerated_empty_overhangs:
         reasons.append(
             _reason(
@@ -232,6 +254,9 @@ def _annotation_qc(
         "word_count": len(words),
         "empty_label_count": empty_count,
         "out_of_bounds_count": out_of_bounds_count,
+        "tolerated_numerical_out_of_bounds_count": len(
+            tolerated_numerical_overhangs
+        ),
         "tolerated_empty_out_of_bounds_count": len(tolerated_empty_overhangs),
         "fatal_out_of_bounds_count": fatal_out_of_bounds_count,
         "overlapping_count": overlap_count,
@@ -738,6 +763,9 @@ def run_stage4_qc(
         "empty_label_count": sum(row["empty_label_count"] for row in recordings),
         "out_of_bounds_count": sum(
             row["out_of_bounds_count"] for row in recordings
+        ),
+        "tolerated_numerical_out_of_bounds_count": sum(
+            row["tolerated_numerical_out_of_bounds_count"] for row in recordings
         ),
         "tolerated_empty_out_of_bounds_count": sum(
             row["tolerated_empty_out_of_bounds_count"] for row in recordings
