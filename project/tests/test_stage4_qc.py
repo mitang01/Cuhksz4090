@@ -10,7 +10,7 @@ from speech_strf.stage4_audit import (
     EXPECTED_MODEL_IDENTITIES,
     STAGE4_MODEL_DIRECTORIES,
 )
-from speech_strf.stage4_qc import LAG_CONVENTION, run_stage4_qc
+from speech_strf.stage4_qc import LAG_CONVENTION, _annotation_qc, run_stage4_qc
 
 
 def _textgrid() -> str:
@@ -224,4 +224,38 @@ def test_missing_required_model_source_fails_precisely(tmp_path):
 
     assert STAGE4_MODEL_DIRECTORIES[3] in message
     assert str(missing) in message
+
+
+def test_sub_microsecond_labeled_endpoint_quantization_is_not_fatal(tmp_path):
+    audio = tmp_path / "quantized.wav"
+    alignment = tmp_path / "quantized.TextGrid"
+    sf.write(audio, np.zeros(16000, dtype=np.float32), 16000)
+    alignment.write_text(
+        _textgrid().replace("xmax = 1", "xmax = 1.0000005"),
+        encoding="utf-8",
+    )
+
+    result = _annotation_qc("quantized", audio, alignment, 0.03)
+
+    assert result["out_of_bounds_count"] == 2
+    assert result["fatal_out_of_bounds_count"] == 0
+    assert result["tolerated_numerical_out_of_bounds_count"] == 2
+    assert result["status"] == "WARN"
+
+
+def test_labeled_endpoint_overhang_above_numerical_tolerance_is_fatal(tmp_path):
+    audio = tmp_path / "overhang.wav"
+    alignment = tmp_path / "overhang.TextGrid"
+    sf.write(audio, np.zeros(16000, dtype=np.float32), 16000)
+    alignment.write_text(
+        _textgrid().replace("xmax = 1", "xmax = 1.000002"),
+        encoding="utf-8",
+    )
+
+    result = _annotation_qc("overhang", audio, alignment, 0.03)
+
+    assert result["out_of_bounds_count"] == 2
+    assert result["tolerated_numerical_out_of_bounds_count"] == 0
+    assert result["fatal_out_of_bounds_count"] == 2
+    assert result["status"] == "FAIL"
 
