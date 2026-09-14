@@ -38,6 +38,8 @@ def _config(tmp_path: Path) -> Path:
     config = tmp_path / "configs" / "stage4_revision.yaml"
     config.parent.mkdir()
     config.write_text(yaml.safe_dump(source, sort_keys=False), encoding="utf-8")
+    for name in ("data.yaml", "models.yaml", "features.yaml", "analysis.yaml"):
+        (config.parent / name).write_text("{}\n", encoding="utf-8")
     return config
 
 
