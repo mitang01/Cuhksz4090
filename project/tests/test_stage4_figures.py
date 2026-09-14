@@ -61,7 +61,7 @@ def test_figure_outputs_are_readable_and_panel_csvs_are_exact(
         return original_set_title(axis, label, *args, **kwargs)
 
     monkeypatch.setattr(matplotlib.axes.Axes, "set_title", capture_title)
-    result = make_stage4_figures(source, output)
+    result = make_stage4_figures(source, output, require_complete_status=False)
 
     assert result["pdf"].read_bytes().startswith(b"%PDF")
     width, height = _png_dimensions(result["png"])
@@ -95,7 +95,9 @@ def test_effect_tables_retain_uncertainty_and_use_a_shared_sequential_scale(
         return original_imshow(axis, values, *args, **kwargs)
 
     monkeypatch.setattr(matplotlib.axes.Axes, "imshow", capture_imshow)
-    result = make_stage4_figures(source, tmp_path / "figures")
+    result = make_stage4_figures(
+        source, tmp_path / "figures", require_complete_status=False
+    )
 
     assert len(image_calls) == 6
     assert {call["cmap"] for call in image_calls} == {"Blues"}
@@ -113,7 +115,9 @@ def test_missing_table_fails_with_panel_and_full_path(tmp_path):
     missing.unlink()
 
     with pytest.raises(FileNotFoundError) as exc:
-        make_stage4_figures(source, tmp_path / "figures")
+        make_stage4_figures(
+            source, tmp_path / "figures", require_complete_status=False
+        )
 
     message = str(exc.value)
     assert f"panel {missing_spec.letter}" in message
@@ -130,6 +134,18 @@ def test_malformed_table_fails_before_writing_outputs(tmp_path):
     )
 
     with pytest.raises(ValueError, match=r"panel B.*ci_high"):
-        make_stage4_figures(source, tmp_path / "figures")
+        make_stage4_figures(
+            source, tmp_path / "figures", require_complete_status=False
+        )
 
     assert not (tmp_path / "figures").exists()
+
+
+def test_production_source_requires_complete_hashed_summary_status(tmp_path):
+    source, _ = _write_figure_sources(tmp_path)
+    production = tmp_path / "stage4_revision" / "figures" / "source_tables"
+    production.parent.mkdir(parents=True)
+    source.rename(production)
+
+    with pytest.raises(ValueError, match="summary status"):
+        make_stage4_figures(production, production.parent)

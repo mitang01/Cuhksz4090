@@ -225,6 +225,10 @@ def test_driver_uses_global_phone_categories_and_repairs_corrupt_resume(tmp_path
     assert "one: replaced invalid archive (sha256_mismatch)" in resumed.stdout
     assert "two: resumed (integrity verified)" in resumed.stdout
     assert verify_feature_archive(output / "one.npz") == (True, "ok")
+    backups = list((output / ".replaced").glob("one.npz.*"))
+    assert len(backups) == 1
+    assert (backups[0] / "one.npz").is_file()
+    assert (backups[0] / "one.npz.sha256").is_file()
     run_manifest = json.loads(
         (output / "run_manifest.json").read_text(encoding="utf-8")
     )

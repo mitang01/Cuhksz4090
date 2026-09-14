@@ -23,7 +23,15 @@ export OPENBLAS_NUM_THREADS=16
 export NUMEXPR_NUM_THREADS=16
 export PYTHONHASHSEED=17
 
-/usr/bin/time -v python -m pytest -q \
+run_timed() {
+  if [[ -x /usr/bin/time ]]; then
+    /usr/bin/time -v "$@"
+  else
+    "$@"
+  fi
+}
+
+run_timed python -m pytest -q \
   tests/test_stage4_audit.py \
   tests/test_stage4_encoding.py \
   tests/test_stage4_features.py \
@@ -33,19 +41,19 @@ export PYTHONHASHSEED=17
   tests/test_stage4_runner.py \
   tests/test_stage4_statistics.py
 
-/usr/bin/time -v python scripts/audit_stage4_inputs.py \
+run_timed python scripts/audit_stage4_inputs.py \
   --manifest outputs/manifest.csv \
   --features outputs/features \
   --model-root outputs \
   --output outputs/stage4_revision/audit/input_audit.json
 
-/usr/bin/time -v python scripts/extract_stage4_rich_features.py \
+run_timed python scripts/extract_stage4_rich_features.py \
   --config configs/features_stage4_rich.yaml \
   --manifest outputs/manifest.csv \
   --validation-report outputs/validation_report.json \
   --output outputs/stage4_revision/features_rich
 
-/usr/bin/time -v python scripts/run_stage4_qc.py \
+run_timed python scripts/run_stage4_qc.py \
   --manifest outputs/manifest.csv \
   --model-root outputs \
   --output-dir outputs/stage4_revision/provenance_qc
@@ -61,7 +69,7 @@ if report["status"] == "FAIL":
     raise SystemExit(f"Stage 4 QC failed: {report['reasons']}")
 PY
 
-/usr/bin/time -v python scripts/run_stage4_revision.py \
+run_timed python scripts/run_stage4_revision.py \
   --config configs/stage4_revision.yaml \
   synthetic-test
 
@@ -76,7 +84,7 @@ PY
 
 # Inspect one real manifest recording and one real HuBERT Base canonical layer
 # before any fit. This is an integrity smoke, not a synthetic fixture.
-/usr/bin/time -v python - "$MODEL" "$LAYER" <<'PY'
+run_timed python - "$MODEL" "$LAYER" <<'PY'
 import json
 import sys
 
@@ -115,15 +123,13 @@ print(json.dumps({
 PY
 
 for variant in original rich capacity zero_lag; do
-  /usr/bin/time -v \
-  python scripts/run_stage4_revision.py \
+  run_timed python scripts/run_stage4_revision.py \
     --config configs/stage4_revision.yaml \
     fit "$MODEL" "$variant"
 done
 
 for null_index in $(seq 0 19); do
-  /usr/bin/time -v \
-    python scripts/run_stage4_revision.py \
+  run_timed python scripts/run_stage4_revision.py \
     --config configs/stage4_revision.yaml \
     null "$MODEL" "$null_index" \
     --dry-null-count 20

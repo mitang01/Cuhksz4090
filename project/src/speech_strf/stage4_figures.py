@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +79,36 @@ def _resolve_source_dir(source_dir: str | Path) -> Path:
     if nested.is_dir():
         return nested
     return source
+
+
+def _validate_summary_status(source: Path) -> None:
+    if source.name != "source_tables" or source.parent.name != "figures":
+        raise ValueError(
+            "Production Stage 4 figures require the configured "
+            "outputs/stage4_revision/figures/source_tables directory"
+        )
+    status_path = source.parent.parent / "model_comparison" / "summary_status.json"
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(
+            f"Missing or invalid complete Stage 4 summary status: {status_path}: {exc}"
+        ) from exc
+    if status.get("state") != "complete":
+        raise ValueError(f"Stage 4 summary status is not complete: {status_path}")
+    expected = {
+        Path(value["path"]).resolve(): value["sha256"]
+        for value in status.get("artifacts", {}).values()
+    }
+    expected_by_name = {path.name: digest for path, digest in expected.items()}
+    for spec in PANEL_SPECS:
+        path = (source / spec.filename).resolve()
+        expected_digest = expected.get(path, expected_by_name.get(path.name))
+        if expected_digest is None:
+            raise ValueError(f"Figure source is absent from summary status: {path}")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != expected_digest:
+            raise ValueError(f"Figure source hash differs from summary status: {path}")
 
 
 def _load_panel(path: Path, spec: PanelSpec) -> pd.DataFrame:
@@ -171,6 +203,8 @@ def _annotation(effect: float, low: float, high: float) -> str:
 def make_stage4_figures(
     source_dir: str | Path = "outputs/stage4_revision/figures/source_tables",
     output_dir: str | Path = "outputs/stage4_revision/figures",
+    *,
+    require_complete_status: bool = True,
 ) -> dict[str, Path]:
     """Create revised Figure 2 and exact per-panel source CSVs.
 
@@ -179,6 +213,8 @@ def make_stage4_figures(
     """
     source = _resolve_source_dir(source_dir)
     output = Path(output_dir)
+    if require_complete_status:
+        _validate_summary_status(source)
     paths = {spec: source / spec.filename for spec in PANEL_SPECS}
     missing = [
         f"panel {spec.letter}: {path}"

@@ -23,6 +23,14 @@ export OPENBLAS_NUM_THREADS=16
 export NUMEXPR_NUM_THREADS=16
 export PYTHONHASHSEED=17
 
+run_timed() {
+  if [[ -x /usr/bin/time ]]; then
+    /usr/bin/time -v "$@"
+  else
+    "$@"
+  fi
+}
+
 MODELS_TSV=configs/stage4_models.tsv
 TASK_ID="${SLURM_ARRAY_TASK_ID:?submit this file as an array job}"
 if (( TASK_ID < 0 || TASK_ID >= 900 )); then
@@ -48,7 +56,7 @@ fi
 
 # Omitting --layer deliberately processes all discovered layers in this one
 # model/null-index task. Completed integrity-valid layer units are resumed.
-/usr/bin/time -v python scripts/run_stage4_revision.py \
+run_timed python scripts/run_stage4_revision.py \
   --config configs/stage4_revision.yaml \
   null "$MODEL" "$NULL_INDEX" \
   --full-null-count 100

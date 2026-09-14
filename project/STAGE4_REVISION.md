@@ -48,27 +48,35 @@ shifts. Inference again occurs only after layer averaging and never treats
 layers or checkpoints as independent replicates. The fixed layer aggregation
 rule is not selected from the results.
 
-## Transfer code only
+## Synchronize code without touching results
 
-From the machine containing the working tree, transfer source/configuration
-without results, manuscript material, local environments, or Git metadata:
+The author selected a direct Git update on the cluster rather than `rsync`.
+Run this exact equivalent from the cluster:
 
 ```bash
-LOCAL_PROJECT=/Users/tangmi/Documents/skill/academic-research-suite/project
-REMOTE=mitan@CLUSTER_HOST:/share/home/mitan/Cuhksz4090/project/
-rsync -av \
-  --exclude='.git/' \
-  --exclude='.venv/' \
-  --exclude='outputs/' \
-  --exclude='manuscript/' \
-  --exclude='data/' \
-  "$LOCAL_PROJECT/" "$REMOTE"
+git -C /share/home/mitan/Cuhksz4090 fetch origin \
+  cursor/stage4-recording-inference-cc5a
+git -C /share/home/mitan/Cuhksz4090 switch \
+  cursor/stage4-recording-inference-cc5a
+git -C /share/home/mitan/Cuhksz4090 pull --ff-only origin \
+  cursor/stage4-recording-inference-cc5a
 ```
 
-This deliberately does not use `--delete`, so pre-staged remote real inputs
-and activation outputs cannot be removed by the transfer. Replace only
-`CLUSTER_HOST` with the SSH hostname or alias used for the Slurm cluster; no
-hostname was supplied in the revision specification.
+Git does not track the existing ignored `project/outputs/` products, so these
+commands do not delete or overwrite completed activation or fit results.
+
+The locked governance inputs are intentionally not copied or edited by this
+branch. Before the dry run, both existing author-controlled files must be
+available at the paths resolved from the project root:
+
+```bash
+cd /share/home/mitan/Cuhksz4090/project
+test -f ../paper1_pipeline_20260914/stage3_review/revision_roadmap.json
+test -f ../paper1_pipeline_20260914/stage4_revision/claim_surface_manifest.json
+```
+
+If either check fails, place the author's existing file at that exact path
+before analysis. Do not create a substitute; the input audit fails closed.
 
 ## Site settings and log directory
 

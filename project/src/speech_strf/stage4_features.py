@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -185,9 +187,17 @@ def _integrity_path(archive_path: str | Path) -> Path:
 
 
 def write_feature_archive_atomic(archive_path: str | Path, result: dict) -> Path:
-    """Atomically publish an NPZ and its SHA-256 integrity sidecar."""
+    """Publish an NPZ with a sidecar commit marker, preserving prior artifacts."""
     archive = Path(archive_path)
     archive.parent.mkdir(parents=True, exist_ok=True)
+    sidecar = _integrity_path(archive)
+    existing = [path for path in (archive, sidecar) if path.exists()]
+    if existing:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = archive.parent / ".replaced" / f"{archive.name}.{stamp}"
+        backup.mkdir(parents=True, exist_ok=False)
+        for path in existing:
+            shutil.copy2(path, backup / path.name)
     temporary_path: Path | None = None
     sidecar_temporary_path: Path | None = None
     try:
@@ -210,7 +220,6 @@ def write_feature_archive_atomic(archive_path: str | Path, result: dict) -> Path
         os.replace(temporary_path, archive)
         temporary_path = None
 
-        sidecar = _integrity_path(archive)
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".sha256.tmp", prefix=f".{archive.name}.",
             dir=archive.parent, encoding="ascii", delete=False

@@ -6,6 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from speech_strf.stage4_audit import EXPECTED_MODEL_IDENTITIES, STAGE4_MODEL_DIRECTORIES
@@ -155,3 +156,37 @@ def test_corrupt_completed_unit_is_preserved_diagnosed_and_recomputed(tmp_path):
     assert set(scores["model"]) == {"hubert_base"}
     assert set(scores["layer"]) == {"layer_00_input"}
     assert set(scores["variant"]) == {"zero_lag"}
+
+
+def test_null_summary_refuses_any_missing_model_layer_ensemble(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    _inputs(tmp_path)
+    runner = Stage4Runner(config)
+    rows = []
+    for model in STAGE4_MODEL_DIRECTORIES:
+        for recording_id in [f"recording_{index}" for index in range(4)]:
+            for family in ("acoustic", "prosodic", "phonetic", "word", "onset"):
+                rows.append(
+                    {
+                        "model": model,
+                        "layer": "layer_00_input",
+                        "recording_id": recording_id,
+                        "family": family,
+                        "split_kind": "primary",
+                        "delta_r2": 0.1,
+                        "duration_seconds": 12 / 50,
+                    }
+                )
+    monkeypatch.setattr(
+        runner, "_completed_fit_frames", lambda *args, **kwargs: [pd.DataFrame(rows)]
+    )
+    monkeypatch.setattr(
+        runner, "_source_hashes", lambda *args, **kwargs: {"source": "hash"}
+    )
+    (
+        tmp_path / "outputs" / "stage4_revision" / "model_comparison"
+    ).mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="null set is incomplete"):
+        runner._summarize_nulls(
+            [f"recording_{index}" for index in range(4)], 10_000, 17
+        )

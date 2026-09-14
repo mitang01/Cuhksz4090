@@ -23,6 +23,14 @@ export OPENBLAS_NUM_THREADS=16
 export NUMEXPR_NUM_THREADS=16
 export PYTHONHASHSEED=17
 
+run_timed() {
+  if [[ -x /usr/bin/time ]]; then
+    /usr/bin/time -v "$@"
+  else
+    "$@"
+  fi
+}
+
 MODELS_TSV=configs/stage4_models.tsv
 GROUP="${SLURM_ARRAY_TASK_ID:?submit this file as an array job}"
 
@@ -59,7 +67,7 @@ fi
 
 for model in "${MODELS[@]}"; do
   for variant in original rich capacity zero_lag; do
-    /usr/bin/time -v python scripts/run_stage4_revision.py \
+    run_timed python scripts/run_stage4_revision.py \
       --config configs/stage4_revision.yaml \
       fit "$model" "$variant"
   done

@@ -783,12 +783,26 @@ class Stage4Runner:
         frames: list[pd.DataFrame] = []
         failures: list[str] = []
         root = self._fit_root(variant)
+        recording_ids = self._recording_ids()
+        feature_dir = self._feature_dir(variant)
         for model in self.model_names:
+            source_hashes = self._source_hashes(model, feature_dir, recording_ids)
             model_root = root / _safe_component(model, "model")
             layers = discover_layers(self._model(model) / "activations.h5")
             for layer in layers:
                 unit = model_root / _safe_component(layer, "layer")
-                valid, reason = validate_unit(unit)
+                valid, reason = validate_unit(
+                    unit,
+                    expected_source_hashes=source_hashes,
+                    expected_config_hash=self.config_hash,
+                    expected_metadata={
+                        "model": model,
+                        "layer": layer,
+                        "variant": variant,
+                        "null_index": None,
+                        "null_mode": None,
+                    },
+                )
                 if valid:
                     frames.append(pd.read_csv(unit / "scores.csv"))
                 else:
@@ -1125,16 +1139,31 @@ class Stage4Runner:
         null_count = int(self.config["nulls"]["production_count"])
         rows: list[pd.DataFrame] = []
         completeness = []
+        incomplete: list[str] = []
+        recording_ids = self._recording_ids()
+        feature_dir = self._feature_dir("original")
         for model in self.model_names:
             model_root = null_root / _safe_component(model, "model")
-            if not model_root.is_dir():
-                continue
-            for layer_root in sorted(path for path in model_root.iterdir() if path.is_dir()):
+            source_hashes = self._source_hashes(model, feature_dir, recording_ids)
+            for layer in discover_layers(self._model(model) / "activations.h5"):
+                layer_root = model_root / _safe_component(layer, "layer")
                 indices = []
                 layer_frames = []
+                invalid_reasons = {}
                 for index in range(null_count):
                     unit = layer_root / f"null_{index:03d}"
-                    valid, _ = validate_unit(unit)
+                    valid, reason = validate_unit(
+                        unit,
+                        expected_source_hashes=source_hashes,
+                        expected_config_hash=self.config_hash,
+                        expected_metadata={
+                            "model": model,
+                            "layer": layer,
+                            "variant": "original",
+                            "null_index": index,
+                            "null_mode": "full",
+                        },
+                    )
                     if valid:
                         indices.append(index)
                         frame = pd.read_csv(unit / "scores.csv").query(
@@ -1142,22 +1171,32 @@ class Stage4Runner:
                         )
                         frame["null_index"] = index
                         layer_frames.append(frame)
+                    else:
+                        invalid_reasons[index] = reason
                 completeness.append(
                     {
                         "model": model,
-                        "layer": layer_root.name,
+                        "layer": layer,
                         "valid_null_count": len(indices),
                         "complete_100": indices == list(range(null_count)),
+                        "invalid_reasons": json.dumps(invalid_reasons, sort_keys=True),
                     }
                 )
                 if indices == list(range(null_count)):
                     rows.extend(layer_frames)
+                else:
+                    incomplete.append(
+                        f"{model}/{layer}: {len(indices)}/{null_count} valid"
+                    )
         summary_dir = self.output_root / self.config["output_subdirs"]["summaries"]
         pd.DataFrame(completeness).to_csv(
             summary_dir / "null_completeness.csv", index=False
         )
-        if not rows:
-            return pd.DataFrame()
+        if incomplete:
+            raise RuntimeError(
+                "Production circular-shift null set is incomplete: "
+                + "; ".join(incomplete)
+            )
         nulls = pd.concat(rows, ignore_index=True)
         null_mean = nulls.groupby(
             ["model", "layer", "recording_id", "family"], as_index=False
