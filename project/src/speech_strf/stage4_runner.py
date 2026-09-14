@@ -553,6 +553,8 @@ class Stage4Runner:
                     "stage4_statistics",
                     "stage4_nulls",
                     "stage4_audit",
+                    "design_matrix",
+                    "evaluate",
                 )
             },
         }

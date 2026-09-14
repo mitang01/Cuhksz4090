@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pandas as pd
 
+import speech_strf.extract_features as base_feature_module
 import speech_strf.stage4_features as stage4_features
+import speech_strf.timebase as timebase_module
 from speech_strf.alignments import Interval, parse_textgrid
 from speech_strf.audio import load_standardized
 from speech_strf.provenance import load_config, sha256_file, write_run_manifest
@@ -95,6 +97,8 @@ def main() -> None:
         "validation_report_sha256": sha256_file(validation_path),
         "global_phone_categories_sha256": _json_sha256(categories),
         "extractor_source_sha256": sha256_file(stage4_features.__file__),
+        "base_extractor_source_sha256": sha256_file(base_feature_module.__file__),
+        "timebase_source_sha256": sha256_file(timebase_module.__file__),
         "driver_source_sha256": sha256_file(__file__),
     }
 
@@ -155,6 +159,10 @@ def main() -> None:
                 "global_phone_categories_sha256"
             ],
             "extractor_source_sha256": shared_hashes["extractor_source_sha256"],
+            "base_extractor_source_sha256": shared_hashes[
+                "base_extractor_source_sha256"
+            ],
+            "timebase_source_sha256": shared_hashes["timebase_source_sha256"],
             "driver_source_sha256": shared_hashes["driver_source_sha256"],
             "archive_integrity": "sha256_sidecar_verified_before_resume",
             "status_counts": status_counts,
