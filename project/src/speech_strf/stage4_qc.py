@@ -116,6 +116,9 @@ def _annotation_qc(
     alignment_path: Path,
     endpoint_tolerance_seconds: float,
 ) -> dict[str, Any]:
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,C,D,E", "location": "stage4_qc.py:_annotation_qc:entry", "message": "annotation QC input", "data": {"recording_id": recording_id, "endpoint_tolerance_seconds": endpoint_tolerance_seconds}, "timestamp": datetime.now(timezone.utc).timestamp() * 1000}) + "\n")
+    # endregion
     try:
         audio = inspect_audio(audio_path)
     except Exception as exc:
@@ -136,6 +139,9 @@ def _annotation_qc(
         ) from exc
 
     duration = float(audio["duration_seconds"])
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,D,E", "location": "stage4_qc.py:_annotation_qc:sources", "message": "loaded audio and intervals", "data": {"duration": duration, "sample_rate": int(audio["sample_rate"]), "n_samples": int(audio["n_samples"]), "interval_count": len(intervals), "maximum_interval_end": max((row.end for row in intervals), default=None)}, "timestamp": datetime.now(timezone.utc).timestamp() * 1000}) + "\n")
+    # endregion
     phones = [
         row
         for row in intervals
@@ -156,6 +162,9 @@ def _annotation_qc(
         or row.end < -1e-9
         or row.end > duration + 1e-9
     ]
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C,D", "location": "stage4_qc.py:_annotation_qc:bounds", "message": "strict out-of-bounds classification", "data": {"strict_epsilon_seconds": 1e-9, "out_of_bounds": [{"tier": row.tier, "start": row.start, "end": row.end, "labeled": bool(row.label.strip()), "start_delta": row.start - duration, "end_delta": row.end - duration} for row in out_of_bounds]}, "timestamp": datetime.now(timezone.utc).timestamp() * 1000}) + "\n")
+    # endregion
     tolerated_empty_overhangs = [
         row
         for row in out_of_bounds
@@ -165,6 +174,9 @@ def _annotation_qc(
         and row.end >= -1e-9
         and row.end <= duration + endpoint_tolerance_seconds
     ]
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C", "location": "stage4_qc.py:_annotation_qc:tolerance", "message": "empty-only tolerance classification", "data": {"out_of_bounds_count": len(out_of_bounds), "tolerated_empty_count": len(tolerated_empty_overhangs), "fatal_count": len(out_of_bounds) - len(tolerated_empty_overhangs), "endpoint_tolerance_seconds": endpoint_tolerance_seconds}, "timestamp": datetime.now(timezone.utc).timestamp() * 1000}) + "\n")
+    # endregion
     fatal_out_of_bounds_count = len(out_of_bounds) - len(tolerated_empty_overhangs)
     out_of_bounds_count = len(out_of_bounds)
     overlap_count = 0
@@ -211,6 +223,9 @@ def _annotation_qc(
                 f"{endpoint_mismatch:.9g} seconds",
             )
         )
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,C,D,E", "location": "stage4_qc.py:_annotation_qc:result", "message": "annotation QC result", "data": {"status": _status(reasons), "reason_codes": [reason["code"] for reason in reasons], "fatal_out_of_bounds_count": fatal_out_of_bounds_count, "reversed_count": reversed_count, "overlap_count": overlap_count, "endpoint_mismatch": endpoint_mismatch}, "timestamp": datetime.now(timezone.utc).timestamp() * 1000}) + "\n")
+    # endregion
     return {
         "recording_id": recording_id,
         "audio_path": str(audio_path),
