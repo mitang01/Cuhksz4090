@@ -6,7 +6,6 @@ import csv
 import json
 import os
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -278,9 +277,6 @@ def publish_compute_scope_manifests(
         model: resolve_depth_layers(model_layers[model])
         for model in sorted(model_layers)
     }
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,D", "location": "stage4_compute_scope.py:publish_compute_scope_manifests", "message": "resolved manifest layer selections", "data": {"model_layers": {model: list(layers) for model, layers in model_layers.items()}, "resolved": resolved}, "timestamp": time.time() * 1000}) + "\n")
-    # endregion
     primary_rows = [
         {
             "task_id": index,
