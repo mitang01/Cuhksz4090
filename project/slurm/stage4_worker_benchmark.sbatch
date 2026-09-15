@@ -26,6 +26,47 @@ python3 scripts/resolve_stage4_compute_scope.py \
   --output "$MANIFEST_DIR" \
   --refresh-stale-manifest
 
+if [[ -f "$DECISION" ]]; then
+  if python3 - "$MANIFEST_DIR/resolved_model_layers.json" "$DECISION" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+scope = json.loads(Path(sys.argv[1]).read_text())
+decision = json.loads(Path(sys.argv[2]).read_text())
+expected = scope["benchmark"]
+valid = (
+    decision.get("state") == "complete"
+    and decision.get("model") == expected["model"]
+    and decision.get("layers") == expected["layers"]
+    and decision.get("model_layer_count") == expected["model_layer_count"]
+    and decision.get("selected_layer_workers") in (1, 2)
+)
+if not valid:
+    raise SystemExit(1)
+print(json.dumps({
+    "state": "resumed",
+    "reason": "compatible completed worker benchmark already exists",
+    "decision": decision,
+}, indent=2, sort_keys=True))
+PY
+  then
+    exit 0
+  fi
+  python3 - "$DECISION" <<'PY'
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+archived = path.with_name(f"worker_benchmark.stale-{stamp}.json")
+os.replace(path, archived)
+print(f"Archived incompatible benchmark decision to {archived}")
+PY
+fi
+
 mapfile -t BENCHMARK < <(
   python3 - "$MANIFEST_DIR/resolved_model_layers.json" <<'PY'
 import json
