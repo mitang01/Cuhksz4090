@@ -19,29 +19,35 @@ from test_stage4_runner import _config, _inputs
 def test_selected_depth_manifest_round_trips_through_process_workers(tmp_path):
     config = _config(tmp_path)
     _inputs(tmp_path)
-    layers = [
-        "layer_00_input",
-        "layer_01_transformer",
-        "layer_02_transformer",
-    ]
+    model_layers = {
+        model: [
+            "layer_00_input",
+            f"layer_01_{model}",
+            f"layer_02_{model}",
+        ]
+        for model in ALL_SCOPE_MODELS
+    }
     for model in ALL_SCOPE_MODELS:
         with h5py.File(tmp_path / "outputs" / model / "activations.h5", "r+") as store:
             for group in store.values():
                 values = group["canonical/layer_00_input"][...]
-                for layer in layers[1:]:
+                for layer in model_layers[model][1:]:
                     group["native"].create_dataset(layer, data=values)
                     group["canonical"].create_dataset(layer, data=values)
-                group.attrs["layer_names_json"] = json.dumps(layers)
+                group.attrs["layer_names_json"] = json.dumps(model_layers[model])
 
     manifest_dir = tmp_path / "scope"
     publish_compute_scope_manifests(
         manifest_dir,
-        model_layers={model: layers for model in ALL_SCOPE_MODELS},
-        hubert_original_units={layer: f"/preserved/{layer}" for layer in layers},
+        model_layers=model_layers,
+        hubert_original_units={
+            layer: f"/preserved/{layer}" for layer in model_layers["hubert_base"]
+        },
     )
-    task = pd.read_csv(
-        manifest_dir / "selected_depth_controls.tsv", sep="\t"
-    ).iloc[0]
+    tasks = pd.read_csv(manifest_dir / "selected_depth_controls.tsv", sep="\t")
+    for task in tasks.itertuples(index=False):
+        assert [task.input, task.middle, task.final] == model_layers[task.model]
+    task = tasks.loc[tasks["model"] == "wavlm_large"].iloc[0]
     Stage4Runner(config)._audit()
 
     result = main(
