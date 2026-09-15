@@ -176,7 +176,12 @@ def load_stage4_grouped_fixed_alphas(
 
 def _write_tsv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter="\t")
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=fieldnames,
+            delimiter="\t",
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -238,6 +243,11 @@ def _structured_null_rows(
 
 
 def _read_tsv(path: Path, fields: Sequence[str]) -> list[dict[str, str]]:
+    raw = path.read_bytes()
+    if b"\r" in raw or b"\x00" in raw or (raw and not raw.endswith(b"\n")):
+        raise ValueError(
+            f"{path.name} must use canonical LF line endings and contain no NUL bytes"
+        )
     with path.open(newline="", encoding="utf-8") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
         if reader.fieldnames != list(fields):

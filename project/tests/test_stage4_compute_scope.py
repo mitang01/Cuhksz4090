@@ -171,3 +171,27 @@ def test_refresh_archives_corrupt_task_tsv_even_when_json_is_current(tmp_path):
         destination, model_layers=model_layers
     )["state"] == "valid"
     assert len(list(tmp_path.glob("scope.stale-*"))) == 1
+
+
+def test_manifest_writer_uses_lf_and_validator_rejects_crlf(tmp_path):
+    model_layers = {
+        model: ["input", f"{model}_middle", f"{model}_final"]
+        for model in ALL_SCOPE_MODELS
+    }
+    destination = tmp_path / "scope"
+    publish_compute_scope_manifests(
+        destination,
+        model_layers=model_layers,
+        hubert_original_units={"input": "/preserved/input"},
+    )
+    tasks = destination / "selected_depth_controls.tsv"
+    canonical = tasks.read_bytes()
+    assert b"\r" not in canonical
+    assert canonical.endswith(b"\n")
+
+    tasks.write_bytes(canonical.replace(b"\n", b"\r\n"))
+    with pytest.raises(ValueError, match="canonical LF"):
+        validate_selected_depth_controls(
+            destination,
+            model_layers=model_layers,
+        )

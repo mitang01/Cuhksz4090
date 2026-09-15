@@ -115,9 +115,11 @@ Do not submit `stage4_dry_run.sbatch`, `stage4_full_fits.sbatch`, or
 ## Recovering a stale layer manifest
 
 An `Requested layer is absent` error means a persisted task selected a layer
-that is not in that model's current activation store. Stop retrying that
-manifest. Refreshing never deletes or overwrites it: the old directory is
-renamed to `deadline_compute_scope.stale-<UTC timestamp>`.
+that is not in that model's current activation store. A historical writer used
+CRLF line endings, which left an invisible `\r` on the final layer field when
+Bash read the TSV. Stop retrying that manifest. Refreshing never deletes or
+overwrites it: the old directory is renamed to
+`deadline_compute_scope.stale-<UTC timestamp>`.
 
 ```bash
 python3 scripts/resolve_stage4_compute_scope.py \
