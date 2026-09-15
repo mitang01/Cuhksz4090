@@ -90,7 +90,7 @@ mkdir -p outputs/stage4_revision/logs
 
 PARTITION=EDIT_ME
 ACCOUNT=EDIT_ME
-DRY_WALL=04:00:00
+DRY_WALL=24:00:00
 FIT_WALL=24:00:00
 NULL_WALL=24:00:00
 SITE_ARGS=(--partition="$PARTITION" --account="$ACCOUNT")
@@ -104,11 +104,21 @@ literal `#SBATCH --time` value. Standard output and error are written beneath
 ## Exact preflight and dry run
 
 The dry job uses only the `hubert_base` activation checkpoint. In order, it
-runs the eight Stage 4 test files, the fail-closed nine-model input audit, rich
-feature extraction, provenance/annotation QC, the deterministic synthetic
-test, one real manifest-recording/canonical-layer integrity smoke, all four fit
-variants for every HuBERT Base layer, and all 20 nonfinal dry null shifts for
-every HuBERT Base layer.
+runs the eight Stage 4 test files, the fail-closed nine-model input audit,
+provenance/annotation QC, and then a hard smoke gate. The gate uses one alpha
+on a deterministic synthetic nested fit and one real HuBERT Base layer and
+recording for input, alignment, lag, one recording-local shift, schema, and
+atomic-write checks. It does not manufacture a one-recording nested CV split.
+If the gate passes, the job extracts rich features and runs the checkpoint
+pilot:
+
+- original five-lag basis: all 13 layers, LORO and grouped sensitivity;
+- rich, capacity-matched, and zero-lag variants: all 13 layers, LORO only;
+- nulls: 20 shifts, all 13 layers, the original five-lag LORO analysis, and
+  only prosodic, phonetic, and word reduced models.
+
+The job exits immediately if the smoke gate fails. It never starts another
+checkpoint.
 
 The corresponding direct commands, useful for diagnosing a failed dry job,
 are:
@@ -142,12 +152,11 @@ python scripts/run_stage4_qc.py \
   --output-dir outputs/stage4_revision/provenance_qc
 
 python scripts/run_stage4_revision.py \
-  --config configs/stage4_revision.yaml synthetic-test
+  --config configs/stage4_revision.yaml functional-smoke --model hubert_base
 ```
 
-`slurm/stage4_dry_run.sbatch` contains the exact real recording-layer smoke
-and dry fit/null commands because its discovered layer is intentionally not
-hard-coded. Submit it with:
+`slurm/stage4_dry_run.sbatch` contains the exact gated fit/null commands and
+discovers layers rather than hard-coding their names. Submit it with:
 
 ```bash
 DRY_JOB=$(sbatch --parsable "${SITE_ARGS[@]}" --time="$DRY_WALL" \
@@ -157,29 +166,17 @@ sacct -j "$DRY_JOB" --format=JobID,JobName%24,State,ExitCode,Elapsed,MaxRSS
 ```
 
 Do not submit full fits or production nulls unless the dry job is `COMPLETED`
-with exit code `0:0`, its final JSON status says `"state": "complete"`, and all
-of these checks succeed:
+with exit code `0:0` and
+`outputs/stage4_revision/pilot_reports/pilot-<job-id>/integrity_report.json`
+says `"state": "complete"`. That report lists warnings and failed/skipped
+units and points to:
 
-```bash
-python - <<'PY'
-import json
-from pathlib import Path
-
-audit = json.loads(Path(
-    "outputs/stage4_revision/audit/input_audit.json"
-).read_text(encoding="utf-8"))
-synthetic = json.loads(Path(
-    "outputs/stage4_revision/synthetic_test/result.json"
-).read_text(encoding="utf-8"))
-qc = json.loads(Path(
-    "outputs/stage4_revision/provenance_qc/provenance_qc.json"
-).read_text(encoding="utf-8"))
-assert audit["complete"] is True, audit["errors"]
-assert synthetic["passed"] is True, synthetic
-assert qc["status"] != "FAIL", qc["reasons"]
-print({"audit": "complete", "synthetic": "passed", "qc": qc["status"]})
-PY
-```
+- Slurm stdout/stderr and the JUnit XML test report;
+- consolidated recording-level and null-result CSVs;
+- fold-level target-PCA coverage;
+- all null-shift manifests;
+- per-unit runtime and peak RSS;
+- the audit and provenance/QC reports.
 
 Review every QC warning rather than treating `WARN` as automatic approval.
 
