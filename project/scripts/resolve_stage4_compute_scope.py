@@ -22,6 +22,11 @@ def main() -> None:
         "--output",
         default="outputs/stage4_revision/manifests/deadline_compute_scope",
     )
+    parser.add_argument(
+        "--refresh-stale-manifest",
+        action="store_true",
+        help="Archive a differing existing manifest directory before publishing",
+    )
     args = parser.parse_args()
     runner = Stage4Runner(args.config)
     runner._audit()
@@ -75,6 +80,7 @@ def main() -> None:
         hubert_original_units=hubert_units,
         fixed_alpha_sources=alpha_sources,
         measured_pilot_resources=measured_resources,
+        preserve_stale=args.refresh_stale_manifest,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

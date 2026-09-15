@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from speech_strf.stage4_compute_scope import validate_selected_depth_controls
+from speech_strf.stage4_compute_scope import validate_compute_scope_manifests
 from speech_strf.stage4_runner import Stage4Runner, discover_layers
 
 
@@ -24,7 +24,7 @@ def main() -> None:
         model: discover_layers(runner._model(model) / "activations.h5")
         for model in runner.model_names
     }
-    result = validate_selected_depth_controls(
+    result = validate_compute_scope_manifests(
         runner.resolve(args.manifest_dir),
         model_layers=model_layers,
     )

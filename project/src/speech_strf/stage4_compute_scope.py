@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -206,7 +207,45 @@ def _selected_depth_control_rows(
     return rows
 
 
-def validate_selected_depth_controls(
+def _primary_fast_rows(
+    model_layers: Mapping[str, Sequence[str]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "task_id": index,
+            "model": model,
+            "layers": ",".join(model_layers[model]),
+            "layer_count": len(model_layers[model]),
+        }
+        for index, model in enumerate(PRIMARY_FAST_MODELS)
+    ]
+
+
+def _structured_null_rows(
+    resolved: Mapping[str, Mapping[str, str]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "task_id": index,
+            "model": model,
+            "shift": shift,
+            "layer": resolved[model]["middle"],
+        }
+        for index, (model, shift) in enumerate(
+            (model, shift) for model in NULL_MODELS for shift in range(20)
+        )
+    ]
+
+
+def _read_tsv(path: Path, fields: Sequence[str]) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        if reader.fieldnames != list(fields):
+            raise ValueError(f"{path.name} has an invalid schema")
+        return list(reader)
+
+
+def validate_compute_scope_manifests(
     manifest_dir: str | Path,
     *,
     model_layers: Mapping[str, Sequence[str]],
@@ -214,10 +253,16 @@ def validate_selected_depth_controls(
     """Fail if persisted control tasks differ from current model layer schemas."""
     root = Path(manifest_dir)
     payload_path = root / "resolved_model_layers.json"
-    tasks_path = root / "selected_depth_controls.tsv"
-    if not payload_path.is_file() or not tasks_path.is_file():
+    task_paths = {
+        "primary_fast": root / "primary_fast_refits.tsv",
+        "controls": root / "selected_depth_controls.tsv",
+        "nulls": root / "structured_nulls.tsv",
+    }
+    if not payload_path.is_file() or any(
+        not path.is_file() for path in task_paths.values()
+    ):
         raise FileNotFoundError(
-            f"Selected-depth manifests are missing: {payload_path}, {tasks_path}"
+            f"Compute-scope manifests are incomplete under {root}"
         )
     missing = set(ALL_SCOPE_MODELS) - set(model_layers)
     if missing:
@@ -231,31 +276,39 @@ def validate_selected_depth_controls(
         raise ValueError(
             "Resolved layer manifest is stale relative to current activation stores"
         )
-    expected = _selected_depth_control_rows(resolved)
-    with tasks_path.open(newline="", encoding="utf-8") as stream:
-        reader = csv.DictReader(stream, delimiter="\t")
-        if reader.fieldnames != [
-            "task_id",
-            "model",
-            "variant",
-            "input",
-            "middle",
-            "final",
-        ]:
-            raise ValueError("Selected-depth task manifest has an invalid schema")
-        observed = list(reader)
-    expected_text = [
-        {key: str(value) for key, value in row.items()} for row in expected
-    ]
-    if observed != expected_text:
-        raise ValueError(
-            "Selected-depth task manifest does not match current model-specific layers"
-        )
+    definitions = {
+        "primary_fast": (
+            ("task_id", "model", "layers", "layer_count"),
+            _primary_fast_rows(model_layers),
+        ),
+        "controls": (
+            ("task_id", "model", "variant", "input", "middle", "final"),
+            _selected_depth_control_rows(resolved),
+        ),
+        "nulls": (
+            ("task_id", "model", "shift", "layer"),
+            _structured_null_rows(resolved),
+        ),
+    }
+    counts = {}
+    for name, (fields, expected) in definitions.items():
+        observed = _read_tsv(task_paths[name], fields)
+        expected_text = [
+            {key: str(value) for key, value in row.items()} for row in expected
+        ]
+        if observed != expected_text:
+            raise ValueError(
+                f"{task_paths[name].name} does not match current model-specific layers"
+            )
+        counts[name] = len(observed)
     return {
         "state": "valid",
         "model_count": len(model_layers),
-        "task_count": len(observed),
+        "task_counts": counts,
     }
+
+
+validate_selected_depth_controls = validate_compute_scope_manifests
 
 
 def publish_compute_scope_manifests(
@@ -265,6 +318,7 @@ def publish_compute_scope_manifests(
     hubert_original_units: Mapping[str, str],
     fixed_alpha_sources: Mapping[str, Mapping[str, str]] | None = None,
     measured_pilot_resources: Sequence[Mapping[str, Any]] | None = None,
+    preserve_stale: bool = False,
 ) -> dict[str, Any]:
     """Atomically publish deterministic deadline-scope manifests once."""
     root = Path(destination)
@@ -277,27 +331,9 @@ def publish_compute_scope_manifests(
         model: resolve_depth_layers(model_layers[model])
         for model in sorted(model_layers)
     }
-    primary_rows = [
-        {
-            "task_id": index,
-            "model": model,
-            "layers": ",".join(model_layers[model]),
-            "layer_count": len(model_layers[model]),
-        }
-        for index, model in enumerate(PRIMARY_FAST_MODELS)
-    ]
+    primary_rows = _primary_fast_rows(model_layers)
     control_rows = _selected_depth_control_rows(resolved)
-    null_rows = [
-        {
-            "task_id": index,
-            "model": model,
-            "shift": shift,
-            "layer": resolved[model]["middle"],
-        }
-        for index, (model, shift) in enumerate(
-            (model, shift) for model in NULL_MODELS for shift in range(20)
-        )
-    ]
+    null_rows = _structured_null_rows(resolved)
     payload = {
         "schema_version": 1,
         "middle_rule": (
@@ -338,10 +374,25 @@ def publish_compute_scope_manifests(
     if root.exists():
         existing_path = root / "resolved_model_layers.json"
         if existing_path.is_file() and _load_json(existing_path) == payload:
-            return payload
-        raise FileExistsError(
-            f"Refusing to overwrite different resolved manifests at {root}"
-        )
+            try:
+                validate_compute_scope_manifests(
+                    root,
+                    model_layers=model_layers,
+                )
+            except (FileNotFoundError, ValueError):
+                if not preserve_stale:
+                    raise FileExistsError(
+                        f"Refusing to overwrite invalid manifests at {root}"
+                    )
+            else:
+                return payload
+        if not preserve_stale:
+            raise FileExistsError(
+                f"Refusing to overwrite different resolved manifests at {root}"
+            )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        archived = root.with_name(f"{root.name}.stale-{stamp}")
+        os.replace(root, archived)
     root.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{root.name}.tmp-", dir=root.parent)

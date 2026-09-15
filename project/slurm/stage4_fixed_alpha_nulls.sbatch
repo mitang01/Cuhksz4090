@@ -26,6 +26,9 @@ TASKS="$MANIFEST_DIR/structured_nulls.tsv"
   echo "Resolved null manifest is required" >&2
   exit 2
 }
+python3 scripts/validate_stage4_compute_scope.py \
+  --config configs/stage4_revision.yaml \
+  --manifest-dir "$MANIFEST_DIR"
 
 IFS=$'\t' read -r MODEL SHIFT LAYER < <(
   awk -F $'\t' -v task="$SLURM_ARRAY_TASK_ID" \
