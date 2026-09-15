@@ -34,6 +34,9 @@ IFS=$'\t' read -r MODEL SHIFT LAYER < <(
   awk -F $'\t' -v task="$SLURM_ARRAY_TASK_ID" \
     'NR > 1 && $1 == task {print $2 "\t" $3 "\t" $4}' "$TASKS"
 )
+MODEL=${MODEL%$'\r'}
+SHIFT=${SHIFT%$'\r'}
+LAYER=${LAYER%$'\r'}
 [[ -n "$MODEL" && -n "$SHIFT" && -n "$LAYER" ]] || {
   echo "No unique null task $SLURM_ARRAY_TASK_ID" >&2
   exit 2

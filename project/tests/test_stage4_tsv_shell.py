@@ -1,4 +1,4 @@
-"""Temporary exact reproduction of the Slurm TSV shell boundary."""
+"""Regression coverage for Stage 4 TSV-to-Slurm layer arguments."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from speech_strf.stage4_runner import Stage4Runner
 from test_stage4_runner import _config, _inputs
 
 
-def test_crlf_final_layer_survives_awk_read_and_reaches_fit(tmp_path):
+def test_lf_final_layer_round_trips_through_awk_read_and_process_fit(tmp_path):
     config = _config(tmp_path)
     _inputs(tmp_path)
     layers = [
@@ -40,7 +40,9 @@ def test_crlf_final_layer_survives_awk_read_and_reaches_fit(tmp_path):
         model_layers=model_layers,
         hubert_original_units={layer: f"/preserved/{layer}" for layer in layers},
     )
-    assert b"\r\n" in (manifest_dir / "selected_depth_controls.tsv").read_bytes()
+    task_bytes = (manifest_dir / "selected_depth_controls.tsv").read_bytes()
+    assert b"\r" not in task_bytes
+    assert task_bytes.endswith(b"\n")
     assert validate_compute_scope_manifests(
         manifest_dir, model_layers=model_layers
     )["state"] == "valid"
@@ -72,5 +74,5 @@ IFS=$'\t' read -r MODEL VARIANT INPUT MIDDLE FINAL < <(
         text=True,
     )
 
-    assert result.returncode != 0
-    assert "Requested layer is absent" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "layer_02_transformer" in result.stdout

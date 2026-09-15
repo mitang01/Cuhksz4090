@@ -72,6 +72,14 @@ def test_compute_scope_manifests_have_exact_deadline_task_counts(tmp_path):
     primary = pd.read_csv(destination / "primary_fast_refits.tsv", sep="\t")
     controls = pd.read_csv(destination / "selected_depth_controls.tsv", sep="\t")
     nulls = pd.read_csv(destination / "structured_nulls.tsv", sep="\t")
+    for name in (
+        "primary_fast_refits.tsv",
+        "selected_depth_controls.tsv",
+        "structured_nulls.tsv",
+    ):
+        raw = (destination / name).read_bytes()
+        assert b"\r" not in raw
+        assert raw.endswith(b"\n")
     assert len(primary) == 8
     assert len(controls) == 21
     assert len(nulls) == 80
@@ -171,3 +179,21 @@ def test_refresh_archives_corrupt_task_tsv_even_when_json_is_current(tmp_path):
         destination, model_layers=model_layers
     )["state"] == "valid"
     assert len(list(tmp_path.glob("scope.stale-*"))) == 1
+
+
+def test_manifest_validation_rejects_crlf_before_csv_normalization(tmp_path):
+    model_layers = {
+        model: ["input", f"{model}_middle", f"{model}_final"]
+        for model in ALL_SCOPE_MODELS
+    }
+    destination = tmp_path / "scope"
+    publish_compute_scope_manifests(
+        destination,
+        model_layers=model_layers,
+        hubert_original_units={"input": "/preserved/input"},
+    )
+    tasks = destination / "selected_depth_controls.tsv"
+    tasks.write_bytes(tasks.read_bytes().replace(b"\n", b"\r\n"))
+
+    with pytest.raises(ValueError, match="canonical LF"):
+        validate_selected_depth_controls(destination, model_layers=model_layers)

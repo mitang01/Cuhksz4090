@@ -35,6 +35,11 @@ IFS=$'\t' read -r MODEL VARIANT INPUT MIDDLE FINAL < <(
   awk -F $'\t' -v task="$SLURM_ARRAY_TASK_ID" \
     'NR > 1 && $1 == task {print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6}' "$TASKS"
 )
+MODEL=${MODEL%$'\r'}
+VARIANT=${VARIANT%$'\r'}
+INPUT=${INPUT%$'\r'}
+MIDDLE=${MIDDLE%$'\r'}
+FINAL=${FINAL%$'\r'}
 [[ -n "$MODEL" && -n "$VARIANT" && -n "$FINAL" ]] || {
   echo "No unique control task $SLURM_ARRAY_TASK_ID" >&2
   exit 2
