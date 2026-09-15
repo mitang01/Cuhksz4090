@@ -184,10 +184,6 @@ def _write_tsv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str
         )
         writer.writeheader()
         writer.writerows(rows)
-    raw = path.read_bytes()
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A", "location": "stage4_compute_scope.py:_write_tsv", "message": "raw TSV writer output", "data": {"name": path.name, "tail_bytes": list(raw[-32:]), "crlf_count": raw.count(b"\r\n"), "lf_count": raw.count(b"\n")}, "timestamp": datetime.now(timezone.utc).timestamp() * 1000}) + "\n")
-    # endregion
 
 
 def _selected_depth_control_rows(
@@ -257,9 +253,6 @@ def _read_tsv(path: Path, fields: Sequence[str]) -> list[dict[str, str]]:
         if reader.fieldnames != list(fields):
             raise ValueError(f"{path.name} has an invalid schema")
         result = list(reader)
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B", "location": "stage4_compute_scope.py:_read_tsv", "message": "raw versus csv-parsed final field", "data": {"name": path.name, "raw_crlf_count": raw.count(b"\r\n"), "parsed_final_field_bytes": list(next(reversed(result[-1].values())).encode("utf-8")) if result else []}, "timestamp": datetime.now(timezone.utc).timestamp() * 1000}) + "\n")
-    # endregion
     return result
 
 
