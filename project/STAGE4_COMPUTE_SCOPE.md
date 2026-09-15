@@ -60,7 +60,10 @@ Review all five files. `worker_benchmark.json` contains measured sequential
 and parallel two-layer runtimes, the selected worker count, fallback reason,
 and scaled runtime estimates. The benchmark chooses two workers only if
 `2 × 8` threads exits successfully and is faster than `1 × 8`; otherwise all
-layer jobs use one worker with eight BLAS threads.
+layer jobs use one worker with eight BLAS threads. Resubmission exits
+successfully when the saved decision matches the current benchmark model and
+layers. An incompatible decision is timestamp-archived before benchmarking
+again.
 
 ## Exact array submissions
 
