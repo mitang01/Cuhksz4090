@@ -10,6 +10,7 @@ from speech_strf.stage4_encoding import (
     FAMILIES,
     _score,
     fit_stage4_encoding,
+    fit_stage4_fixed_alpha_grouped,
     load_stage4_recordings,
 )
 from speech_strf.fit_encoding import grouped_splits
@@ -222,6 +223,41 @@ def test_reduced_family_subset_avoids_unrequested_reduced_fits():
     assert not result["sensitivity_predictions"]
     for recording_id in records:
         assert set(result["predictions"][recording_id]) == set(selected)
+
+
+def test_fast_refit_layer_uses_fixed_alphas_without_inner_cv(monkeypatch):
+    records = _recordings(count=5)
+    from speech_strf import stage4_encoding
+
+    monkeypatch.setattr(
+        stage4_encoding,
+        "_choose_alpha",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fast refit must not run inner CV")
+        ),
+    )
+    fixed = {
+        fold: {"full": 1.0, **{family: 10.0 for family in FAMILIES}}
+        for fold in range(5)
+    }
+    result = fit_stage4_fixed_alpha_grouped(
+        records,
+        fixed_alphas=fixed,
+        lags_seconds=[0.0],
+        outer_folds=5,
+        target_pca_components=2,
+    )
+
+    assert len(result["scores"]) == 5 * len(FAMILIES)
+    assert set(result["scores"]["recording_id"]) == set(records)
+    assert set(result["scores"]["split_kind"]) == {"primary_fast_grouped"}
+    assert set(result["scores"]["full_alpha"]) == {1.0}
+    assert set(result["scores"]["reduced_alpha"]) == {10.0}
+    assert len(result["pca_reports"]) == 5
+    assert all(
+        report["inner_cv_repeated"] is False
+        for report in result["split_reports"]
+    )
 
 
 def test_sensitivity_reproduces_original_frame_weighted_groupkfold_layout():

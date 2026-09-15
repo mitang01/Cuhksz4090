@@ -28,7 +28,18 @@ from .stage4_audit import (
     audit_stage4_inputs,
 )
 from .design_matrix import lagged_design
-from .stage4_encoding import FAMILIES, fit_stage4_encoding, load_stage4_recordings
+from .stage4_compute_scope import (
+    PRIMARY_FAST_MODELS,
+    load_legacy_fixed_alphas,
+    load_stage4_grouped_fixed_alphas,
+    validate_legacy_alpha_compatibility,
+)
+from .stage4_encoding import (
+    FAMILIES,
+    fit_stage4_encoding,
+    fit_stage4_fixed_alpha_grouped,
+    load_stage4_recordings,
+)
 from .stage4_nulls import (
     SUBSTANTIVE_FAMILIES,
     ShortRecordingError,
@@ -444,6 +455,7 @@ class Stage4Runner:
 
         self.resolve = resolve
         self.output_root = resolve(self.config["output_root"])
+        self.audit_output = resolve(self.config["audit_output"])
         self.config_hash = sha256_file(self.config_path)
         self.model_names = [entry["directory"] for entry in self.config["models"]]
         self._source_hash_cache: dict[tuple[str, int, int], str] = {}
@@ -566,6 +578,7 @@ class Stage4Runner:
                     "stage4_statistics",
                     "stage4_nulls",
                     "stage4_audit",
+                    "stage4_compute_scope",
                     "design_matrix",
                     "evaluate",
                 )
@@ -800,6 +813,314 @@ class Stage4Runner:
             )
             for value in selected
         ]
+
+    def _fast_refit_destination(
+        self, model: str, layer: str, namespace: str = "primary_fast_refits"
+    ) -> Path:
+        return (
+            self.output_root
+            / _safe_component(namespace, "output namespace")
+            / _safe_component(model, "model")
+            / _safe_component(layer, "layer")
+        )
+
+    def _fixed_null_destination(
+        self, model: str, layer: str, null_index: int
+    ) -> Path:
+        return (
+            self.output_root
+            / "null_controls"
+            / "fixed_alpha_20"
+            / _safe_component(model, "model")
+            / _safe_component(layer, "layer")
+            / f"null_{null_index:03d}"
+        )
+
+    def _legacy_alpha_source(
+        self, model: str, layer: str
+    ) -> tuple[dict[int, dict[str, float]], Path, Path]:
+        contract, results = validate_legacy_alpha_compatibility(
+            self._model(model),
+            manifest_path=self.resolve(self.config["manifest"]),
+            features_dir=self.resolve(self.config["features"]["original"]),
+            feature_config_path=self.root / "configs" / "features.yaml",
+            analysis_config_path=self.root / "configs" / "analysis.yaml",
+        )
+        return load_legacy_fixed_alphas(results, layer), contract, results
+
+    def fast_refit(
+        self,
+        model: str,
+        layer: str,
+        *,
+        output_namespace: str = "primary_fast_refits",
+    ) -> dict[str, Any]:
+        """Run one all-recording grouped refit with frozen legacy alphas."""
+        if model not in PRIMARY_FAST_MODELS:
+            raise ValueError(
+                "Fast primary refits are restricted to the eight non-HuBERT-Base "
+                f"pilot checkpoints: {list(PRIMARY_FAST_MODELS)}"
+            )
+        started = time.perf_counter()
+        self._audit()
+        available = discover_layers(self._model(model) / "activations.h5")
+        if layer not in available:
+            raise ValueError(f"Requested layer is absent; available layers: {available}")
+        fixed_alphas, contract_path, results_path = self._legacy_alpha_source(
+            model, layer
+        )
+        ids = self._recording_ids()
+        feature_dir = self._feature_dir("original")
+        source_hashes = self._source_hashes(model, feature_dir, ids)
+        source_hashes.update(
+            {
+                "fixed_alpha_contract": self._source_hash(contract_path),
+                "fixed_alpha_results": self._source_hash(results_path),
+            }
+        )
+        destination = self._fast_refit_destination(
+            model, layer, namespace=output_namespace
+        )
+        identity = {
+            "model": model,
+            "layer": layer,
+            "variant": "primary_fast_refit",
+            "null_index": None,
+            "null_mode": None,
+            "reduced_families": list(FAMILIES),
+            "sensitivity_folds": 5,
+            "inner_cv_repeated": False,
+            "output_namespace": output_namespace,
+            "target_pca_solver": "auto_matches_legacy_original",
+        }
+        valid, reason = validate_unit(
+            destination,
+            expected_source_hashes=source_hashes,
+            expected_config_hash=self.config_hash,
+            expected_metadata=identity,
+        )
+        if valid:
+            return {"state": "resumed", "path": str(destination)}
+        preserved = (
+            _preserve_corrupt(destination, reason) if destination.exists() else None
+        )
+        recordings = load_stage4_recordings(
+            feature_dir,
+            self._model(model) / "activations.h5",
+            layer,
+            recording_ids=ids,
+        )
+        result = fit_stage4_fixed_alpha_grouped(
+            recordings,
+            fixed_alphas=fixed_alphas,
+            lags_seconds=self.config["variants"]["original"]["lags_seconds"],
+            rate_hz=float(self.config["analysis_rate_hz"]),
+            target_pca_components=self.config["encoding"].get(
+                "target_pca_components"
+            ),
+            reduced_families=FAMILIES,
+            sensitivity_groups=None,
+            outer_folds=5,
+            random_seed=int(self.config["random_seed"]),
+            alpha_source=str(results_path),
+            target_pca_solver="auto",
+        )
+        metadata = {
+            **identity,
+            "registered_model_identity": next(
+                value["resolved_model_identity"]
+                for value in (self._audit_report or {})["models"]
+                if value["directory"] == model
+            ),
+            "random_seed": int(self.config["random_seed"]),
+            "lags_seconds": list(
+                self.config["variants"]["original"]["lags_seconds"]
+            ),
+            "lag_convention": LAG_CONVENTION,
+            "alpha_source": str(results_path),
+            "alpha_source_contract": str(contract_path),
+            "alpha_reuse_compatibility": "passed_exact_comparability_contract",
+            "target_pca_solver": "auto_matches_legacy_original",
+            "hyperparameter_policy": (
+                "fixed legacy original alpha per model/layer/grouped fold/model; "
+                "inner CV not repeated"
+            ),
+            "execution_role": (
+                "primary"
+                if output_namespace == "primary_fast_refits"
+                else "worker_benchmark"
+            ),
+            "fit_runtime_seconds": time.perf_counter() - started,
+            "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        }
+        _publish_fit_unit(
+            destination,
+            result,
+            metadata,
+            source_hashes,
+            self.config_hash,
+            self.root,
+            include_predictions=True,
+        )
+        return {
+            "state": "computed",
+            "path": str(destination),
+            "preserved_corrupt": str(preserved) if preserved else None,
+        }
+
+    def fixed_alpha_null(
+        self, model: str, null_index: int, layer: str
+    ) -> dict[str, Any]:
+        """Run one model × shift × layer fixed-hyperparameter null unit."""
+        from .stage4_compute_scope import NULL_MODELS
+
+        if model not in NULL_MODELS:
+            raise ValueError(f"Fixed-alpha null model must be one of {list(NULL_MODELS)}")
+        if null_index < 0 or null_index >= 20:
+            raise ValueError("Fixed-alpha null_index must be in [0, 20)")
+        started = time.perf_counter()
+        self._audit()
+        available = discover_layers(self._model(model) / "activations.h5")
+        if layer not in available:
+            raise ValueError(f"Requested layer is absent; available layers: {available}")
+        if model == "hubert_base":
+            alpha_unit = self._destination(model, layer, variant="original")
+            valid, reason = validate_unit(alpha_unit)
+            split_kinds = ("sensitivity",)
+        else:
+            alpha_unit = self._fast_refit_destination(model, layer)
+            valid, reason = validate_unit(alpha_unit)
+            split_kinds = ("primary_fast_grouped",)
+        if not valid:
+            raise RuntimeError(
+                f"Observed fixed-alpha source is incomplete for {model}/{layer}: {reason}"
+            )
+        alpha_report = alpha_unit / "split_reports.json"
+        fixed_alphas = load_stage4_grouped_fixed_alphas(
+            alpha_report,
+            reduced_families=SUBSTANTIVE_FAMILIES,
+            split_kinds=split_kinds,
+        )
+        ids = self._recording_ids()
+        feature_dir = self._feature_dir("original")
+        source_hashes = self._source_hashes(model, feature_dir, ids)
+        source_hashes["fixed_alpha_split_reports"] = self._source_hash(alpha_report)
+        destination = self._fixed_null_destination(model, layer, null_index)
+        identity = {
+            "model": model,
+            "layer": layer,
+            "variant": "original_fixed_alpha_null",
+            "null_index": null_index,
+            "null_mode": "fixed_alpha_20",
+            "reduced_families": list(SUBSTANTIVE_FAMILIES),
+            "sensitivity_folds": 5,
+            "inner_cv_repeated": False,
+            "target_pca_solver": (
+                "full_matches_stage4_observed"
+                if model == "hubert_base"
+                else "auto_matches_fast_refit_and_legacy_original"
+            ),
+        }
+        valid, reason = validate_unit(
+            destination,
+            expected_source_hashes=source_hashes,
+            expected_config_hash=self.config_hash,
+            expected_metadata=identity,
+        )
+        if valid:
+            return {"state": "resumed", "path": str(destination)}
+        preserved = (
+            _preserve_corrupt(destination, reason) if destination.exists() else None
+        )
+        recordings = load_stage4_recordings(
+            feature_dir,
+            self._model(model) / "activations.h5",
+            layer,
+            recording_ids=ids,
+        )
+        shifted, null_manifest = circular_shift_null(
+            recordings,
+            null_index=null_index,
+            seed=int(self.config["random_seed"]),
+            rate_hz=float(self.config["analysis_rate_hz"]),
+            lags_seconds=self.config["variants"]["original"]["lags_seconds"],
+            minimum_zero_seconds=float(self.config["nulls"]["minimum_zero_seconds"]),
+        )
+        result = fit_stage4_fixed_alpha_grouped(
+            shifted,
+            fixed_alphas=fixed_alphas,
+            lags_seconds=self.config["variants"]["original"]["lags_seconds"],
+            rate_hz=float(self.config["analysis_rate_hz"]),
+            target_pca_components=self.config["encoding"].get(
+                "target_pca_components"
+            ),
+            reduced_families=SUBSTANTIVE_FAMILIES,
+            sensitivity_groups=None,
+            outer_folds=5,
+            random_seed=int(self.config["random_seed"]),
+            alpha_source=str(alpha_report),
+            target_pca_solver=("full" if model == "hubert_base" else "auto"),
+        )
+        source_split_reports = {
+            int(value["outer_fold"]): {
+                "train_recording_ids": sorted(value["train_recording_ids"]),
+                "test_recording_ids": sorted(value["test_recording_ids"]),
+            }
+            for value in json.loads(alpha_report.read_text(encoding="utf-8"))
+            if value.get("split_kind") in split_kinds
+        }
+        refit_split_reports = {
+            int(value["outer_fold"]): {
+                "train_recording_ids": sorted(value["train_recording_ids"]),
+                "test_recording_ids": sorted(value["test_recording_ids"]),
+            }
+            for value in result["split_reports"]
+        }
+        if source_split_reports != refit_split_reports:
+            raise RuntimeError(
+                "Fixed-alpha null split differs from its observed alpha source"
+            )
+        metadata = {
+            **identity,
+            "registered_model_identity": next(
+                value["resolved_model_identity"]
+                for value in (self._audit_report or {})["models"]
+                if value["directory"] == model
+            ),
+            "random_seed": int(self.config["random_seed"]),
+            "lags_seconds": list(
+                self.config["variants"]["original"]["lags_seconds"]
+            ),
+            "lag_convention": LAG_CONVENTION,
+            "null_shift_manifest": null_manifest,
+            "alpha_source": str(alpha_report),
+            "target_pca_solver": (
+                "full_matches_stage4_observed"
+                if model == "hubert_base"
+                else "auto_matches_fast_refit_and_legacy_original"
+            ),
+            "hyperparameter_policy": (
+                "fixed observed-analysis alpha; inner CV not repeated; "
+                "fixed-hyperparameter null sensitivity"
+            ),
+            "final_inference_eligible": False,
+            "fit_runtime_seconds": time.perf_counter() - started,
+            "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        }
+        _publish_fit_unit(
+            destination,
+            result,
+            metadata,
+            source_hashes,
+            self.config_hash,
+            self.root,
+            include_predictions=False,
+        )
+        return {
+            "state": "computed",
+            "path": str(destination),
+            "preserved_corrupt": str(preserved) if preserved else None,
+        }
 
     def _completed_fit_frames(
         self, variant: str, *, require_complete: bool = True

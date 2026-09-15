@@ -231,6 +231,7 @@ def _fit_target_projection(
     eval_ids: list[str],
     requested: int | None,
     seed: int,
+    svd_solver: str = "full",
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]:
     train = np.vstack([records[value]["targets"] for value in train_ids])
     if requested is None:
@@ -252,7 +253,7 @@ def _fit_target_projection(
     achieved = min(int(requested), maximum)
     if achieved < 1:
         raise ValueError("target_pca_components must be positive")
-    projector = PCA(n_components=achieved, svd_solver="full", random_state=seed)
+    projector = PCA(n_components=achieved, svd_solver=svd_solver, random_state=seed)
     projector.fit(train)
     curve = np.cumsum(projector.explained_variance_ratio_)
     train_values = {
@@ -267,6 +268,7 @@ def _fit_target_projection(
         "units": "target_pca_score",
         "target_units_before_pca": int(train.shape[1]),
         "requested_components": int(requested),
+        "svd_solver": svd_solver,
         "achieved_components": int(achieved),
         "total_explained_variance_ratio": float(curve[achieved - 1]),
         "cumulative_explained_variance_ratio": curve.tolist(),
@@ -659,4 +661,172 @@ def fit_stage4_encoding(
 
 
 run_stage4_encoding = fit_stage4_encoding
+
+
+def fit_stage4_fixed_alpha_grouped(
+    recordings: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]],
+    *,
+    fixed_alphas: Mapping[int, Mapping[str, float]],
+    lags_seconds: Sequence[float],
+    rate_hz: float = 50.0,
+    target_pca_components: int | None = 30,
+    capacity_mode: bool = False,
+    reduced_families: Sequence[str] = FAMILIES,
+    sensitivity_groups: Mapping[str, Any] | None = None,
+    outer_folds: int = 5,
+    random_seed: int = 0,
+    alpha_source: str | None = None,
+    target_pca_solver: str = "auto",
+) -> dict[str, Any]:
+    """Fit grouped outer folds with prespecified alphas and no inner CV.
+
+    Scores remain recording-specific even when an outer fold contains several
+    recordings. ``fixed_alphas`` maps each outer-fold integer to ``full`` and
+    one value per requested reduced family.
+    """
+    if outer_folds < 2:
+        raise ValueError("outer_folds must be at least two")
+    selected_families = tuple(str(value) for value in reduced_families)
+    if (
+        not selected_families
+        or len(selected_families) != len(set(selected_families))
+        or not set(selected_families).issubset(FAMILIES)
+    ):
+        raise ValueError(
+            f"reduced_families must be unique members of {list(FAMILIES)}"
+        )
+    data = _normalise_recordings(recordings, rate_hz)
+    ids = list(data)
+    grouped_splits = [
+        split
+        for split in _outer_splits(
+            ids,
+            {value: len(data[value]["matrix"]) for value in ids},
+            sensitivity_groups,
+            outer_folds,
+        )
+        if split[0] == "sensitivity"
+    ]
+    expected_fold_ids = {fold for _, fold, _, _ in grouped_splits}
+    observed_fold_ids = {int(value) for value in fixed_alphas}
+    if observed_fold_ids != expected_fold_ids:
+        raise ValueError(
+            "Fixed-alpha folds differ from grouped outer folds: "
+            f"expected={sorted(expected_fold_ids)}, "
+            f"observed={sorted(observed_fold_ids)}"
+        )
+
+    rows: list[dict[str, Any]] = []
+    predictions: dict[str, dict[str, dict[str, np.ndarray]]] = {}
+    split_reports: list[dict[str, Any]] = []
+    pca_reports: list[dict[str, Any]] = []
+    capacity_reports: list[dict[str, Any]] = []
+    for _, fold, train_ids, test_ids in grouped_splits:
+        alpha_map = {str(key): float(value) for key, value in fixed_alphas[fold].items()}
+        required = {"full", *selected_families}
+        if set(alpha_map) != required or any(
+            not np.isfinite(value) or value < 0 for value in alpha_map.values()
+        ):
+            raise ValueError(
+                f"Fold {fold} fixed alphas must contain exactly {sorted(required)}"
+            )
+        designs, lagged_families, capacity_report = _fit_predictor_preparation(
+            data,
+            train_ids,
+            test_ids,
+            capacity_mode=capacity_mode,
+            seed=random_seed,
+            lags_seconds=lags_seconds,
+            rate_hz=rate_hz,
+            pre_shifted=False,
+        )
+        y_train, y_test, pca_report = _fit_target_projection(
+            data,
+            train_ids,
+            test_ids,
+            target_pca_components,
+            random_seed,
+            svd_solver=target_pca_solver,
+        )
+        pca_report.update(
+            {
+                "split_kind": "primary_fast_grouped",
+                "outer_fold": fold,
+            }
+        )
+        capacity_report.update(
+            {
+                "split_kind": "primary_fast_grouped",
+                "outer_fold": fold,
+            }
+        )
+        pca_reports.append(pca_report)
+        capacity_reports.append(capacity_report)
+        x_train = np.vstack([designs[value] for value in train_ids])
+        target_train = np.vstack([y_train[value] for value in train_ids])
+        full = make_pipeline(StandardScaler(), Ridge(alpha=alpha_map["full"]))
+        full.fit(x_train, target_train)
+        full_predictions = {
+            recording_id: full.predict(designs[recording_id])
+            for recording_id in test_ids
+        }
+        for family in selected_families:
+            keep = np.asarray([value != family for value in lagged_families])
+            reduced = make_pipeline(
+                StandardScaler(), Ridge(alpha=alpha_map[family])
+            )
+            reduced.fit(x_train[:, keep], target_train)
+            for recording_id in test_ids:
+                full_prediction = full_predictions[recording_id]
+                reduced_prediction = reduced.predict(
+                    designs[recording_id][:, keep]
+                )
+                full_r2 = _score(y_test[recording_id], full_prediction)
+                reduced_r2 = _score(y_test[recording_id], reduced_prediction)
+                predictions.setdefault(recording_id, {})[family] = {
+                    "target": y_test[recording_id].copy(),
+                    "full": full_prediction,
+                    "reduced": reduced_prediction,
+                }
+                rows.append(
+                    {
+                        "split_kind": "primary_fast_grouped",
+                        "outer_fold": fold,
+                        "recording_id": recording_id,
+                        "family": family,
+                        "full_alpha": alpha_map["full"],
+                        "reduced_alpha": alpha_map[family],
+                        "alpha_selection": "fixed_from_existing_original",
+                        "full_r2": full_r2,
+                        "reduced_r2": reduced_r2,
+                        "delta_r2": full_r2 - reduced_r2,
+                        "frames": int(len(y_test[recording_id])),
+                        "duration_seconds": data[recording_id]["duration_seconds"],
+                        "train_recording_ids": tuple(train_ids),
+                        "test_recording_ids": tuple(test_ids),
+                    }
+                )
+        split_reports.append(
+            {
+                "split_kind": "primary_fast_grouped",
+                "outer_fold": fold,
+                "train_recording_ids": list(train_ids),
+                "test_recording_ids": list(test_ids),
+                "full_alpha": alpha_map["full"],
+                "reduced_alphas": {
+                    family: alpha_map[family] for family in selected_families
+                },
+                "alpha_selection": "fixed_from_existing_original",
+                "alpha_source": alpha_source,
+                "inner_cv_repeated": False,
+            }
+        )
+    return {
+        "scores": pd.DataFrame(rows),
+        "predictions": predictions,
+        "sensitivity_predictions": {},
+        "split_reports": split_reports,
+        "pca_reports": pca_reports,
+        "capacity_reports": capacity_reports,
+    }
 
