@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 
 from speech_strf.stage4_compute_scope import (
     PRIMARY_FAST_MODELS,
@@ -29,6 +30,9 @@ def main() -> None:
         model: discover_layers(runner._model(model) / "activations.h5")
         for model in runner.model_names
     }
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,D,E", "location": "resolve_stage4_compute_scope.py:main", "message": "resolver discovered model layers", "data": {"config_name": args.config.rsplit("/", 1)[-1], "model_layers": model_layers}, "timestamp": time.time() * 1000}) + "\n")
+    # endregion
 
     # Fail before submission unless every fixed-alpha source has the exact
     # original feature, grid, lag, PCA, split, and recording contract.

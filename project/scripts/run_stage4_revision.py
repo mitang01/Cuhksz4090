@@ -6,12 +6,16 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 import json
+import time
 from typing import Any
 
 from speech_strf.stage4_runner import Stage4Runner, VARIANTS
 
 
 def _fit_layer(config: str, model: str, variant: str, layer: str) -> dict[str, Any]:
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C,E", "location": "run_stage4_revision.py:_fit_layer", "message": "fit worker arguments", "data": {"config_name": config.rsplit("/", 1)[-1], "model": model, "variant": variant, "layer": layer}, "timestamp": time.time() * 1000}) + "\n")
+    # endregion
     return Stage4Runner(config).fit(model, variant, layer)[0]
 
 
@@ -30,6 +34,9 @@ def _fixed_null_layer(
 
 
 def _parallel_layers(function: Any, arguments: list[tuple[Any, ...]], workers: int) -> list:
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C", "location": "run_stage4_revision.py:_parallel_layers", "message": "parent worker submissions", "data": {"function": function.__name__, "arguments": arguments, "workers": workers}, "timestamp": time.time() * 1000}) + "\n")
+    # endregion
     if workers not in (1, 2):
         raise ValueError("layer_workers must be one or two")
     if workers == 1 or len(arguments) == 1:
@@ -112,6 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> Any:
     args = build_parser().parse_args(argv)
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C,E", "location": "run_stage4_revision.py:main", "message": "parsed CLI request", "data": {"command": args.command, "config_name": args.config.rsplit("/", 1)[-1], "model": getattr(args, "model", None), "variant": getattr(args, "variant", None), "layers": getattr(args, "layers", None), "layer_workers": getattr(args, "layer_workers", None)}, "timestamp": time.time() * 1000}) + "\n")
+    # endregion
     runner = Stage4Runner(args.config)
     if args.command == "fit":
         if args.layers:

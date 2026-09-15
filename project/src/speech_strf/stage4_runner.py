@@ -180,11 +180,14 @@ def _safe_component(value: str, label: str) -> str:
 
 def discover_layers(activation_store: str | Path) -> list[str]:
     """Discover the sorted intersection of complete canonical HDF5 layers."""
+    activation_store = Path(activation_store)
+    store_stat = activation_store.stat()
     with h5py.File(activation_store, "r") as store:
         recording_ids = sorted(name for name in store if not name.startswith("__"))
         if not recording_ids:
             raise ValueError(f"No recordings in activation store {activation_store}")
         layer_sets = []
+        observed_schemas = []
         for recording_id in recording_ids:
             group = store[recording_id]
             if not bool(group.attrs.get("complete", False)):
@@ -211,11 +214,25 @@ def discover_layers(activation_store: str | Path) -> list[str]:
             ):
                 raise ValueError(f"{recording_id}: canonical layer manifest is invalid")
             layer_sets.append(set(names))
+            observed_schemas.append(
+                {
+                    "manifest_names": names,
+                    "canonical_dataset_names": sorted(
+                        name
+                        for name, value in group["canonical"].items()
+                        if isinstance(value, h5py.Dataset)
+                    ),
+                }
+            )
         common = set.intersection(*layer_sets)
         union = set.union(*layer_sets)
         if not common or common != union:
             raise ValueError("Canonical layer schema differs between recordings")
-        return sorted(common)
+        result = sorted(common)
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,D,E", "location": "stage4_runner.py:discover_layers", "message": "activation layer discovery", "data": {"model_directory": activation_store.parent.name, "store_name": activation_store.name, "store_size": store_stat.st_size, "store_mtime_ns": store_stat.st_mtime_ns, "recording_count": len(recording_ids), "schemas": observed_schemas, "result": result}, "timestamp": time.time() * 1000}) + "\n")
+        # endregion
+        return result
 
 
 def _git_details(root: Path) -> dict[str, Any]:
@@ -780,6 +797,9 @@ class Stage4Runner:
         self._audit()
         available = discover_layers(self._model(model) / "activations.h5")
         selected = available if layer is None else [layer]
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,C,D,E", "location": "stage4_runner.py:Stage4Runner.fit", "message": "fit layer membership check", "data": {"model": model, "requested_layer": layer, "available": available, "selected": selected, "config_name": self.config_path.name}, "timestamp": time.time() * 1000}) + "\n")
+        # endregion
         if any(value not in available for value in selected):
             raise ValueError(f"Requested layer is absent; available layers: {available}")
         return [self._fit_one(model, value, variant) for value in selected]
