@@ -49,6 +49,7 @@ def main() -> None:
         }
 
     hubert_units = {}
+    measured_resources = []
     for layer in model_layers["hubert_base"]:
         unit = runner._destination("hubert_base", layer, variant="original")
         valid, reason = validate_unit(unit)
@@ -58,12 +59,22 @@ def main() -> None:
                 f"{layer}: {reason}"
             )
         hubert_units[layer] = str(unit)
+        status = json.loads((unit / "status.json").read_text(encoding="utf-8"))
+        measured_resources.append(
+            {
+                "layer": layer,
+                "fit_runtime_seconds": status.get("fit_runtime_seconds"),
+                "peak_rss_kib": status.get("peak_rss_kib"),
+                "unit": str(unit),
+            }
+        )
 
     payload = publish_compute_scope_manifests(
         runner.resolve(args.output),
         model_layers=model_layers,
         hubert_original_units=hubert_units,
         fixed_alpha_sources=alpha_sources,
+        measured_pilot_resources=measured_resources,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

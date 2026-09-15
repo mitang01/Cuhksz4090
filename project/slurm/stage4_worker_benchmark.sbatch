@@ -68,6 +68,7 @@ import json
 import math
 import os
 from pathlib import Path
+import statistics
 import sys
 
 path = Path(sys.argv[1])
@@ -84,11 +85,24 @@ primary_seconds = (
     if workers == 2
     else layer_count * per_layer_one
 )
-control_seconds = (
-    math.ceil(3 / 2) * parallel if workers == 2 else 3 * per_layer_one
-)
 null_seconds = per_layer_one * (4 / 6)
 # Obtain complete primary counts from the all-layer task manifest.
+scope = json.loads((path.parent / "resolved_model_layers.json").read_text())
+pilot_times = [
+    float(value["fit_runtime_seconds"])
+    for value in scope["measured_hubert_base_original_resources"]
+    if value.get("fit_runtime_seconds") is not None
+]
+pilot_median = statistics.median(pilot_times) if pilot_times else None
+control_seconds = (
+    None
+    if pilot_median is None
+    else (
+        math.ceil(3 / 2) * pilot_median
+        if workers == 2
+        else 3 * pilot_median
+    )
+)
 with (path.parent / "primary_fast_refits.tsv").open(encoding="utf-8") as stream:
     next(stream)
     primary_counts = {
@@ -119,8 +133,15 @@ payload = {
         "benchmark_model_all_layer_seconds": primary_seconds,
         "primary_seconds_by_model_from_layer_count": primary_estimates,
         "selected_depth_3_layer_task_seconds": control_seconds,
+        "selected_depth_estimate_is_conservative": (
+            "scaled from the completed HuBERT Base original median per-layer "
+            "runtime, which includes both LORO and grouped fits"
+        ),
         "one_fixed_alpha_null_unit_seconds": null_seconds,
-        "basis": "measured two-layer benchmark; estimates scale by layer/model count",
+        "basis": (
+            "primary/null estimates use the measured fixed-alpha two-layer "
+            "benchmark; control estimate uses measured completed-pilot runtime"
+        ),
     },
 }
 temporary = path.with_suffix(".json.tmp")

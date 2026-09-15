@@ -186,6 +186,7 @@ def publish_compute_scope_manifests(
     model_layers: Mapping[str, Sequence[str]],
     hubert_original_units: Mapping[str, str],
     fixed_alpha_sources: Mapping[str, Mapping[str, str]] | None = None,
+    measured_pilot_resources: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Atomically publish deterministic deadline-scope manifests once."""
     root = Path(destination)
@@ -256,6 +257,9 @@ def publish_compute_scope_manifests(
             model: dict(sorted(value.items()))
             for model, value in sorted((fixed_alpha_sources or {}).items())
         },
+        "measured_hubert_base_original_resources": list(
+            measured_pilot_resources or []
+        ),
         "task_counts": {
             "primary_fast": len(primary_rows),
             "controls": len(control_rows),
