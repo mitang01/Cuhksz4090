@@ -27,8 +27,14 @@ from .stage4_audit import (
     STAGE4_MODEL_DIRECTORIES,
     audit_stage4_inputs,
 )
+from .design_matrix import lagged_design
 from .stage4_encoding import FAMILIES, fit_stage4_encoding, load_stage4_recordings
-from .stage4_nulls import circular_shift_null, validate_null_count
+from .stage4_nulls import (
+    SUBSTANTIVE_FAMILIES,
+    ShortRecordingError,
+    circular_shift_null,
+    validate_null_count,
+)
 from .stage4_qc import LAG_CONVENTION
 from .stage4_statistics import (
     analyze_stage4_statistics,
@@ -110,25 +116,32 @@ def load_stage4_config(path: str | Path = "configs/stage4_revision.yaml") -> dic
         raise ValueError(f"Stage 4 variants must be exactly {list(VARIANTS)}")
     expected = {
         "original": (
-            "original", [-0.2, -0.1, 0.0, 0.1, 0.2], False,
+            "original", [-0.2, -0.1, 0.0, 0.1, 0.2], False, 5,
             "fits_original_recording_level",
         ),
         "rich": (
-            "rich", [-0.2, -0.1, 0.0, 0.1, 0.2], False,
+            "rich", [-0.2, -0.1, 0.0, 0.1, 0.2], False, None,
             "fits_rich_acoustic",
         ),
         "capacity": (
-            "original", [-0.2, -0.1, 0.0, 0.1, 0.2], True,
+            "original", [-0.2, -0.1, 0.0, 0.1, 0.2], True, None,
             "fits_capacity_matched",
         ),
-        "zero_lag": ("original", [0.0], False, "zero_lag"),
+        "zero_lag": ("original", [0.0], False, None, "zero_lag"),
     }
-    for name, (feature_set, lags, capacity, output_subdir) in expected.items():
+    for name, (
+        feature_set,
+        lags,
+        capacity,
+        sensitivity_folds,
+        output_subdir,
+    ) in expected.items():
         observed = variants[name]
         if (
             observed.get("feature_set") != feature_set
             or [float(value) for value in observed.get("lags_seconds", [])] != lags
             or bool(observed.get("capacity_mode")) != capacity
+            or observed.get("sensitivity_folds") != sensitivity_folds
             or observed.get("output_subdir") != output_subdir
         ):
             raise ValueError(f"Invalid fixed definition for variant {name!r}")
@@ -331,7 +344,7 @@ def _prediction_arrays(result: Mapping[str, Any]) -> dict[str, np.ndarray]:
     for split_name in ("predictions", "sensitivity_predictions"):
         split = result[split_name]
         for recording_id in sorted(split):
-            for family in FAMILIES:
+            for family in sorted(split[recording_id]):
                 for kind in ("target", "full", "reduced"):
                     key = "::".join((split_name, recording_id, family, kind))
                     arrays[key] = np.asarray(split[recording_id][family][kind])
@@ -637,6 +650,16 @@ class Stage4Runner:
         usage_started = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         feature_dir = self._feature_dir(variant)
         ids = self._recording_ids()
+        variant_config = self.config["variants"][variant]
+        encoding = self.config["encoding"]
+        reduced_families = (
+            SUBSTANTIVE_FAMILIES if null_index is not None else FAMILIES
+        )
+        sensitivity_folds = (
+            None
+            if null_index is not None
+            else variant_config.get("sensitivity_folds")
+        )
         source_hashes = self._source_hashes(model, feature_dir, ids)
         destination = self._destination(
             model,
@@ -657,6 +680,8 @@ class Stage4Runner:
                 "null_mode": (
                     None if null_index is None else ("dry_nonfinal" if dry_run else "full")
                 ),
+                "reduced_families": list(reduced_families),
+                "sensitivity_folds": sensitivity_folds,
             },
         )
         if valid:
@@ -678,8 +703,6 @@ class Stage4Runner:
                 lags_seconds=lags,
                 minimum_zero_seconds=float(self.config["nulls"]["minimum_zero_seconds"]),
             )
-        variant_config = self.config["variants"][variant]
-        encoding = self.config["encoding"]
         result = fit_stage4_encoding(
             recordings,
             alphas=encoding["alphas"],
@@ -687,10 +710,9 @@ class Stage4Runner:
             rate_hz=float(self.config["analysis_rate_hz"]),
             target_pca_components=encoding.get("target_pca_components"),
             capacity_mode=bool(variant_config["capacity_mode"]),
+            reduced_families=reduced_families,
             sensitivity_groups=self._groups(),
-            sensitivity_folds=(
-                None if null_index is not None else encoding.get("sensitivity_folds")
-            ),
+            sensitivity_folds=sensitivity_folds,
             inner_folds=int(encoding["inner_folds"]),
             random_seed=int(self.config["random_seed"]),
         )
@@ -710,6 +732,8 @@ class Stage4Runner:
             ),
             "final_inference_eligible": null_index is None or not dry_run,
             "lags_seconds": list(variant_config["lags_seconds"]),
+            "reduced_families": list(reduced_families),
+            "sensitivity_folds": sensitivity_folds,
             "lag_convention": LAG_CONVENTION,
             "fit_runtime_seconds": time.perf_counter() - started,
             "peak_rss_kib": max(
@@ -1296,6 +1320,161 @@ class Stage4Runner:
         _write_json(destination / "result.json", report)
         if not passed:
             raise RuntimeError("Synthetic Stage 4 test failed")
+        return report
+
+    def functional_smoke(
+        self,
+        model: str = "hubert_base",
+        *,
+        layer: str | None = None,
+        recording_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Gate the pilot with minimal synthetic CV and one real recording.
+
+        Nested CV cannot be defined from one recording without violating the
+        recording-level leakage boundary. The minimal-alpha synthetic test
+        exercises fitting; this real-data portion exercises loading, temporal
+        alignment, lagging, a recording-local null shift, and atomic writing.
+        """
+        started = time.perf_counter()
+        self._model(model)
+        self._audit()
+        synthetic = self.synthetic_test()
+        available_layers = discover_layers(self._model(model) / "activations.h5")
+        selected_layer = layer or available_layers[0]
+        if selected_layer not in available_layers:
+            raise ValueError(
+                f"Requested layer is absent; available layers: {available_layers}"
+            )
+        candidate_ids = (
+            [recording_id] if recording_id is not None else self._recording_ids()
+        )
+        feature_dir = self._feature_dir("original")
+        activation_store = self._model(model) / "activations.h5"
+        selected_id = None
+        selected_record = None
+        shifted = None
+        null_manifest = None
+        unsupported: list[dict[str, Any]] = []
+        for candidate in candidate_ids:
+            if candidate not in self._recording_ids():
+                raise ValueError(f"Unknown recording_id {candidate!r}")
+            loaded = load_stage4_recordings(
+                feature_dir,
+                activation_store,
+                selected_layer,
+                recording_ids=[candidate],
+            )
+            try:
+                shifted, null_manifest = circular_shift_null(
+                    loaded,
+                    null_index=0,
+                    seed=int(self.config["random_seed"]),
+                    rate_hz=float(self.config["analysis_rate_hz"]),
+                    lags_seconds=self.config["variants"]["original"]["lags_seconds"],
+                    minimum_zero_seconds=float(
+                        self.config["nulls"]["minimum_zero_seconds"]
+                    ),
+                )
+            except ShortRecordingError as exc:
+                unsupported.extend(exc.diagnostics)
+                if recording_id is not None:
+                    raise
+                continue
+            selected_id = candidate
+            selected_record = loaded[candidate]
+            break
+        if selected_id is None or selected_record is None or shifted is None:
+            raise RuntimeError(
+                "No recording supports the configured recording-local null shift: "
+                f"{unsupported}"
+            )
+
+        rate_hz = float(self.config["analysis_rate_hz"])
+        design, lagged_families = lagged_design(
+            selected_record["matrix"],
+            np.repeat(selected_id, len(selected_record["matrix"])),
+            selected_record["families"],
+            list(self.config["variants"]["original"]["lags_seconds"]),
+            rate_hz,
+        )
+        if (
+            not np.isfinite(design).all()
+            or not np.isfinite(selected_record["targets"]).all()
+            or set(selected_record["families"]) != set(FAMILIES)
+            or design.shape[1]
+            != selected_record["matrix"].shape[1]
+            * len(self.config["variants"]["original"]["lags_seconds"])
+        ):
+            raise RuntimeError("Functional smoke design or schema validation failed")
+        assert null_manifest is not None
+        observed_null_families = set(
+            null_manifest["recordings"][selected_id]["families"]
+        )
+        if observed_null_families != set(SUBSTANTIVE_FAMILIES):
+            raise RuntimeError("Functional smoke null-family schema is invalid")
+
+        destination = (
+            self.output_root
+            / "functional_smoke"
+            / _safe_component(model, "model")
+            / _safe_component(selected_layer, "layer")
+            / _safe_component(selected_id, "recording")
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(
+            tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=destination.parent)
+        )
+        try:
+            np.savez_compressed(
+                temporary / "diagnostics.npz",
+                times=selected_record["times"],
+                lagged_design_first_rows=design[:5],
+                shifted_feature_first_rows=shifted[selected_id]["matrix"][:5],
+            )
+            report = {
+                "schema_version": 1,
+                "state": "complete",
+                "kind": "functional_smoke",
+                "model": model,
+                "layer": selected_layer,
+                "recording_id": selected_id,
+                "recordings_loaded": 1,
+                "frames": int(len(selected_record["times"])),
+                "target_units": int(selected_record["targets"].shape[1]),
+                "feature_columns": int(selected_record["matrix"].shape[1]),
+                "lagged_columns": int(design.shape[1]),
+                "lagged_family_columns": len(lagged_families),
+                "alpha_grid": [1.0],
+                "synthetic_nested_cv": synthetic,
+                "real_recording_nested_cv": {
+                    "state": "not_run",
+                    "reason": (
+                        "nested recording-level CV is undefined for one recording"
+                    ),
+                },
+                "null_shift_count": 1,
+                "null_shift_manifest": null_manifest,
+                "unsupported_recordings_skipped": unsupported,
+                "runtime_seconds": time.perf_counter() - started,
+                "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                "command": [sys.executable, *sys.argv],
+            }
+            _write_json(temporary / "report.json", report)
+            report["artifacts"] = {
+                name: {
+                    "sha256": sha256_file(temporary / name),
+                    "bytes": (temporary / name).stat().st_size,
+                }
+                for name in ("diagnostics.npz", "report.json")
+            }
+            _write_json(temporary / "status.json", report)
+            if destination.exists():
+                _preserve_corrupt(destination, "superseded_functional_smoke")
+            os.replace(temporary, destination)
+        except BaseException:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
         return report
 
 

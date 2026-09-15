@@ -497,6 +497,7 @@ def fit_stage4_encoding(
     rate_hz: float = 50.0,
     target_pca_components: int | None = None,
     capacity_mode: bool = False,
+    reduced_families: Sequence[str] = FAMILIES,
     pre_shifted: bool = False,
     sensitivity_groups: Mapping[str, Any] | None = None,
     sensitivity_folds: int | None = 5,
@@ -516,6 +517,15 @@ def fit_stage4_encoding(
         raise ValueError("rate_hz must be positive")
     if inner_folds < 2:
         raise ValueError("inner_folds must be at least two")
+    selected_families = tuple(str(value) for value in reduced_families)
+    if (
+        not selected_families
+        or len(selected_families) != len(set(selected_families))
+        or not set(selected_families).issubset(FAMILIES)
+    ):
+        raise ValueError(
+            f"reduced_families must be unique members of {list(FAMILIES)}"
+        )
     data = _normalise_recordings(recordings, rate_hz)
     ids = list(data)
     if not pre_shifted and not lags_seconds:
@@ -585,7 +595,7 @@ def fit_stage4_encoding(
             for recording_id in test_ids
         }
         reduced_alphas: dict[str, float] = {}
-        for family in FAMILIES:
+        for family in selected_families:
             reduced_alpha, reduced_cv = _choose_alpha(
                 data,
                 train_ids,

@@ -207,6 +207,23 @@ def test_sensitivity_grouped_outer_splits_score_every_held_recording():
     assert set(result["sensitivity_predictions"]) == set(records)
 
 
+def test_reduced_family_subset_avoids_unrequested_reduced_fits():
+    records = _recordings()
+    selected = ("prosodic", "phonetic", "word")
+    result = fit_stage4_encoding(
+        records,
+        alphas=[1.0],
+        reduced_families=selected,
+        sensitivity_folds=None,
+    )
+
+    assert set(result["scores"]["family"]) == set(selected)
+    assert len(result["scores"]) == len(records) * len(selected)
+    assert not result["sensitivity_predictions"]
+    for recording_id in records:
+        assert set(result["predictions"][recording_id]) == set(selected)
+
+
 def test_sensitivity_reproduces_original_frame_weighted_groupkfold_layout():
     records = _recordings(count=6, frames=8)
     for index, recording_id in enumerate(records):

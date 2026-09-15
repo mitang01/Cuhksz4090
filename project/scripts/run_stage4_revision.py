@@ -43,6 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("summarize", help="Summarize valid completed units")
     subparsers.add_parser("audit", help="Run the full immutable-input audit")
     subparsers.add_parser("synthetic-test", help="Run deterministic synthetic E2E")
+    smoke = subparsers.add_parser(
+        "functional-smoke",
+        help="Run the gated minimal-alpha synthetic and one-recording real smoke",
+    )
+    smoke.add_argument("--model", default="hubert_base")
+    smoke.add_argument("--layer", help="One HDF5 layer; default uses the first")
+    smoke.add_argument(
+        "--recording-id",
+        help="One recording; default selects the first supporting a valid null shift",
+    )
     return parser
 
 
@@ -65,6 +75,12 @@ def main(argv: list[str] | None = None) -> Any:
         result = runner.summarize()
     elif args.command == "audit":
         result = runner.audit()
+    elif args.command == "functional-smoke":
+        result = runner.functional_smoke(
+            args.model,
+            layer=args.layer,
+            recording_id=args.recording_id,
+        )
     else:
         result = runner.synthetic_test()
     print(json.dumps(result, indent=2, sort_keys=True))

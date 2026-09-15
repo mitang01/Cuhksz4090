@@ -44,7 +44,7 @@ def _config(tmp_path: Path) -> Path:
     return config
 
 
-def _inputs(tmp_path: Path) -> None:
+def _inputs(tmp_path: Path, *, frames: int = 12) -> None:
     governance = tmp_path / "governance"
     governance.mkdir()
     (governance / "revision_roadmap.json").write_text("{}")
@@ -55,12 +55,12 @@ def _inputs(tmp_path: Path) -> None:
     ids = [f"recording_{index}" for index in range(4)]
     pd.DataFrame({"recording_id": ids}).to_csv(outputs / "manifest.csv", index=False)
     rng = np.random.default_rng(3)
-    times = np.arange(12) / 50
+    times = np.arange(frames) / 50
     coefficient = rng.normal(size=(5, 3))
     matrices = {}
     targets = {}
     for recording_id in ids:
-        matrix = rng.normal(size=(12, 5))
+        matrix = rng.normal(size=(frames, 5))
         target = matrix @ coefficient
         matrices[recording_id] = matrix
         targets[recording_id] = target
@@ -88,7 +88,7 @@ def _inputs(tmp_path: Path) -> None:
             }
             (root / filename).write_text(json.dumps(payload), encoding="utf-8")
         pd.DataFrame(
-            {"recording_id": ids, "duration_seconds": [12 / 50] * len(ids)}
+            {"recording_id": ids, "duration_seconds": [frames / 50] * len(ids)}
         ).to_csv(root / "extraction_manifest.csv", index=False)
         with h5py.File(root / "activations.h5", "w") as store:
             for recording_id in ids:
@@ -128,6 +128,35 @@ def test_synthetic_end_to_end_is_deterministic_and_writes_under_stage4(tmp_path)
         tmp_path / "outputs" / "stage4_revision" / "synthetic_test" / "result.json"
     )
     assert json.loads(result_path.read_text()) == second
+
+
+def test_functional_smoke_uses_one_real_recording_and_one_null_shift(tmp_path):
+    config = _config(tmp_path)
+    _inputs(tmp_path, frames=220)
+    runner = Stage4Runner(config)
+
+    result = runner.functional_smoke("hubert_base")
+
+    assert result["state"] == "complete"
+    assert result["recordings_loaded"] == 1
+    assert result["null_shift_count"] == 1
+    assert result["alpha_grid"] == [1.0]
+    assert result["synthetic_nested_cv"]["passed"]
+    assert result["real_recording_nested_cv"]["state"] == "not_run"
+    status_paths = list(
+        (
+            tmp_path
+            / "outputs"
+            / "stage4_revision"
+            / "functional_smoke"
+            / "hubert_base"
+        ).glob("*/*/status.json")
+    )
+    assert len(status_paths) == 1
+    status = json.loads(status_paths[0].read_text(encoding="utf-8"))
+    assert set(status["null_shift_manifest"]["recordings"]) == {
+        result["recording_id"]
+    }
 
 
 def test_corrupt_completed_unit_is_preserved_diagnosed_and_recomputed(tmp_path):
