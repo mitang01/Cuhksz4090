@@ -35,7 +35,7 @@ mkdir -p "$LOG_DIR"
 
 write_exit_report() {
   local exit_status=$?
-  python - "$EXIT_REPORT" "$exit_status" "$CURRENT_COMPONENT" \
+  python3 - "$EXIT_REPORT" "$exit_status" "$CURRENT_COMPONENT" \
     "$((SECONDS - START_SECONDS))" <<'PY'
 import json
 import os
@@ -68,7 +68,7 @@ run_component() {
   echo "STAGE4_COMPONENT_END $CURRENT_COMPONENT $(date -u +%FT%TZ)"
 }
 
-run_component unit_tests python -m pytest -q \
+run_component unit_tests python3 -m pytest -q \
   --junitxml="$TEST_REPORT" \
   tests/test_stage4_audit.py \
   tests/test_stage4_encoding.py \
@@ -79,18 +79,18 @@ run_component unit_tests python -m pytest -q \
   tests/test_stage4_runner.py \
   tests/test_stage4_statistics.py
 
-run_component input_audit python scripts/audit_stage4_inputs.py \
+run_component input_audit python3 scripts/audit_stage4_inputs.py \
   --manifest outputs/manifest.csv \
   --features outputs/features \
   --model-root outputs \
   --output outputs/stage4_revision/audit/input_audit.json
 
-run_component provenance_qc python scripts/run_stage4_qc.py \
+run_component provenance_qc python3 scripts/run_stage4_qc.py \
   --manifest outputs/manifest.csv \
   --model-root outputs \
   --output-dir outputs/stage4_revision/provenance_qc
 
-python - <<'PY'
+python3 - <<'PY'
 import json
 from pathlib import Path
 
@@ -104,12 +104,12 @@ PY
 # Gate 1: one minimal-alpha synthetic fit plus one real HuBERT Base
 # layer/recording I/O, lag, null-shift, schema, and atomic-write check.
 # Nested recording-level CV is deliberately not fit on the single recording.
-run_component functional_smoke python scripts/run_stage4_revision.py \
+run_component functional_smoke python3 scripts/run_stage4_revision.py \
   --config configs/stage4_revision.yaml \
   functional-smoke --model "$MODEL"
 
 SMOKE_STATUS="$(
-  python - <<'PY'
+  python3 - <<'PY'
 from pathlib import Path
 
 paths = list(Path(
@@ -122,26 +122,26 @@ PY
 )"
 
 # Gate 2 begins only after Gate 1 has published a complete status.
-run_component rich_feature_extraction python scripts/extract_stage4_rich_features.py \
+run_component rich_feature_extraction python3 scripts/extract_stage4_rich_features.py \
   --config configs/features_stage4_rich.yaml \
   --manifest outputs/manifest.csv \
   --validation-report outputs/validation_report.json \
   --output outputs/stage4_revision/features_rich
 
 for variant in original rich capacity zero_lag; do
-  run_component "pilot_fit_${variant}" python scripts/run_stage4_revision.py \
+  run_component "pilot_fit_${variant}" python3 scripts/run_stage4_revision.py \
     --config configs/stage4_revision.yaml \
     fit "$MODEL" "$variant"
 done
 
 for null_index in $(seq 0 $((NULL_COUNT - 1))); do
-  run_component "pilot_null_${null_index}" python scripts/run_stage4_revision.py \
+  run_component "pilot_null_${null_index}" python3 scripts/run_stage4_revision.py \
     --config configs/stage4_revision.yaml \
     null "$MODEL" "$null_index" \
     --dry-null-count "$NULL_COUNT"
 done
 
-run_component pilot_integrity python scripts/validate_stage4_pilot.py \
+run_component pilot_integrity python3 scripts/validate_stage4_pilot.py \
   --config configs/stage4_revision.yaml \
   --model "$MODEL" \
   --null-count "$NULL_COUNT" \

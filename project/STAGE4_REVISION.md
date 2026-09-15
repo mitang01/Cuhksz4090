@@ -90,7 +90,7 @@ mkdir -p outputs/stage4_revision/logs
 
 PARTITION=EDIT_ME
 ACCOUNT=EDIT_ME
-DRY_WALL=04:00:00
+DRY_WALL=24:00:00
 FIT_WALL=24:00:00
 NULL_WALL=24:00:00
 SITE_ARGS=(--partition="$PARTITION" --account="$ACCOUNT")
