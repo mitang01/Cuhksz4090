@@ -180,6 +180,84 @@ def _write_tsv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str
         writer.writerows(rows)
 
 
+def _selected_depth_control_rows(
+    resolved: Mapping[str, Mapping[str, str]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for model in CONTROL_MODELS:
+        for variant in ("rich", "capacity"):
+            rows.append(
+                {
+                    "task_id": len(rows),
+                    "model": model,
+                    "variant": variant,
+                    **resolved[model],
+                }
+            )
+    for model in ALL_SCOPE_MODELS:
+        rows.append(
+            {
+                "task_id": len(rows),
+                "model": model,
+                "variant": "zero_lag",
+                **resolved[model],
+            }
+        )
+    return rows
+
+
+def validate_selected_depth_controls(
+    manifest_dir: str | Path,
+    *,
+    model_layers: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    """Fail if persisted control tasks differ from current model layer schemas."""
+    root = Path(manifest_dir)
+    payload_path = root / "resolved_model_layers.json"
+    tasks_path = root / "selected_depth_controls.tsv"
+    if not payload_path.is_file() or not tasks_path.is_file():
+        raise FileNotFoundError(
+            f"Selected-depth manifests are missing: {payload_path}, {tasks_path}"
+        )
+    missing = set(ALL_SCOPE_MODELS) - set(model_layers)
+    if missing:
+        raise ValueError(f"Current layer schemas are missing models {sorted(missing)}")
+    resolved = {
+        model: resolve_depth_layers(model_layers[model])
+        for model in sorted(model_layers)
+    }
+    saved = _load_json(payload_path)
+    if saved.get("resolved_depth_layers") != resolved:
+        raise ValueError(
+            "Resolved layer manifest is stale relative to current activation stores"
+        )
+    expected = _selected_depth_control_rows(resolved)
+    with tasks_path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        if reader.fieldnames != [
+            "task_id",
+            "model",
+            "variant",
+            "input",
+            "middle",
+            "final",
+        ]:
+            raise ValueError("Selected-depth task manifest has an invalid schema")
+        observed = list(reader)
+    expected_text = [
+        {key: str(value) for key, value in row.items()} for row in expected
+    ]
+    if observed != expected_text:
+        raise ValueError(
+            "Selected-depth task manifest does not match current model-specific layers"
+        )
+    return {
+        "state": "valid",
+        "model_count": len(model_layers),
+        "task_count": len(observed),
+    }
+
+
 def publish_compute_scope_manifests(
     destination: str | Path,
     *,
@@ -208,26 +286,7 @@ def publish_compute_scope_manifests(
         }
         for index, model in enumerate(PRIMARY_FAST_MODELS)
     ]
-    control_rows = []
-    for model in CONTROL_MODELS:
-        for variant in ("rich", "capacity"):
-            control_rows.append(
-                {
-                    "task_id": len(control_rows),
-                    "model": model,
-                    "variant": variant,
-                    **resolved[model],
-                }
-            )
-    for model in ALL_SCOPE_MODELS:
-        control_rows.append(
-            {
-                "task_id": len(control_rows),
-                "model": model,
-                "variant": "zero_lag",
-                **resolved[model],
-            }
-        )
+    control_rows = _selected_depth_control_rows(resolved)
     null_rows = [
         {
             "task_id": index,

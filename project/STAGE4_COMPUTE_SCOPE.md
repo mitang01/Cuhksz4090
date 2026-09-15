@@ -64,7 +64,17 @@ layer jobs use one worker with eight BLAS threads.
 
 ## Exact array submissions
 
-After reviewing the resolved manifests and measured estimates:
+After reviewing the resolved manifests and measured estimates, run the
+preflight against the current activation stores. Do not submit any array if it
+reports that the persisted model-specific layer selections are stale:
+
+```bash
+python3 scripts/validate_stage4_compute_scope.py \
+  --config configs/stage4_revision.yaml \
+  --manifest-dir outputs/stage4_revision/manifests/deadline_compute_scope
+```
+
+Only after that command reports `"state": "valid"`:
 
 ```bash
 PRIMARY_JOB=$(sbatch --parsable "${SITE_ARGS[@]}" \
