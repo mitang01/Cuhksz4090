@@ -11,6 +11,7 @@ from speech_strf.stage4_compute_scope import (
     load_legacy_fixed_alphas,
     publish_compute_scope_manifests,
     resolve_depth_layers,
+    validate_selected_depth_controls,
 )
 
 
@@ -83,12 +84,90 @@ def test_compute_scope_manifests_have_exact_deadline_task_counts(tmp_path):
     ) == payload
     saved = json.loads((destination / "resolved_model_layers.json").read_text())
     assert saved["hubert_base_original"]["action"].endswith("do_not_rerun")
+    assert validate_selected_depth_controls(
+        destination, model_layers=model_layers
+    ) == {
+        "state": "valid",
+        "model_count": 9,
+        "task_counts": {
+            "primary_fast": 8,
+            "controls": 21,
+            "nulls": 80,
+        },
+    }
 
     changed = dict(model_layers)
     changed["hubert_base"] = ["input", "different_middle", "different_final"]
+    with pytest.raises(ValueError, match="manifest is stale"):
+        validate_selected_depth_controls(destination, model_layers=changed)
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         publish_compute_scope_manifests(
             destination,
             model_layers=changed,
             hubert_original_units={"input": "/preserved/input"},
         )
+    refreshed = publish_compute_scope_manifests(
+        destination,
+        model_layers=changed,
+        hubert_original_units={"input": "/preserved/input"},
+        preserve_stale=True,
+    )
+    assert refreshed["resolved_depth_layers"]["hubert_base"] == {
+        "input": "input",
+        "middle": "different_middle",
+        "final": "different_final",
+    }
+    assert len(list(tmp_path.glob("deadline_scope.stale-*"))) == 1
+
+
+def test_selected_depth_validation_preserves_model_specific_layers(tmp_path):
+    model_layers = {
+        model: ["input", f"{model}_middle", f"{model}_final"]
+        for model in ALL_SCOPE_MODELS
+    }
+    destination = tmp_path / "model_specific_scope"
+    publish_compute_scope_manifests(
+        destination,
+        model_layers=model_layers,
+        hubert_original_units={"input": "/preserved/input"},
+    )
+
+    result = validate_selected_depth_controls(
+        destination, model_layers=model_layers
+    )
+    controls = pd.read_csv(destination / "selected_depth_controls.tsv", sep="\t")
+
+    assert result["state"] == "valid"
+    assert result["task_counts"]["controls"] == 21
+    for row in controls.itertuples(index=False):
+        assert [row.input, row.middle, row.final] == model_layers[row.model]
+
+
+def test_refresh_archives_corrupt_task_tsv_even_when_json_is_current(tmp_path):
+    model_layers = {
+        model: ["input", f"{model}_middle", f"{model}_final"]
+        for model in ALL_SCOPE_MODELS
+    }
+    destination = tmp_path / "scope"
+    kwargs = {
+        "model_layers": model_layers,
+        "hubert_original_units": {"input": "/preserved/input"},
+    }
+    publish_compute_scope_manifests(destination, **kwargs)
+    tasks = destination / "selected_depth_controls.tsv"
+    tasks.write_text(
+        tasks.read_text().replace("hubert_base_middle", "absent_layer", 1)
+    )
+
+    with pytest.raises(FileExistsError, match="invalid manifests"):
+        publish_compute_scope_manifests(destination, **kwargs)
+    publish_compute_scope_manifests(
+        destination,
+        preserve_stale=True,
+        **kwargs,
+    )
+
+    assert validate_selected_depth_controls(
+        destination, model_layers=model_layers
+    )["state"] == "valid"
+    assert len(list(tmp_path.glob("scope.stale-*"))) == 1

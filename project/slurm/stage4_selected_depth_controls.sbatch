@@ -27,6 +27,9 @@ DECISION="$MANIFEST_DIR/worker_benchmark.json"
   echo "Resolved manifests and worker benchmark are required" >&2
   exit 2
 }
+python3 scripts/validate_stage4_compute_scope.py \
+  --config configs/stage4_revision.yaml \
+  --manifest-dir "$MANIFEST_DIR"
 
 IFS=$'\t' read -r MODEL VARIANT INPUT MIDDLE FINAL < <(
   awk -F $'\t' -v task="$SLURM_ARRAY_TASK_ID" \

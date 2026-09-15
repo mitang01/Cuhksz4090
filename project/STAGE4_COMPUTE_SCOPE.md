@@ -64,7 +64,17 @@ layer jobs use one worker with eight BLAS threads.
 
 ## Exact array submissions
 
-After reviewing the resolved manifests and measured estimates:
+After reviewing the resolved manifests and measured estimates, run the
+preflight against the current activation stores. Do not submit any array if it
+reports that the persisted model-specific layer selections are stale:
+
+```bash
+python3 scripts/validate_stage4_compute_scope.py \
+  --config configs/stage4_revision.yaml \
+  --manifest-dir outputs/stage4_revision/manifests/deadline_compute_scope
+```
+
+Only after that command reports `"state": "valid"`:
 
 ```bash
 PRIMARY_JOB=$(sbatch --parsable "${SITE_ARGS[@]}" \
@@ -98,3 +108,33 @@ duration-weighted summaries, and the HuBERT Base LORO sensitivity table under
 
 Do not submit `stage4_dry_run.sbatch`, `stage4_full_fits.sbatch`, or
 `stage4_nulls.sbatch` for this deadline scope.
+
+## Recovering a stale layer manifest
+
+An `Requested layer is absent` error means a persisted task selected a layer
+that is not in that model's current activation store. Stop retrying that
+manifest. Refreshing never deletes or overwrites it: the old directory is
+renamed to `deadline_compute_scope.stale-<UTC timestamp>`.
+
+```bash
+python3 scripts/resolve_stage4_compute_scope.py \
+  --config configs/stage4_revision.yaml \
+  --output outputs/stage4_revision/manifests/deadline_compute_scope \
+  --refresh-stale-manifest
+
+BENCH_JOB=$(sbatch --parsable --partition=cpu \
+  slurm/stage4_worker_benchmark.sbatch)
+```
+
+After the benchmark completes, require a valid preflight and inspect the new
+resolved names before retrying only failed array tasks:
+
+```bash
+python3 scripts/validate_stage4_compute_scope.py
+column -ts $'\t' \
+  outputs/stage4_revision/manifests/deadline_compute_scope/selected_depth_controls.tsv
+```
+
+Every array script repeats this validation before fitting. Already completed
+atomic fit units resume; the refresh changes only scheduling manifests and
+benchmark metadata.

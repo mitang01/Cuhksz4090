@@ -23,7 +23,8 @@ MANIFEST_DIR=outputs/stage4_revision/manifests/deadline_compute_scope
 DECISION="$MANIFEST_DIR/worker_benchmark.json"
 python3 scripts/resolve_stage4_compute_scope.py \
   --config configs/stage4_revision.yaml \
-  --output "$MANIFEST_DIR"
+  --output "$MANIFEST_DIR" \
+  --refresh-stale-manifest
 
 mapfile -t BENCHMARK < <(
   python3 - "$MANIFEST_DIR/resolved_model_layers.json" <<'PY'
