@@ -1001,6 +1001,27 @@ def build_stage4_handoff(
         audit_source = output_root / "audit" / "input_audit.json"
         if audit_source.is_file():
             shutil.copy2(audit_source, provenance_target / audit_source.name)
+        model_metadata_root = provenance_target / "model_metadata"
+        for model in ALL_SCOPE_MODELS:
+            source_root = runner._model(model)
+            target_root = model_metadata_root / model
+            for name in (
+                "run_metadata.json",
+                "layer_metadata.json",
+                "comparability_contract.json",
+                "extraction_manifest.csv",
+            ):
+                source = source_root / name
+                if source.is_file():
+                    target_root.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target_root / name)
+                else:
+                    missing.append(
+                        {
+                            "unit": str(source),
+                            "reason": "model_provenance_file_missing",
+                        }
+                    )
 
         verification = temporary / VERIFY_DIR
         source_metadata = _copy_source_snapshot(
@@ -1011,6 +1032,21 @@ def build_stage4_handoff(
         manifest_target = verification / "resolved_manifests"
         if manifest_root.is_dir():
             shutil.copytree(manifest_root, manifest_target)
+        governance_target = verification / "governance"
+        for name, configured_path in runner.config.get(
+            "governance_inputs", {}
+        ).items():
+            source = runner.resolve(configured_path)
+            if source.is_file():
+                governance_target.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, governance_target / f"{name}{source.suffix}")
+            else:
+                missing.append(
+                    {
+                        "unit": str(source),
+                        "reason": "governance_file_missing",
+                    }
+                )
 
         logs_root = output_root / "logs"
         jobs, log_inventory = _slurm_summary(logs_root, job_ids)

@@ -78,6 +78,14 @@ def test_partial_handoff_is_atomic_hashed_and_excludes_large_inputs(tmp_path):
         f"recording_{index}" for index in range(4)
     }
     assert (handoff / "verification" / "missing_incomplete_units.csv").is_file()
+    assert (
+        handoff
+        / "provenance_qc"
+        / "model_metadata"
+        / "hubert_base"
+        / "run_metadata.json"
+    ).is_file()
+    assert (handoff / "verification" / "governance").is_dir()
     assert len(list(handoff.rglob("predictions.npz"))) == 1
     assert not list(handoff.rglob("activations.h5"))
     assert not list(handoff.rglob("features_rich"))
