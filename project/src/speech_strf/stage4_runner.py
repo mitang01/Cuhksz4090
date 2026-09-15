@@ -780,6 +780,9 @@ class Stage4Runner:
         self._audit()
         available = discover_layers(self._model(model) / "activations.h5")
         selected = available if layer is None else [layer]
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C,D", "location": "stage4_runner.py:Stage4Runner.fit", "message": "fit membership byte comparison", "data": {"model": model, "requested": [{"value": value, "bytes": list(value.encode("utf-8"))} for value in selected], "available": [{"value": value, "bytes": list(value.encode("utf-8"))} for value in available]}, "timestamp": time.time() * 1000}) + "\n")
+        # endregion
         if any(value not in available for value in selected):
             raise ValueError(f"Requested layer is absent; available layers: {available}")
         return [self._fit_one(model, value, variant) for value in selected]
