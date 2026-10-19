@@ -4,7 +4,7 @@
 The pipeline aligns log-mel power, syllable onsets, prosodic boundary strength,
 and prosodic structure depth to continuous, preprocessed neural data. Model
 selection uses nested, stimulus-grouped cross-validation. Feature significance
-is assessed with outer-fold-blocked permutation tests on held-out accuracy.
+is assessed with story-level sign-flip tests on held-out accuracy.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -33,6 +34,7 @@ from scipy import signal
 from scipy.io import wavfile
 
 import preprocess_seeg as prep
+from figure_significance import annotate_bars
 
 
 DEFAULT_INPUT = Path("/share/workspace3/ieeg/seeg/story_listen_v2")
@@ -50,8 +52,7 @@ MODEL_FAMILIES = {
 }
 MODEL_COMPARISONS = {
     "syl_onset_after_mel": ("M2_mel_syl", "M1_mel"),
-    "boundary_after_syl": ("M3_mel_syl_boundary", "M2_mel_syl"),
-    "structure_after_syl": ("M4_mel_syl_structure", "M2_mel_syl"),
+    "joint_prosody_after_syl": ("M5_full", "M2_mel_syl"),
     "structure_after_boundary": ("M5_full", "M3_mel_syl_boundary"),
     "boundary_after_structure": ("M5_full", "M4_mel_syl_structure"),
 }
@@ -86,6 +87,7 @@ class TrackData:
     feature_names: list[str]
     channel_names: list[str]
     time: np.ndarray
+    prosody_event_mask: np.ndarray | None = None
 
 
 @dataclass
@@ -119,16 +121,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fmin", type=float, default=50.0)
     parser.add_argument("--fmax", type=float, default=8000.0)
     parser.add_argument("--mel-window-s", type=float, default=0.025)
-    parser.add_argument("--tmin", type=float, default=-0.1)
-    parser.add_argument("--tmax", type=float, default=0.6)
+    parser.add_argument("--tmin", type=float, default=-0.3)
+    parser.add_argument("--tmax", type=float, default=0.3)
     parser.add_argument("--epoch-duration", type=float, default=10.0)
-    parser.add_argument("--outer-folds", type=int, default=5)
+    parser.add_argument(
+        "--outer-folds",
+        type=int,
+        help="Outer story folds (default: leave one story out)",
+    )
     parser.add_argument("--inner-folds", type=int, default=4)
     parser.add_argument(
         "--alphas",
         type=float,
         nargs="+",
-        default=np.logspace(-3, 3, 7).tolist(),
+        default=np.logspace(-1, 8, 10).tolist(),
     )
     parser.add_argument("--n-permutations", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20260817)
@@ -199,7 +205,6 @@ def load_selected_channels(path: Path, threshold: float) -> list[str]:
     by_normalized = {prep.normalize(field): field for field in fields}
     p_column = by_normalized.get("fdr_p_value")
     channel_column = by_normalized.get("channel")
-    effect_column = by_normalized.get("median_response_minus_baseline")
     if p_column is None or channel_column is None:
         raise ValueError(
             f"{path} needs channel and fdr_p_value columns; found {fields}"
@@ -209,12 +214,7 @@ def load_selected_channels(path: Path, threshold: float) -> list[str]:
         if not row[p_column]:
             continue
         p_value = prep.parse_float(row[p_column], context=f"{path.name}:fdr_p_value")
-        effect = (
-            prep.parse_float(row[effect_column], context=f"{path.name}:effect")
-            if effect_column and row[effect_column]
-            else 1.0
-        )
-        if p_value < threshold and effect > 0:
+        if p_value < threshold:
             selected.append(row[channel_column])
     return selected
 
@@ -488,6 +488,14 @@ def prepare_track(
         syllable_onsets, np.ones(len(syllable_onsets)), n_times, sfreq
     )
     boundary_times, boundary_values, depth_values = load_prosody(row.prosody_file)
+    event_mask, event_collisions = impulses(
+        boundary_times, np.ones(len(boundary_times)), n_times, sfreq
+    )
+    if event_collisions:
+        raise ValueError(
+            f"{row.stimulus_id} has {event_collisions} prosody events that "
+            f"collide after resampling to {sfreq:g} Hz"
+        )
     boundary, boundary_collisions = impulses(
         boundary_times, boundary_values, n_times, sfreq
     )
@@ -514,6 +522,7 @@ def prepare_track(
         feature_names=feature_names,
         channel_names=channel_names,
         time=target_times,
+        prosody_event_mask=event_mask.astype(bool),
     )
     qc = {
         "recording_id": row.recording_id,
@@ -527,6 +536,7 @@ def prepare_track(
         "syl_onset_sample_collisions": syl_collisions,
         "boundary_sample_collisions": boundary_collisions,
         "struc_depth_sample_collisions": depth_collisions,
+        "prosody_event_sample_collisions": event_collisions,
     }
     return track, qc
 
@@ -541,6 +551,11 @@ def save_track(path: Path, track: TrackData) -> None:
         feature_names=np.asarray(track.feature_names),
         channel_names=np.asarray(track.channel_names),
         time=track.time,
+        prosody_event_mask=(
+            track.prosody_event_mask
+            if track.prosody_event_mask is not None
+            else np.zeros(len(track.X), dtype=bool)
+        ),
     )
 
 
@@ -747,6 +762,12 @@ def sign_flip_pvalue(values: np.ndarray, n_permutations: int, seed: int) -> floa
     observed = float(np.mean(values))
     if observed <= 0 or not np.all(np.isfinite(values)):
         return 1.0
+    if len(values) <= 20:
+        exceedances = sum(
+            np.mean(values * np.asarray(signs)) >= observed
+            for signs in itertools.product((-1.0, 1.0), repeat=len(values))
+        )
+        return exceedances / float(2 ** len(values))
     rng = np.random.default_rng(seed)
     null = np.empty(n_permutations)
     for index in range(n_permutations):
@@ -792,7 +813,12 @@ def fit_recording(
         for model, model_families in MODEL_FAMILIES.items()
     }
     epoch_samples = round(args.epoch_duration * args.target_sfreq)
-    outer_folds = 3 if n_stimuli == 3 else args.outer_folds
+    if args.outer_folds is not None and args.outer_folds != n_stimuli:
+        raise ValueError(
+            f"reference-style inference requires leave-one-story-out: "
+            f"--outer-folds must be {n_stimuli} for {recording_id}"
+        )
+    outer_folds = n_stimuli
     assignments = assign_folds(
         [track.stimulus_id for track in tracks],
         outer_folds,
@@ -823,6 +849,7 @@ def fit_recording(
         fold_predictions: list[np.ndarray] = []
         fold_y: np.ndarray | None = None
         fold_stimuli: np.ndarray | None = None
+        fold_sample_indices: np.ndarray | None = None
         for model, columns in model_columns.items():
             selected_names = [feature_names[index] for index in columns]
             alpha, selection_rows = select_alpha(
@@ -842,6 +869,11 @@ def fit_recording(
                         "selected": bool(
                             selection_row["inner_fold"] == "mean"
                             and float(selection_row["alpha"]) == alpha
+                        ),
+                        "selected_at_grid_edge": bool(
+                            selection_row["inner_fold"] == "mean"
+                            and float(selection_row["alpha"]) == alpha
+                            and alpha in (min(args.alphas), max(args.alphas))
                         ),
                     }
                 )
@@ -903,6 +935,14 @@ def fit_recording(
             if fold_y is None:
                 fold_y = y_valid
                 fold_stimuli = valid_stimuli
+                fold_sample_indices = np.repeat(
+                    (
+                        np.arange(test.X.shape[0])[:, np.newaxis]
+                        + test.epoch_indices[np.newaxis, :] * epoch_samples
+                    ),
+                    1,
+                    axis=0,
+                )[valid].reshape(-1)
                 null_prediction = np.broadcast_to(
                     train.y.mean(axis=(0, 1)), y_valid.shape
                 )
@@ -925,7 +965,11 @@ def fit_recording(
                                 "n_test_samples": int(np.sum(stimulus_mask)),
                             }
                         )
-        assert fold_y is not None and fold_stimuli is not None
+        assert (
+            fold_y is not None
+            and fold_stimuli is not None
+            and fold_sample_indices is not None
+        )
         np.savez_compressed(
             recording_dir / f"predictions_outer_fold_{outer_fold}.npz",
             y_true=fold_y,
@@ -933,6 +977,7 @@ def fit_recording(
             model_names=np.asarray(list(MODEL_FAMILIES)),
             channel_names=np.asarray(channel_names),
             stimulus_ids=fold_stimuli,
+            stimulus_sample_indices=fold_sample_indices,
         )
         plot_prediction_excerpt(
             recording_dir,
@@ -960,21 +1005,78 @@ def fit_recording(
     )
 
     stimulus_metric_lookup = {
-        (str(row["stimulus_id"]), str(row["model"]), str(row["channel"])): float(
-            row["r2"]
-        )
+        (
+            str(row["stimulus_id"]),
+            str(row["model"]),
+            str(row["channel"]),
+            metric,
+        ): float(row[metric])
         for row in stimulus_metric_rows
+        for metric in ("r2", "correlation")
     }
     stimulus_ids = sorted({str(row["stimulus_id"]) for row in stimulus_metric_rows})
     comparison_rows: list[dict[str, object]] = []
     for comparison, (full_model, reduced_model) in MODEL_COMPARISONS.items():
         for channel_name in channel_names:
-            deltas = np.asarray(
+            deltas_r2 = np.asarray(
                 [
-                    stimulus_metric_lookup[(stimulus, full_model, channel_name)]
-                    - stimulus_metric_lookup[(stimulus, reduced_model, channel_name)]
+                    stimulus_metric_lookup[
+                        (stimulus, full_model, channel_name, "r2")
+                    ]
+                    - stimulus_metric_lookup[
+                        (stimulus, reduced_model, channel_name, "r2")
+                    ]
                     for stimulus in stimulus_ids
                 ]
+            )
+            deltas_correlation = np.asarray(
+                [
+                    stimulus_metric_lookup[
+                        (stimulus, full_model, channel_name, "correlation")
+                    ]
+                    - stimulus_metric_lookup[
+                        (stimulus, reduced_model, channel_name, "correlation")
+                    ]
+                    for stimulus in stimulus_ids
+                ]
+            )
+            block_deltas_r2 = np.asarray(
+                [
+                    np.mean(
+                        [
+                            delta
+                            for delta, stimulus in zip(deltas_r2, stimulus_ids)
+                            if assignments[stimulus] == fold
+                        ]
+                    )
+                    for fold in sorted(set(assignments.values()))
+                ]
+            )
+            block_deltas_correlation = np.asarray(
+                [
+                    np.mean(
+                        [
+                            delta
+                            for delta, stimulus in zip(
+                                deltas_correlation, stimulus_ids
+                            )
+                            if assignments[stimulus] == fold
+                        ]
+                    )
+                    for fold in sorted(set(assignments.values()))
+                ]
+            )
+            p_r2 = sign_flip_pvalue(
+                block_deltas_r2,
+                args.n_permutations,
+                stable_seed(args.seed, recording_id, comparison, channel_name, "r2"),
+            )
+            p_correlation = sign_flip_pvalue(
+                block_deltas_correlation,
+                args.n_permutations,
+                stable_seed(
+                    args.seed, recording_id, comparison, channel_name, "correlation"
+                ),
             )
             comparison_rows.append(
                 {
@@ -983,43 +1085,105 @@ def fit_recording(
                     "comparison": comparison,
                     "full_model": full_model,
                     "reduced_model": reduced_model,
-                    "mean_delta_r2": float(np.mean(deltas)),
-                    "std_delta_r2": float(np.std(deltas, ddof=1))
-                    if len(deltas) > 1
+                    "mean_delta_r2": float(np.mean(deltas_r2)),
+                    "std_delta_r2": float(np.std(deltas_r2, ddof=1))
+                    if len(deltas_r2) > 1
                     else 0.0,
-                    "positive_stimuli": int(np.sum(deltas > 0)),
-                    "n_stimuli": len(deltas),
-                    "n_permutation_blocks": len(set(assignments.values())),
-                    "permutation_p_value": sign_flip_pvalue(
-                        np.asarray(
-                            [
-                                np.mean(
-                                    [
-                                        delta
-                                        for delta, stimulus in zip(deltas, stimulus_ids)
-                                        if assignments[stimulus] == fold
-                                    ]
-                                )
-                                for fold in sorted(set(assignments.values()))
-                            ]
-                        ),
-                        args.n_permutations,
-                        stable_seed(args.seed, recording_id, comparison, channel_name),
+                    "mean_delta_correlation": float(
+                        np.mean(deltas_correlation)
                     ),
+                    "std_delta_correlation": float(
+                        np.std(deltas_correlation, ddof=1)
+                    )
+                    if len(deltas_correlation) > 1
+                    else 0.0,
+                    "positive_stimuli_r2": int(np.sum(deltas_r2 > 0)),
+                    "positive_stimuli_correlation": int(
+                        np.sum(deltas_correlation > 0)
+                    ),
+                    "n_stimuli": len(deltas_r2),
+                    "n_permutation_blocks": len(set(assignments.values())),
+                    "permutation_p_value_r2": p_r2,
+                    "permutation_p_value_correlation": p_correlation,
+                    "permutation_p_value": p_correlation,
+                    "primary_metric": "correlation",
                 }
             )
-    fdr_bh_rows(comparison_rows, "permutation_p_value", "fdr_p_value")
+    fdr_bh_rows(comparison_rows, "permutation_p_value_r2", "fdr_p_value_r2")
+    fdr_bh_rows(
+        comparison_rows,
+        "permutation_p_value_correlation",
+        "fdr_p_value_correlation",
+    )
+    for row in comparison_rows:
+        row["fdr_p_value"] = row["fdr_p_value_correlation"]
+        row["fdr_p_value_significant_0.05"] = row[
+            "fdr_p_value_correlation_significant_0.05"
+        ]
     write_csv(recording_dir / "model_comparisons.csv", comparison_rows)
 
     contribution_rows: list[dict[str, object]] = []
     for family, (full_model, reduced_model) in FEATURE_COMPARISONS.items():
         for channel_name in channel_names:
-            deltas = np.asarray(
+            deltas_r2 = np.asarray(
                 [
-                    stimulus_metric_lookup[(stimulus, full_model, channel_name)]
-                    - stimulus_metric_lookup[(stimulus, reduced_model, channel_name)]
+                    stimulus_metric_lookup[
+                        (stimulus, full_model, channel_name, "r2")
+                    ]
+                    - stimulus_metric_lookup[
+                        (stimulus, reduced_model, channel_name, "r2")
+                    ]
                     for stimulus in stimulus_ids
                 ]
+            )
+            deltas_correlation = np.asarray(
+                [
+                    stimulus_metric_lookup[
+                        (stimulus, full_model, channel_name, "correlation")
+                    ]
+                    - stimulus_metric_lookup[
+                        (stimulus, reduced_model, channel_name, "correlation")
+                    ]
+                    for stimulus in stimulus_ids
+                ]
+            )
+            block_deltas_r2 = np.asarray(
+                [
+                    np.mean(
+                        [
+                            delta
+                            for delta, stimulus in zip(deltas_r2, stimulus_ids)
+                            if assignments[stimulus] == fold
+                        ]
+                    )
+                    for fold in sorted(set(assignments.values()))
+                ]
+            )
+            block_deltas_correlation = np.asarray(
+                [
+                    np.mean(
+                        [
+                            delta
+                            for delta, stimulus in zip(
+                                deltas_correlation, stimulus_ids
+                            )
+                            if assignments[stimulus] == fold
+                        ]
+                    )
+                    for fold in sorted(set(assignments.values()))
+                ]
+            )
+            p_r2 = sign_flip_pvalue(
+                block_deltas_r2,
+                args.n_permutations,
+                stable_seed(args.seed, recording_id, family, channel_name, "r2"),
+            )
+            p_correlation = sign_flip_pvalue(
+                block_deltas_correlation,
+                args.n_permutations,
+                stable_seed(
+                    args.seed, recording_id, family, channel_name, "correlation"
+                ),
             )
             contribution_rows.append(
                 {
@@ -1028,32 +1192,44 @@ def fit_recording(
                     "feature": family,
                     "full_model": full_model,
                     "reduced_model": reduced_model,
-                    "mean_delta_r2": float(np.mean(deltas)),
-                    "std_delta_r2": float(np.std(deltas, ddof=1)),
-                    "positive_stimuli": int(np.sum(deltas > 0)),
-                    "n_stimuli": len(deltas),
-                    "n_permutation_blocks": len(set(assignments.values())),
-                    "permutation_p_value": sign_flip_pvalue(
-                        np.asarray(
-                            [
-                                np.mean(
-                                    [
-                                        delta
-                                        for delta, stimulus in zip(deltas, stimulus_ids)
-                                        if assignments[stimulus] == fold
-                                    ]
-                                )
-                                for fold in sorted(set(assignments.values()))
-                            ]
-                        ),
-                        args.n_permutations,
-                        stable_seed(args.seed, recording_id, family, channel_name),
+                    "mean_delta_r2": float(np.mean(deltas_r2)),
+                    "std_delta_r2": float(np.std(deltas_r2, ddof=1)),
+                    "mean_delta_correlation": float(
+                        np.mean(deltas_correlation)
                     ),
+                    "std_delta_correlation": float(
+                        np.std(deltas_correlation, ddof=1)
+                    ),
+                    "positive_stimuli_r2": int(np.sum(deltas_r2 > 0)),
+                    "positive_stimuli_correlation": int(
+                        np.sum(deltas_correlation > 0)
+                    ),
+                    "n_stimuli": len(deltas_r2),
+                    "n_permutation_blocks": len(set(assignments.values())),
+                    "permutation_p_value_r2": p_r2,
+                    "permutation_p_value_correlation": p_correlation,
+                    "permutation_p_value": p_correlation,
                     "n_permutations": args.n_permutations,
-                    "test": "outer-fold-blocked sign flip of held-out delta R2",
+                    "test": (
+                        "story-level exact sign flip when <=20 stories; "
+                        "Monte Carlo sign flip otherwise"
+                    ),
+                    "primary_metric": "correlation",
                 }
             )
-    fdr_bh_rows(contribution_rows, "permutation_p_value", "fdr_p_value")
+    fdr_bh_rows(
+        contribution_rows, "permutation_p_value_r2", "fdr_p_value_r2"
+    )
+    fdr_bh_rows(
+        contribution_rows,
+        "permutation_p_value_correlation",
+        "fdr_p_value_correlation",
+    )
+    for row in contribution_rows:
+        row["fdr_p_value"] = row["fdr_p_value_correlation"]
+        row["fdr_p_value_significant_0.05"] = row[
+            "fdr_p_value_correlation_significant_0.05"
+        ]
     write_csv(recording_dir / "feature_contributions.csv", contribution_rows)
     create_figures(
         recording_dir,
@@ -1082,6 +1258,21 @@ def plot_prediction_excerpt(
     for channel, channel_name in enumerate(channel_names):
         fig, ax = plt.subplots(figsize=(10, 4), layout="constrained")
         ax.plot(time, y[:n_samples, channel], color="black", alpha=0.65, label="Actual")
+        if channel_name == "GROUP":
+            residual = (
+                y[:n_samples, channel] - prediction[:n_samples, channel]
+            )
+            residual_scale = float(np.std(residual, ddof=1))
+            interval = 1.96 * residual_scale
+            ax.fill_between(
+                time,
+                prediction[:n_samples, channel] - interval,
+                prediction[:n_samples, channel] + interval,
+                color="#d1495b",
+                alpha=0.18,
+                linewidth=0,
+                label="M5 residual 95% interval",
+            )
         ax.plot(
             time,
             prediction[:n_samples, channel],
@@ -1103,6 +1294,18 @@ def plot_prediction_excerpt(
         plt.close(fig)
 
 
+def feature_rows_for_plot(
+    contribution_rows: Sequence[dict[str, object]], channel_name: str
+) -> list[dict[str, object]]:
+    """Return feature rows shown for a channel's contribution figure."""
+    rows = [
+        row for row in contribution_rows if row["channel"] == channel_name
+    ]
+    if channel_name == "GROUP":
+        rows = [row for row in rows if row["feature"] != "mel"]
+    return rows
+
+
 def create_figures(
     recording_dir: Path,
     metric_rows: list[dict[str, object]],
@@ -1121,12 +1324,22 @@ def create_figures(
             row for row in metric_rows if row["channel"] == channel_name
         ]
         means = [
-            np.mean([float(row["r2"]) for row in channel_metrics if row["model"] == model])
+            np.mean(
+                [
+                    float(row["correlation"])
+                    for row in channel_metrics
+                    if row["model"] == model
+                ]
+            )
             for model in models
         ]
         sems = [
             np.std(
-                [float(row["r2"]) for row in channel_metrics if row["model"] == model],
+                [
+                    float(row["correlation"])
+                    for row in channel_metrics
+                    if row["model"] == model
+                ],
                 ddof=1,
             )
             / math.sqrt(
@@ -1140,8 +1353,11 @@ def create_figures(
         ax.set(
             xticks=np.arange(len(models)),
             xticklabels=models,
-            ylabel="Held-out $R^2$",
-            title=f"{channel_name}: STRF predictive accuracy",
+            ylabel="Held-out Pearson $r$",
+            title=(
+                f"{channel_name}: STRF predictive accuracy"
+                + (" (error bars: ±SEM)" if channel_name == "GROUP" else "")
+            ),
         )
         ax.tick_params(axis="x", rotation=25)
         fig.savefig(figures / f"{safe_name(channel_name)}_model_accuracy.png", dpi=160)
@@ -1151,49 +1367,96 @@ def create_figures(
             row for row in comparison_rows if row["channel"] == channel_name
         ]
         fig, ax = plt.subplots(figsize=(10, 5), layout="constrained")
-        values = [float(row["mean_delta_r2"]) for row in channel_comparisons]
+        values = [
+            float(row["mean_delta_correlation"]) for row in channel_comparisons
+        ]
+        comparison_errors = (
+            [
+                1.96
+                * float(row["std_delta_correlation"])
+                / math.sqrt(int(row["n_stimuli"]))
+                for row in channel_comparisons
+            ]
+            if channel_name == "GROUP"
+            else None
+        )
         colors = [
             "#2a9d8f" if row["fdr_p_value_significant_0.05"] else "#9aa0a6"
             for row in channel_comparisons
         ]
-        ax.bar(np.arange(len(values)), values, color=colors)
+        bars = ax.bar(
+            np.arange(len(values)),
+            values,
+            color=colors,
+            yerr=comparison_errors,
+            capsize=4 if comparison_errors is not None else 0,
+        )
+        annotate_bars(
+            ax,
+            bars,
+            channel_comparisons,
+            p_key="fdr_p_value_correlation",
+            errors=comparison_errors,
+        )
         ax.axhline(0, color="black", linewidth=0.8)
         ax.set(
             xticks=np.arange(len(values)),
             xticklabels=[str(row["comparison"]) for row in channel_comparisons],
-            ylabel=r"Mean $\Delta R^2$",
-            title=f"{channel_name}: nested model comparisons",
+            ylabel=r"Mean held-out $\Delta r$",
+            title=(
+                f"{channel_name}: nested model comparisons"
+                + (" (95% CI)" if channel_name == "GROUP" else "")
+            ),
         )
         ax.tick_params(axis="x", rotation=25)
         fig.savefig(figures / f"{safe_name(channel_name)}_model_comparisons.png", dpi=160)
         plt.close(fig)
 
-        channel_contributions = [
-            row for row in contribution_rows if row["channel"] == channel_name
-        ]
+        channel_contributions = feature_rows_for_plot(
+            contribution_rows, channel_name
+        )
         fig, ax = plt.subplots(figsize=(8, 5), layout="constrained")
-        values = [float(row["mean_delta_r2"]) for row in channel_contributions]
+        values = [
+            float(row["mean_delta_correlation"])
+            for row in channel_contributions
+        ]
+        contribution_errors = (
+            [
+                1.96
+                * float(row["std_delta_correlation"])
+                / math.sqrt(int(row["n_stimuli"]))
+                for row in channel_contributions
+            ]
+            if channel_name == "GROUP"
+            else None
+        )
         colors = [
             "#e76f51" if row["fdr_p_value_significant_0.05"] else "#9aa0a6"
             for row in channel_contributions
         ]
-        bars = ax.bar(np.arange(len(values)), values, color=colors)
-        for bar, row in zip(bars, channel_contributions):
-            if row["fdr_p_value_significant_0.05"]:
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height(),
-                    "*",
-                    ha="center",
-                    va="bottom",
-                    fontsize=14,
-                )
+        bars = ax.bar(
+            np.arange(len(values)),
+            values,
+            color=colors,
+            yerr=contribution_errors,
+            capsize=4 if contribution_errors is not None else 0,
+        )
+        annotate_bars(
+            ax,
+            bars,
+            channel_contributions,
+            p_key="fdr_p_value_correlation",
+            errors=contribution_errors,
+        )
         ax.axhline(0, color="black", linewidth=0.8)
         ax.set(
             xticks=np.arange(len(values)),
             xticklabels=[str(row["feature"]) for row in channel_contributions],
-            ylabel=r"Mean held-out $\Delta R^2$",
-            title=f"{channel_name}: feature contributions",
+            ylabel=r"Mean held-out $\Delta r$",
+            title=(
+                f"{channel_name}: feature contributions"
+                + (" (95% CI)" if channel_name == "GROUP" else "")
+            ),
         )
         fig.savefig(
             figures / f"{safe_name(channel_name)}_feature_contributions.png", dpi=160
@@ -1243,12 +1506,35 @@ def create_figures(
             fig.colorbar(image, ax=axes[0, 0], label="Normalized coefficient")
             if other_indices:
                 for index in other_indices:
+                    line = coefficients[index]
                     axes[1, 0].plot(
-                        lags, coefficients[index], label=feature_names[index]
+                        lags, line, label=feature_names[index]
                     )
+                    if channel_name == "GROUP" and stacked.shape[0] > 1:
+                        fold_lines = stacked[:, channel_index, index, :]
+                        confidence = (
+                            1.96
+                            * np.std(fold_lines, axis=0, ddof=1)
+                            / math.sqrt(stacked.shape[0])
+                        )
+                        axes[1, 0].fill_between(
+                            lags,
+                            line - confidence,
+                            line + confidence,
+                            alpha=0.18,
+                            linewidth=0,
+                        )
                 axes[1, 0].axhline(0, color="black", linewidth=0.7)
                 axes[1, 0].legend()
-                axes[1, 0].set(ylabel="Coefficient", xlabel="Lag (s)")
+                axes[1, 0].set(
+                    ylabel="Coefficient",
+                    xlabel="Lag (s)",
+                    title=(
+                        "Lines with descriptive ±1.96 SEM fold-variability bands"
+                        if channel_name == "GROUP"
+                        else ""
+                    ),
+                )
             else:
                 axes[0, 0].set_xlabel("Lag (s)")
             fig.savefig(
@@ -1275,7 +1561,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("sampling rate, mel count, and epoch duration must be positive")
     if args.tmin >= args.tmax:
         raise ValueError("--tmin must be before --tmax")
-    if args.outer_folds < 2 or args.inner_folds < 2:
+    if (args.outer_folds is not None and args.outer_folds < 2) or args.inner_folds < 2:
         raise ValueError("outer and inner folds must be at least 2")
     if args.n_permutations < 1:
         raise ValueError("permutation count must be positive")
@@ -1332,10 +1618,11 @@ def run(args: argparse.Namespace) -> int:
     configuration["models"] = MODEL_FAMILIES
     configuration["regularization"] = "ridge"
     configuration["permutation_test"] = (
-        "Outer-fold-blocked sign flips of held-out delta R2 between full and "
-        "reduced models; stimulus deltas are averaged within fold before each "
-        "sign flip; p=(1+# permuted mean >= observed mean)/(n_permutations+1)."
+        "Story-level sign flips of held-out delta Pearson correlation and delta "
+        "R2. All sign patterns are enumerated exactly for <=20 stories; Monte "
+        "Carlo sign flips are used otherwise."
     )
+    configuration["primary_comparison_metric"] = "Pearson correlation"
     (args.output_dir / "analysis_config.json").write_text(
         json.dumps(configuration, indent=2), encoding="utf-8"
     )
@@ -1353,7 +1640,7 @@ def run(args: argparse.Namespace) -> int:
         )
         if not channel_names:
             print(
-                f"SKIP {recording_id}: no positive channels with "
+                f"SKIP {recording_id}: no channels with "
                 f"fdr_p_value < {args.fdr_threshold}",
                 file=sys.stderr,
             )

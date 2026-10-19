@@ -45,6 +45,39 @@ def test_partition_signal_channels_excludes_misc_prefix_case_insensitively() -> 
     assert excluded == ["MISC", "misc01", " MISC_aux"]
 
 
+def test_load_fdr_channels_includes_both_effect_directions(tmp_path: Path) -> None:
+    path = tmp_path / "high_gamma_speech_responsiveness.csv"
+    path.write_text(
+        "channel,fdr_p_value,median_response_minus_baseline\n"
+        "LA1,0.01,1.2\n"
+        "LA2,0.02,-0.8\n"
+        "LA3,0.20,2.0\n",
+        encoding="utf-8",
+    )
+
+    assert group.load_fdr_channels(path, 0.05) == ["LA1", "LA2"]
+
+
+def test_group_feature_figure_omits_mel_only() -> None:
+    rows = [
+        {"channel": channel, "feature": feature}
+        for channel in ("GROUP", "LA1")
+        for feature in individual.FEATURE_FAMILIES
+    ]
+
+    group_rows = individual.feature_rows_for_plot(rows, "GROUP")
+    electrode_rows = individual.feature_rows_for_plot(rows, "LA1")
+
+    assert [row["feature"] for row in group_rows] == [
+        "syl_onset",
+        "boundary_strength",
+        "struc_depth",
+    ]
+    assert [row["feature"] for row in electrode_rows] == list(
+        individual.FEATURE_FAMILIES
+    )
+
+
 def test_aggregate_group_tracks_uses_equal_electrode_mean_and_shortest_time() -> None:
     X = np.arange(50, dtype=float).reshape(10, 5)
     first = make_track(
@@ -80,14 +113,57 @@ def test_aggregate_group_tracks_uses_equal_electrode_mean_and_shortest_time() ->
     }
 
 
+def test_subject_inference_filters_current_group_members(tmp_path: Path) -> None:
+    individual_dir = tmp_path / "individual"
+    for subject in ("sub001", "sub002"):
+        recording = individual_dir / "recordings" / subject
+        recording.mkdir(parents=True)
+        (recording / "model_comparisons.csv").write_text(
+            "recording_id,channel,comparison,full_model,reduced_model,"
+            "mean_delta_r2,mean_delta_correlation\n"
+            f"{subject}/{subject},LA1,syl,M2,M1,0.1,0.2\n"
+            f"{subject}/{subject},MISC1,syl,M2,M1,1.0,1.0\n",
+            encoding="utf-8",
+        )
+        (recording / "cv_folds.csv").write_text(
+            "recording_id,stimulus_id,outer_fold\n"
+            f"{subject}/{subject},story1,0\n"
+            f"{subject}/{subject},story2,1\n"
+            f"{subject}/{subject},story3,2\n",
+            encoding="utf-8",
+        )
+    output = tmp_path / "subject_model_comparisons.csv"
+
+    group.aggregate_subject_inference(
+        individual_dir,
+        "model_comparisons.csv",
+        "comparison",
+        output,
+        n_permutations=7,
+        seed=1,
+        allowed_members={
+            ("sub001/sub001", "LA1"),
+            ("sub002/sub002", "LA1"),
+        },
+        expected_stimuli={"story1", "story2", "story3"},
+    )
+
+    rows = list(csv.DictReader(output.open()))
+    assert len(rows) == 1
+    assert int(rows[0]["n_subjects"]) == 2
+    assert float(rows[0]["mean_subject_delta_correlation"]) == 0.2
+    assert float(rows[0]["permutation_p_value_correlation"]) == 0.25
+
+
 def test_group_fit_writes_matching_metrics_and_figure_types(tmp_path: Path) -> None:
     sfreq = 20.0
     members: list[group.MemberTrack] = []
     for recording_index in range(2):
         for story_index in range(6):
-            rng = np.random.default_rng(recording_index * 20 + story_index)
+            feature_rng = np.random.default_rng(story_index)
+            noise_rng = np.random.default_rng(recording_index * 20 + story_index)
             n_times = 80
-            X = rng.normal(size=(n_times, 5))
+            X = feature_rng.normal(size=(n_times, 5))
             X[:, 2:] = 0
             for sample in range(6 + story_index % 3, n_times, 12):
                 X[sample, 2] = 1
@@ -100,8 +176,8 @@ def test_group_fit_writes_matching_metrics_and_figure_types(tmp_path: Path) -> N
             )
             y = np.column_stack(
                 [
-                    base_y + rng.normal(scale=0.1, size=n_times),
-                    base_y + rng.normal(scale=0.1, size=n_times),
+                    base_y + noise_rng.normal(scale=0.1, size=n_times),
+                    base_y + noise_rng.normal(scale=0.1, size=n_times),
                 ]
             )
             members.append(
@@ -119,7 +195,7 @@ def test_group_fit_writes_matching_metrics_and_figure_types(tmp_path: Path) -> N
     group_tracks, _, _ = group.aggregate_group_tracks(members)
     args = Namespace(
         inner_folds=2,
-        outer_folds=3,
+        outer_folds=None,
         epoch_duration=2.0,
         target_sfreq=sfreq,
         tmin=0.0,
@@ -145,9 +221,12 @@ def test_group_fit_writes_matching_metrics_and_figure_types(tmp_path: Path) -> N
         "GROUP_model_accuracy.png",
         "GROUP_model_comparisons.png",
         "GROUP_feature_contributions.png",
-        "GROUP_M5_full_coefficients.png",
-        "GROUP_outer_fold_0_prediction.png",
+        *(
+            f"GROUP_{model}_coefficients.png"
+            for model in individual.MODEL_FAMILIES
+        ),
+        *(f"GROUP_outer_fold_{fold}_prediction.png" for fold in range(6)),
     }
-    assert expected_figures <= {
+    assert expected_figures == {
         path.name for path in (result / "figures").glob("*.png")
     }
