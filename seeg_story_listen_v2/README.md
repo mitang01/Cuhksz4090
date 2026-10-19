@@ -35,6 +35,53 @@ python3 -m pip install -r seeg_story_listen_v2/requirements.txt
 
 MNE's EDF export uses `edfio`, included in the requirements.
 
+## Print EDF Raw / Info metadata
+
+`print_edf_info.py` recursively finds converted EDF files under the story-
+listening tree and prints the same text that `print(raw)` and `print(raw.info)`
+show interactively: sampling frequency, highpass/lowpass, channel names and
+types, participant/`subject_info` fields, measurement date, and other non-empty
+Info entries. Samples are not preloaded, so the script is suitable for a remote
+Linux shell.
+
+```bash
+# Print every converted raw EDF under the default cluster path
+python3 seeg_story_listen_v2/print_edf_info.py
+
+# Save the report to a text file
+python3 seeg_story_listen_v2/print_edf_info.py \
+  --input-dir /share/workspace3/ieeg/seeg/story_listen_v2 \
+  --output /share/home/mitan/seeg_story_listen_v2/edf_info_report.txt
+```
+
+Processed filenames containing `_prepocessed_` or `_responsive_` are skipped by
+default. Pass `--include-processed` to report those as well.
+
+## Decode StudyInfo `.dat` files
+
+`print_studyinfo_dat.py` finds each subject's `StudyInfo.dat` under the story-
+listening tree (for example
+`sub002/sub002/postseegct/StudyInfo.dat`), auto-detects Chinese encodings such
+as GB18030/GBK/`cp936`, and writes one readable UTF-8 summary. Files that look
+scrambled in VS Code are usually GBK-family text opened as UTF-8; this script
+decodes them before summarizing.
+
+```bash
+# Default: search the cluster tree and write studyinfo_dat_summary.txt
+# beside this script
+python3 seeg_story_listen_v2/print_studyinfo_dat.py
+
+# Explicit paths
+python3 seeg_story_listen_v2/print_studyinfo_dat.py \
+  --input-dir /share/workspace3/ieeg/seeg/story_listen_v2 \
+  --output /share/home/mitan/seeg_story_listen_v2/studyinfo_dat_summary.txt
+```
+
+By default only files named `StudyInfo.dat` are included. Pass `--all-dat` to
+include other `.dat` files while still skipping temporary `*_preload.dat`
+mmap files. Force an encoding with `--encoding gb18030` when auto-detection is
+wrong.
+
 ## Validate metadata first
 
 Run the metadata-only pass before filtering:

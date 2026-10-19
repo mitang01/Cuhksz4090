@@ -1,0 +1,9 @@
+.venv/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+outputs/*
+!outputs/.gitkeep
+!outputs/manifest.csv
+!outputs/validation_report.json
+
