@@ -323,5 +323,5 @@ def test_publication_bundle_rejects_incomplete_epoch_cohort(
     )
     missing.unlink()
 
-    with pytest.raises(ValueError, match="STRF/epoch recording cohorts differ"):
+    with pytest.raises(ValueError, match="partial individual epoch outputs"):
         make_nature_figures.run(args)
