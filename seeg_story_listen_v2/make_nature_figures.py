@@ -115,6 +115,31 @@ def write_json(path: Path, value: object) -> None:
     )
 
 
+def read_json_required(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        raise FileNotFoundError(f"required configuration does not exist: {path}")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"configuration is not a JSON object: {path}")
+    return value
+
+
+def validate_full_run_configs(
+    inputs: Sequence[tuple[str, Path]],
+) -> dict[str, dict[str, object]]:
+    configs: dict[str, dict[str, object]] = {}
+    for label, path in inputs:
+        config = read_json_required(path)
+        max_recordings = config.get("max_recordings")
+        if max_recordings not in (None, "None"):
+            raise ValueError(
+                f"{label} used max_recordings={max_recordings}; publication "
+                "rendering requires complete upstream runs"
+            )
+        configs[label] = config
+    return configs
+
+
 def parse_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -192,7 +217,11 @@ def validate_model_metrics(
     return models, sorted(reference)
 
 
-def validate_group_epoch_statistics(rows: list[dict[str, str]]) -> None:
+def validate_group_epoch_statistics(
+    rows: list[dict[str, str]],
+    *,
+    expected_subjects: int,
+) -> None:
     expected_sources = {
         "observed",
         "m2_residual",
@@ -230,6 +259,11 @@ def validate_group_epoch_statistics(rows: list[dict[str, str]]) -> None:
                 if key in seen:
                     raise ValueError(f"duplicate group epoch result row: {key}")
                 seen.add(key)
+                if int(row["n_subjects"]) != expected_subjects:
+                    raise ValueError(
+                        f"group epoch subject count differs for {key}: "
+                        f"expected={expected_subjects}, got={row['n_subjects']}"
+                    )
 
 
 def subject_feature_points(
@@ -278,8 +312,11 @@ def subject_feature_points(
 
 def load_subject_waveforms(
     epoch_paths: Sequence[Path],
+    *,
+    strf_dir: Path,
 ) -> tuple[
     np.ndarray,
+    list[dict[str, object]],
     list[dict[str, object]],
     list[dict[str, object]],
 ]:
@@ -287,6 +324,7 @@ def load_subject_waveforms(
     subjects: set[str] = set()
     levels: set[float] = set()
     reference_times: np.ndarray | None = None
+    epoch_accounting: list[dict[str, object]] = []
     for path in epoch_paths:
         dataset = epoch_stats.load_epoch_dataset(path)
         if reference_times is None:
@@ -297,6 +335,46 @@ def load_subject_waveforms(
             raise ValueError(f"non-finite observed epochs in {path}")
         subject = subject_id(dataset.recording_id)
         subjects.add(subject)
+        aligned_dir = (
+            strf_dir / "aligned_data" / run_strf.safe_name(dataset.recording_id)
+        )
+        aligned_paths = sorted(aligned_dir.glob("*.npz"))
+        if not aligned_paths:
+            raise FileNotFoundError(
+                f"aligned STRF tracks are missing for {dataset.recording_id}: "
+                f"{aligned_dir}"
+            )
+        source_events = 0
+        for aligned_path in aligned_paths:
+            with np.load(aligned_path, allow_pickle=False) as aligned:
+                if "prosody_event_mask" not in aligned:
+                    raise ValueError(
+                        f"epoch accounting requires prosody_event_mask: {aligned_path}"
+                    )
+                event_mask = np.asarray(aligned["prosody_event_mask"], dtype=bool)
+                if event_mask.ndim != 1:
+                    raise ValueError(
+                        f"prosody_event_mask is not one-dimensional: {aligned_path}"
+                    )
+                source_events += int(event_mask.sum())
+        retained_epochs = len(dataset.observed)
+        if retained_epochs > source_events:
+            raise ValueError(
+                f"retained epochs exceed source events for {dataset.recording_id}"
+            )
+        epoch_accounting.append(
+            {
+                "recording_id": dataset.recording_id,
+                "subject": subject,
+                "n_source_prosody_events": source_events,
+                "n_retained_epochs": retained_epochs,
+                "n_events_not_retained": source_events - retained_epochs,
+                "accounting_note": (
+                    "not-retained events are upstream edge-window or "
+                    "non-finite-prediction exclusions"
+                ),
+            }
+        )
         for level in np.unique(dataset.struc_depth):
             levels.add(float(level))
             mask = dataset.struc_depth == level
@@ -326,7 +404,19 @@ def load_subject_waveforms(
         for level in sorted(levels)
         if (subject, level) not in by_subject_level
     ]
-    return reference_times, rows, missing
+    return reference_times, rows, missing, epoch_accounting
+
+
+def individual_strf_recordings(strf_dir: Path) -> set[str]:
+    recordings: set[str] = set()
+    for path in sorted((strf_dir / "recordings").glob("*/model_metrics.csv")):
+        ids = {row["recording_id"] for row in read_csv_required(path)}
+        if len(ids) != 1:
+            raise ValueError(f"ambiguous recording IDs in {path}: {sorted(ids)}")
+        recordings.update(ids)
+    if not recordings:
+        raise ValueError("no individual STRF recording metrics were found")
+    return recordings
 
 
 def plot_cohort(
@@ -998,6 +1088,14 @@ def run(args: argparse.Namespace) -> int:
     source_dir = args.output_dir / "source_data"
     source_dir.mkdir()
 
+    configs = validate_full_run_configs(
+        (
+            ("individual STRF", args.strf_dir / "analysis_config.json"),
+            ("group STRF", args.strf_group_dir / "analysis_config.json"),
+            ("individual epochs", args.epochs_dir / "analysis_config.json"),
+            ("group epochs", args.epochs_group_dir / "analysis_config.json"),
+        )
+    )
     group_recording = args.strf_group_dir / "recordings" / "GROUP"
     metrics = read_csv_required(group_recording / "model_metrics.csv")
     models, folds = validate_model_metrics(metrics)
@@ -1016,9 +1114,33 @@ def run(args: argparse.Namespace) -> int:
     group_stats = read_csv_required(
         args.epochs_group_dir / "group_timepoint_statistics.csv"
     )
-    validate_group_epoch_statistics(group_stats)
     epoch_paths = sorted((args.epochs_dir / "recordings").glob("*/epoch_data.npz"))
-    times, waveform_rows, missing_conditions = load_subject_waveforms(epoch_paths)
+    times, waveform_rows, missing_conditions, epoch_accounting = (
+        load_subject_waveforms(epoch_paths, strf_dir=args.strf_dir)
+    )
+    strf_recordings = individual_strf_recordings(args.strf_dir)
+    epoch_recordings = {str(row["recording_id"]) for row in epoch_accounting}
+    if epoch_recordings != strf_recordings:
+        raise ValueError(
+            "individual STRF/epoch recording cohorts differ: "
+            f"missing_epochs={sorted(strf_recordings - epoch_recordings)}, "
+            f"unexpected_epochs={sorted(epoch_recordings - strf_recordings)}"
+        )
+    epoch_membership = read_csv_required(
+        args.epochs_group_dir / "group_membership.csv"
+    )
+    membership_recordings = {row["recording_id"] for row in epoch_membership}
+    if membership_recordings != epoch_recordings:
+        raise ValueError(
+            "group-epoch membership differs from individual epoch cohort: "
+            f"missing={sorted(epoch_recordings - membership_recordings)}, "
+            f"unexpected={sorted(membership_recordings - epoch_recordings)}"
+        )
+    epoch_subjects = {subject_id(recording) for recording in epoch_recordings}
+    validate_group_epoch_statistics(
+        group_stats,
+        expected_subjects=len(epoch_subjects),
+    )
 
     set_publication_style()
     figure = plt.figure(figsize=(180 / 25.4, 165 / 25.4), layout="constrained")
@@ -1081,14 +1203,33 @@ def run(args: argparse.Namespace) -> int:
         source_dir / "supplementary_all_group_timepoint_statistics.csv",
         group_stats,
     )
+    write_csv(source_dir / "epoch_retention_accounting.csv", epoch_accounting)
 
+    total_source_events = sum(
+        int(row["n_source_prosody_events"]) for row in epoch_accounting
+    )
+    total_retained_epochs = sum(
+        int(row["n_retained_epochs"]) for row in epoch_accounting
+    )
     exclusion_rows = [
         {"category": key, "count": value} for key, value in counts.items()
     ] + [
         {
             "category": "missing_subject_structure_depth_cells",
             "count": len(missing_conditions),
-        }
+        },
+        {
+            "category": "source_prosody_events",
+            "count": total_source_events,
+        },
+        {
+            "category": "retained_prosody_epochs",
+            "count": total_retained_epochs,
+        },
+        {
+            "category": "prosody_events_not_retained_as_epochs",
+            "count": total_source_events - total_retained_epochs,
+        },
     ]
     write_csv(args.output_dir / "exclusion_counts.csv", exclusion_rows)
     write_json(
@@ -1096,9 +1237,11 @@ def run(args: argparse.Namespace) -> int:
         {
             "counts": counts,
             "missing_subject_structure_depth_cells": missing_conditions,
+            "epoch_retention_by_recording": epoch_accounting,
             "interpretation": (
-                "Missing condition cells are reported and not imputed; every "
-                "available subject trajectory is rendered."
+                "Missing condition cells and source events not retained by the "
+                "upstream epoch extractor are reported and not imputed; every "
+                "retained subject trajectory is rendered."
             ),
         },
     )
@@ -1109,7 +1252,7 @@ def run(args: argparse.Namespace) -> int:
         "B": "All pooled held-out story folds; bars are mean ± SEM. No absolute-performance significance test was invented.",
         "C": "Every subject mean is shown. Bars are mean ± 1.96 SEM; stars reproduce subject-level BH-FDR-adjusted correlation tests.",
         "D": "M5 coefficients across all folds. Linguistic ribbons are descriptive ±1.96 SEM across folds.",
-        "E": "All available subject-level observed ER-Hγ trajectories by structure depth; missing cells are disclosed, not imputed.",
+        "E": "All retained subject-level observed ER-Hγ trajectories by structure depth; missing cells and source-to-epoch retention are disclosed, not imputed.",
         "F": "Observed group F statistics; shadows, lines, and stars identify BH-FDR q<0.01 intervals retained for at least four samples.",
         "Supplementary": "Every tested observed, M2-residual, and model-prediction source is shown without source selection; significance marks reproduce the same saved thresholds.",
     }
@@ -1123,6 +1266,22 @@ def run(args: argparse.Namespace) -> int:
 
     source_mapping = {
         "no_sampling": True,
+        "validated_upstream_configs": {
+            label: str(path)
+            for label, path in (
+                ("individual STRF", args.strf_dir / "analysis_config.json"),
+                ("group STRF", args.strf_group_dir / "analysis_config.json"),
+                ("individual epochs", args.epochs_dir / "analysis_config.json"),
+                ("group epochs", args.epochs_group_dir / "analysis_config.json"),
+            )
+        },
+        "upstream_max_recordings": {
+            label: config.get("max_recordings")
+            for label, config in configs.items()
+        },
+        "epoch_retention_source_data": (
+            "source_data/epoch_retention_accounting.csv"
+        ),
         "panels": {
             "A": {
                 "inputs": [
@@ -1273,6 +1432,17 @@ def run(args: argparse.Namespace) -> int:
                 == set(run_strf.FEATURE_FAMILIES)
             ),
             "no_rendering_subsample": True,
+            "no_upstream_max_recordings_subset": all(
+                config.get("max_recordings") in (None, "None")
+                for config in configs.values()
+            ),
+            "strf_epoch_recording_cohorts_match": (
+                strf_recordings == epoch_recordings
+            ),
+            "group_epoch_membership_matches": (
+                membership_recordings == epoch_recordings
+            ),
+            "epoch_retention_accounting_disclosed": True,
             "missing_conditions_disclosed": True,
             "significance_marks_match_source_tables": True,
             "alignment_status": alignment["status"],

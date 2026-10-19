@@ -11,6 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -34,6 +35,11 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_json(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
 
 
 def test_significance_annotations_use_adjusted_p_and_contiguous_runs() -> None:
@@ -121,6 +127,29 @@ def build_publication_fixture(root: Path) -> Namespace:
             / "feature_contributions.csv",
             rows,
         )
+        write_csv(
+            strf_dir
+            / "recordings"
+            / f"sub{subject_index + 1:03d}_run1"
+            / "model_metrics.csv",
+            [
+                {
+                    "recording_id": recording_id,
+                    "channel": channel,
+                    "model": "M1_mel",
+                }
+            ],
+        )
+        aligned_dir = (
+            strf_dir
+            / "aligned_data"
+            / f"sub{subject_index + 1:03d}_run1"
+        )
+        aligned_dir.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            aligned_dir / "001_story01.npz",
+            prosody_event_mask=np.ones(12, dtype=bool),
+        )
         dataset = make_epoch_dataset(recording_id, subject_index + 1)
         epoch_stats.save_epoch_dataset(
             epochs_dir
@@ -206,6 +235,22 @@ def build_publication_fixture(root: Path) -> Namespace:
             for index, time in enumerate(times)
         ],
     )
+    write_csv(
+        epochs_group_dir / "group_membership.csv",
+        [
+            {
+                "subject": f"sub{index + 1:03d}",
+                "recording_id": f"sub{index + 1:03d}/run1",
+                "n_electrodes": 1,
+                "n_epochs": 12,
+            }
+            for index in range(2)
+        ],
+    )
+    write_json(strf_dir / "analysis_config.json", {"max_recordings": None})
+    write_json(group_dir / "analysis_config.json", {"max_recordings": None})
+    write_json(epochs_dir / "analysis_config.json", {"max_recordings": None})
+    write_json(epochs_group_dir / "analysis_config.json", {})
     return Namespace(
         strf_dir=strf_dir,
         strf_group_dir=group_dir,
@@ -250,4 +295,33 @@ def test_publication_bundle_contains_vector_source_and_audit_outputs(
     qa = json.loads((args.output_dir / "pre_submission_qa.json").read_text())
     assert qa["checks"]["alignment_status"] == "pass"
     assert qa["checks"]["collision_status"] == "pass"
+    assert qa["checks"]["strf_epoch_recording_cohorts_match"] is True
+    assert qa["checks"]["epoch_retention_accounting_disclosed"] is True
     assert qa["status"] == "pass"
+    retention = list(
+        csv.DictReader(
+            (
+                args.output_dir
+                / "source_data"
+                / "epoch_retention_accounting.csv"
+            ).open()
+        )
+    )
+    assert len(retention) == 2
+    assert all(int(row["n_events_not_retained"]) == 0 for row in retention)
+
+
+def test_publication_bundle_rejects_incomplete_epoch_cohort(
+    tmp_path: Path,
+) -> None:
+    args = build_publication_fixture(tmp_path)
+    missing = (
+        args.epochs_dir
+        / "recordings"
+        / "sub002_run1"
+        / "epoch_data.npz"
+    )
+    missing.unlink()
+
+    with pytest.raises(ValueError, match="STRF/epoch recording cohorts differ"):
+        make_nature_figures.run(args)

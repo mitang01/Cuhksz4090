@@ -415,8 +415,12 @@ python3 seeg_story_listen_v2/make_nature_figures.py --overwrite
 
 The script requires the complete individual and group STRF and epoch outputs.
 It fails on missing required models, folds, group members, feature rows, or
-inconsistent time grids; it never subsamples observations or imputes missing
-conditions. The default `nature_figures/` bundle contains:
+inconsistent time grids. It also rejects upstream `--max-recordings` runs and
+requires the individual STRF, individual epoch, and group-epoch membership
+recording cohorts to agree. It never subsamples observations or imputes missing
+conditions. Source prosody-event counts are reconciled with retained epochs so
+edge-window or non-finite-prediction exclusions remain visible. The default
+`nature_figures/` bundle contains:
 
 - `main_figure.pdf`, `main_figure.svg`, and a 600-dpi PNG;
 - panel notes and data-supported claim text;
