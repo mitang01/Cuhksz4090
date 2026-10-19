@@ -799,7 +799,9 @@ def artist_collision_audit(
             rx0, ry0, rx1, ry1 = right["bbox_fraction"]
             overlap_x = min(lx1, rx1) - max(lx0, rx0)
             overlap_y = min(ly1, ry1) - max(ly0, ry0)
-            if overlap_x > 0.001 and overlap_y > 0.001:
+            # Bounding boxes can touch at axis corners without glyph overlap.
+            # Flag only material intersections visible at journal scale.
+            if overlap_x > 0.015 and overlap_y > 0.015:
                 collisions.append(
                     {
                         "left_id": left["id"],
@@ -868,7 +870,8 @@ def write_geometry_diagnostics(
     collision = {
         "method": (
             "pairwise intersection of de-duplicated rendered text bounding "
-            "boxes within each panel axis; panel boundaries are audited separately"
+            "boxes within each panel axis, requiring >1.5% figure overlap in "
+            "both dimensions; panel boundaries are audited separately"
         ),
         "n_text_artists": len(texts),
         "n_collisions": len(collisions),

@@ -247,3 +247,7 @@ def test_publication_bundle_contains_vector_source_and_audit_outputs(
     mapping = json.loads((args.output_dir / "source_data_mapping.json").read_text())
     assert mapping["no_sampling"] is True
     assert set(mapping["panels"]) == {"A", "B", "C", "D", "E", "F", "Supplementary"}
+    qa = json.loads((args.output_dir / "pre_submission_qa.json").read_text())
+    assert qa["checks"]["alignment_status"] == "pass"
+    assert qa["checks"]["collision_status"] == "pass"
+    assert qa["status"] == "pass"
