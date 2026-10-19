@@ -752,7 +752,17 @@ def artist_collision_audit(
     texts: list[dict[str, object]] = []
     seen_geometry: set[tuple[str, tuple[float, float, float, float]]] = set()
     seen_artists: set[int] = set()
-    for index, artist in enumerate(fig.findobj(match=lambda item: hasattr(item, "get_text"))):
+    owned_artists = [
+        (axis_index, artist)
+        for axis_index, axis in enumerate(fig.axes)
+        for artist in axis.findobj(match=lambda item: hasattr(item, "get_text"))
+    ]
+    owned_artists.extend(
+        (-1, artist)
+        for artist in fig.texts
+        if hasattr(artist, "get_text")
+    )
+    for index, (axis_index, artist) in enumerate(owned_artists):
         if id(artist) in seen_artists:
             continue
         seen_artists.add(id(artist))
@@ -777,7 +787,7 @@ def artist_collision_audit(
                 "id": index,
                 "text": text,
                 "bbox_fraction": list(normalized_bbox),
-                "axes_id": id(getattr(artist, "axes", None)),
+                "axes_id": axis_index,
             }
         )
     collisions: list[dict[str, object]] = []
