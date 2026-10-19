@@ -159,9 +159,10 @@ def set_publication_style() -> None:
 
 
 def panel_label(ax: plt.Axes, label: str) -> None:
+    x, y = (-0.20, 1.25) if label == "D" else (-0.16, 1.18)
     ax.text(
-        -0.12,
-        1.16,
+        x,
+        y,
         label,
         transform=ax.transAxes,
         fontsize=11,
@@ -514,7 +515,7 @@ def plot_subject_features(
     ax.axhline(0, color="black", linewidth=0.6)
     ax.set(
         xticks=np.arange(len(features)),
-        xticklabels=[FEATURE_LABELS[feature] for feature in features],
+        xticklabels=["Mel", "Syllable", "Boundary", "Structure"],
         ylabel=r"Subject mean $\Delta r$",
         title="Unique feature contributions",
     )
@@ -641,15 +642,6 @@ def plot_subject_epochs(
         title="Observed event-related responses",
     )
     ax.legend(frameon=False, loc="upper left")
-    ax.text(
-        0.02,
-        0.02,
-        "thin lines: every available subject",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=5.7,
-    )
 
 
 def plot_source_statistics(
@@ -758,6 +750,7 @@ def artist_collision_audit(
     renderer = fig.canvas.get_renderer()
     width, height = fig.canvas.get_width_height()
     texts: list[dict[str, object]] = []
+    seen_geometry: set[tuple[str, tuple[float, float, float, float]]] = set()
     seen_artists: set[int] = set()
     for index, artist in enumerate(fig.findobj(match=lambda item: hasattr(item, "get_text"))):
         if id(artist) in seen_artists:
@@ -769,22 +762,30 @@ def artist_collision_audit(
         bbox = artist.get_window_extent(renderer=renderer)
         if bbox.width <= 0 or bbox.height <= 0:
             continue
+        normalized_bbox = (
+            float(bbox.x0 / width),
+            float(bbox.y0 / height),
+            float(bbox.x1 / width),
+            float(bbox.y1 / height),
+        )
+        geometry_key = (text, tuple(round(value, 6) for value in normalized_bbox))
+        if geometry_key in seen_geometry:
+            continue
+        seen_geometry.add(geometry_key)
         texts.append(
             {
                 "id": index,
                 "text": text,
-                "bbox_fraction": [
-                    float(bbox.x0 / width),
-                    float(bbox.y0 / height),
-                    float(bbox.x1 / width),
-                    float(bbox.y1 / height),
-                ],
+                "bbox_fraction": list(normalized_bbox),
+                "axes_id": id(getattr(artist, "axes", None)),
             }
         )
     collisions: list[dict[str, object]] = []
     for left_index, left in enumerate(texts):
         lx0, ly0, lx1, ly1 = left["bbox_fraction"]
         for right in texts[left_index + 1 :]:
+            if left["axes_id"] != right["axes_id"]:
+                continue
             rx0, ry0, rx1, ry1 = right["bbox_fraction"]
             overlap_x = min(lx1, rx1) - max(lx0, rx0)
             overlap_y = min(ly1, ry1) - max(ly0, ry0)
@@ -855,7 +856,10 @@ def write_geometry_diagnostics(
 
     texts, collisions = artist_collision_audit(fig)
     collision = {
-        "method": "pairwise intersection of rendered text bounding boxes",
+        "method": (
+            "pairwise intersection of de-duplicated rendered text bounding "
+            "boxes within each panel axis; panel boundaries are audited separately"
+        ),
         "n_text_artists": len(texts),
         "n_collisions": len(collisions),
         "collisions": collisions,

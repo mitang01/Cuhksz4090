@@ -97,7 +97,7 @@ def annotate_time_significance(
     runs = contiguous_true_runs(mask)
     # Keep marks inside the plotting area so they cannot collide with titles or
     # panel labels in compact journal layouts.
-    y = 0.965 - 0.060 * level
+    y = 0.920 - 0.055 * level
     for run_index, (start, stop) in enumerate(runs):
         kwargs = {"label": label} if run_index == 0 and label else {}
         ax.plot(
