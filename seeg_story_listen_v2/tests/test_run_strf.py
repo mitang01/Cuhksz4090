@@ -71,6 +71,23 @@ def test_make_rf_uses_l2_ridge_regularization() -> None:
     assert rf.estimator.reg_type == "ridge"
 
 
+def test_sign_flip_enumerates_small_samples_exactly() -> None:
+    values = np.ones(5)
+
+    p_value = strf.sign_flip_pvalue(values, n_permutations=7, seed=1)
+
+    assert p_value == 1 / 32
+
+
+def test_default_statistics_match_reference_style() -> None:
+    args = strf.parse_args([])
+
+    assert args.outer_folds is None
+    assert (args.tmin, args.tmax) == (-0.3, 0.3)
+    assert max(args.alphas) == 1e8
+    assert "joint_prosody_after_syl" in strf.MODEL_COMPARISONS
+
+
 def test_discover_manifest_joins_cluster_naming_conventions(tmp_path: Path) -> None:
     source = tmp_path / "source"
     processed = tmp_path / "processed"
@@ -183,7 +200,7 @@ def test_fit_recording_writes_metrics_permutations_and_figures(
         )
     args = Namespace(
         inner_folds=2,
-        outer_folds=3,
+        outer_folds=None,
         epoch_duration=2.0,
         target_sfreq=sfreq,
         tmin=0.0,
@@ -202,11 +219,13 @@ def test_fit_recording_writes_metrics_permutations_and_figures(
         csv.DictReader((result / "feature_contributions.csv").open())
     )
     comparisons = list(csv.DictReader((result / "model_comparisons.csv").open()))
-    assert len(metrics) == 3 * len(strf.MODEL_FAMILIES)
+    assert len(metrics) == 6 * len(strf.MODEL_FAMILIES)
     assert {row["feature"] for row in contributions} == set(strf.FEATURE_FAMILIES)
     assert all(int(row["n_permutations"]) == 19 for row in contributions)
     assert len(comparisons) == len(strf.MODEL_COMPARISONS)
     assert (result / "model_coefficients.npz").is_file()
+    with np.load(result / "predictions_outer_fold_0.npz") as predictions:
+        assert "stimulus_sample_indices" in predictions
     assert (
         result / "figures" / "LA1_M5_full_coefficients.png"
     ).is_file()
