@@ -347,6 +347,10 @@ Model outputs and figures use the same names and formats as the individual
 pipeline under `recordings/GROUP/`, including `GROUP_*_coefficients.png`,
 `GROUP_model_accuracy.png`, `GROUP_model_comparisons.png`,
 `GROUP_feature_contributions.png`, and held-out prediction plots.
+Subject-level model-comparison and feature-contribution figures are also
+written in PNG and editable SVG formats. Bars passing the saved primary
+correlation test carry lines and conventional `*`, `**`, or `***` marks based
+on their BH-FDR-adjusted p values.
 
 Group figures include uncertainty wherever the plotted quantity is a bar or
 line: model-accuracy bars show SEM, model-comparison and feature-contribution
@@ -395,3 +399,35 @@ inference across subjects, preserving subjects—not electrodes or the pooled
 group waveform—as the independent population units. It writes group
 time-point/cluster tables, membership counts, and subject-level confidence
 plots under `prosody_epochs_group`.
+
+All time-resolved result figures use light shading plus a line and asterisk
+above every interval that passes both the saved FDR and minimum-duration
+criteria. The annotations reproduce existing result columns and do not add a
+new statistical test.
+
+## Auditable publication figure
+
+After all four pipelines finish, build the Nature-style summary bundle:
+
+```bash
+python3 seeg_story_listen_v2/make_nature_figures.py --overwrite
+```
+
+The script requires the complete individual and group STRF and epoch outputs.
+It fails on missing required models, folds, group members, feature rows, or
+inconsistent time grids; it never subsamples observations or imputes missing
+conditions. The default `nature_figures/` bundle contains:
+
+- `main_figure.pdf`, `main_figure.svg`, and a 600-dpi PNG;
+- panel notes and data-supported claim text;
+- panel-specific source-data CSVs and `source_data_mapping.json`;
+- exclusion and missing-condition counts;
+- a panel-by-panel visual audit;
+- `alignment.json` plus an alignment diagnostic SVG;
+- `collision.json` plus a collision diagnostic PDF; and
+- `pre_submission_qa.json`.
+
+Panels expose all held-out folds, all subject feature estimates, all feature
+families, all M5 coefficient folds, and every available subject epoch
+trajectory. Error-bar definitions and inferential thresholds are stated in the
+panel notes and are taken from the existing analysis outputs.

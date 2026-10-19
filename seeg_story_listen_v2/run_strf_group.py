@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shutil
 import sys
 from collections import defaultdict
@@ -21,9 +22,14 @@ from pathlib import Path
 from typing import Sequence
 
 import mne
+import matplotlib
 import numpy as np
 
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 import run_strf as individual
+from figure_significance import annotate_bars
 
 
 DEFAULT_OUTPUT = individual.DEFAULT_PREPROCESSED / "strf_group"
@@ -430,7 +436,7 @@ def aggregate_subject_inference(
     seed: int,
     allowed_members: set[tuple[str, str]],
     expected_stimuli: set[str],
-) -> None:
+) -> list[dict[str, object]]:
     """Aggregate electrode effects within subject, then test across subjects."""
     paths = sorted(
         (individual_strf_dir / "recordings").glob(f"*/{filename}")
@@ -563,6 +569,59 @@ def aggregate_subject_inference(
         "fdr_p_value_correlation",
     )
     individual.write_csv(output_path, rows)
+    return rows
+
+
+def plot_subject_inference(
+    output_dir: Path,
+    rows: list[dict[str, object]],
+    *,
+    hypothesis_column: str,
+    filename: str,
+    title: str,
+) -> None:
+    """Plot subject-level effects with inferential marks from the saved tests."""
+    figures = output_dir / "figures"
+    figures.mkdir(parents=True, exist_ok=True)
+    values = [float(row["mean_subject_delta_correlation"]) for row in rows]
+    errors = [
+        1.96
+        * float(row["std_subject_delta_correlation"])
+        / math.sqrt(int(row["n_subjects"]))
+        for row in rows
+    ]
+    colors = [
+        "#2166ac"
+        if bool(row["fdr_p_value_correlation_significant_0.05"])
+        else "#a6a6a6"
+        for row in rows
+    ]
+    fig, ax = plt.subplots(figsize=(9, 5), layout="constrained")
+    bars = ax.bar(
+        np.arange(len(rows)),
+        values,
+        yerr=errors,
+        capsize=3,
+        color=colors,
+    )
+    annotate_bars(
+        ax,
+        bars,
+        rows,
+        p_key="fdr_p_value_correlation",
+        errors=errors,
+    )
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set(
+        xticks=np.arange(len(rows)),
+        xticklabels=[str(row[hypothesis_column]) for row in rows],
+        ylabel=r"Mean subject held-out $\Delta r$",
+        title=f"{title} (error bars: 95% CI across subjects)",
+    )
+    ax.tick_params(axis="x", rotation=25)
+    for suffix in ("png", "svg"):
+        fig.savefig(figures / f"{filename}.{suffix}", dpi=300)
+    plt.close(fig)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -699,7 +758,7 @@ def run(args: argparse.Namespace) -> int:
         (str(row["recording_id"]), str(row["channel"]))
         for row in membership_rows
     }
-    aggregate_subject_inference(
+    subject_model_rows = aggregate_subject_inference(
         args.individual_strf_dir,
         "model_comparisons.csv",
         "comparison",
@@ -709,7 +768,7 @@ def run(args: argparse.Namespace) -> int:
         allowed_members=allowed_members,
         expected_stimuli={track.stimulus_id for track in group_tracks},
     )
-    aggregate_subject_inference(
+    subject_feature_rows = aggregate_subject_inference(
         args.individual_strf_dir,
         "feature_contributions.csv",
         "feature",
@@ -718,6 +777,20 @@ def run(args: argparse.Namespace) -> int:
         seed=args.seed,
         allowed_members=allowed_members,
         expected_stimuli={track.stimulus_id for track in group_tracks},
+    )
+    plot_subject_inference(
+        args.output_dir,
+        subject_model_rows,
+        hypothesis_column="comparison",
+        filename="subject_model_comparisons",
+        title="Population model comparisons",
+    )
+    plot_subject_inference(
+        args.output_dir,
+        subject_feature_rows,
+        hypothesis_column="feature",
+        filename="subject_feature_contributions",
+        title="Population feature contributions",
     )
     print(
         f"OK GROUP: {len(group_tracks)} stimuli, "

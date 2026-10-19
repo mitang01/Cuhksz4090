@@ -19,6 +19,7 @@ import numpy as np
 
 import prosody_epoch_stats as epoch_stats
 import run_strf
+from figure_significance import annotate_time_significance
 
 
 DEFAULT_STRF = run_strf.DEFAULT_PREPROCESSED / "strf"
@@ -113,7 +114,9 @@ def epoch_accuracy_rows(
 
 
 def plot_epoch_means(
-    output_dir: Path, dataset: epoch_stats.EpochDataset
+    output_dir: Path,
+    dataset: epoch_stats.EpochDataset,
+    statistic_rows: list[dict[str, object]],
 ) -> None:
     figures = output_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
@@ -133,6 +136,26 @@ def plot_epoch_means(
                 ax.fill_between(
                     dataset.times, mean - 1.96 * sem, mean + 1.96 * sem, alpha=0.18
                 )
+            predictor = (
+                "struc_depth"
+                if filename == "structure_depth"
+                else "boundary_strength"
+            )
+            significance_rows = [
+                row
+                for row in statistic_rows
+                if row["channel"] == channel_name
+                and row["source"] == "observed"
+                and row["predictor"] == predictor
+            ]
+            annotate_time_significance(
+                ax,
+                [float(row["time_s"]) for row in significance_rows],
+                [bool(row["passes_fdr_and_cluster"]) for row in significance_rows],
+                color="#222222",
+                level=0,
+                label="FDR + duration threshold",
+            )
             ax.axvline(0, color="black", linewidth=0.8)
             ax.axhline(0, color="black", linewidth=0.6, alpha=0.5)
             ax.set(
@@ -183,10 +206,13 @@ def plot_statistics(
 ) -> None:
     figures = output_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
+    sources = sorted({str(row["source"]) for row in rows})
     for channel_name in channel_names:
-        for source in ("observed", "m2_residual"):
+        for source in sources:
             fig, ax = plt.subplots(figsize=(8, 5), layout="constrained")
-            for predictor in ("boundary_strength", "struc_depth"):
+            for predictor_index, predictor in enumerate(
+                ("boundary_strength", "struc_depth")
+            ):
                 selected = [
                     row
                     for row in rows
@@ -211,6 +237,13 @@ def plot_statistics(
                         color=line.get_color(),
                         alpha=0.22,
                     )
+                annotate_time_significance(
+                    ax,
+                    times,
+                    significant,
+                    color=line.get_color(),
+                    level=predictor_index,
+                )
             ax.axvline(0, color="black", linewidth=0.8)
             ax.set(
                 xlabel="Time from syllable offset (s)",
@@ -314,7 +347,7 @@ def analyze_recording(
     epoch_stats.write_csv(
         output_dir / "model_epoch_accuracy.csv", epoch_accuracy_rows(dataset)
     )
-    plot_epoch_means(output_dir, dataset)
+    plot_epoch_means(output_dir, dataset, timepoint_rows)
     plot_statistics(output_dir, timepoint_rows, dataset.channel_names)
 
 
