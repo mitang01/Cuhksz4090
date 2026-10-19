@@ -21,6 +21,7 @@ import numpy as np
 import preprocess_seeg as prep
 import prosody_epoch_stats as epoch_stats
 import run_strf
+from figure_significance import annotate_time_significance
 
 
 DEFAULT_INDIVIDUAL = run_strf.DEFAULT_PREPROCESSED / "prosody_epochs"
@@ -202,7 +203,9 @@ def plot_group_statistics(
     sources = sorted({str(row["source"]) for row in rows})
     for source in sources:
         fig, ax = plt.subplots(figsize=(8, 5), layout="constrained")
-        for predictor in ("boundary_strength", "struc_depth"):
+        for predictor_index, predictor in enumerate(
+            ("boundary_strength", "struc_depth")
+        ):
             selected = [
                 row
                 for row in rows
@@ -225,6 +228,13 @@ def plot_group_statistics(
                     color=line.get_color(),
                     alpha=0.22,
                 )
+            annotate_time_significance(
+                ax,
+                times,
+                significant,
+                color=line.get_color(),
+                level=predictor_index,
+            )
         ax.axvline(0, color="black", linewidth=0.8)
         ax.set(
             xlabel="Time from syllable offset (s)",
@@ -239,6 +249,7 @@ def plot_group_statistics(
 def plot_subject_waveforms(
     output_dir: Path,
     by_subject: dict[str, list[epoch_stats.EpochDataset]],
+    statistic_rows: list[dict[str, object]],
 ) -> None:
     figures = output_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
@@ -270,6 +281,20 @@ def plot_subject_waveforms(
             sem = waves.std(axis=0, ddof=1) / math.sqrt(len(waves))
             ax.plot(times, mean, label=f"{predictor_name} {level:g}")
             ax.fill_between(times, mean - 1.96 * sem, mean + 1.96 * sem, alpha=0.18)
+        significance_rows = [
+            row
+            for row in statistic_rows
+            if row["source"] == "observed"
+            and row["predictor"] == predictor_name
+        ]
+        annotate_time_significance(
+            ax,
+            [float(row["time_s"]) for row in significance_rows],
+            [bool(row["passes_fdr_and_cluster"]) for row in significance_rows],
+            color="#222222",
+            level=0,
+            label="FDR + duration threshold",
+        )
         ax.axvline(0, color="black", linewidth=0.8)
         ax.set(
             xlabel="Time from syllable offset (s)",
@@ -348,7 +373,7 @@ def run(args: argparse.Namespace) -> int:
     ]
     epoch_stats.write_csv(args.output_dir / "group_membership.csv", membership_rows)
     plot_group_statistics(args.output_dir, rows)
-    plot_subject_waveforms(args.output_dir, by_subject)
+    plot_subject_waveforms(args.output_dir, by_subject, rows)
     configuration = {
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()

@@ -34,6 +34,7 @@ from scipy import signal
 from scipy.io import wavfile
 
 import preprocess_seeg as prep
+from figure_significance import annotate_bars
 
 
 DEFAULT_INPUT = Path("/share/workspace3/ieeg/seeg/story_listen_v2")
@@ -1383,12 +1384,19 @@ def create_figures(
             "#2a9d8f" if row["fdr_p_value_significant_0.05"] else "#9aa0a6"
             for row in channel_comparisons
         ]
-        ax.bar(
+        bars = ax.bar(
             np.arange(len(values)),
             values,
             color=colors,
             yerr=comparison_errors,
             capsize=4 if comparison_errors is not None else 0,
+        )
+        annotate_bars(
+            ax,
+            bars,
+            channel_comparisons,
+            p_key="fdr_p_value_correlation",
+            errors=comparison_errors,
         )
         ax.axhline(0, color="black", linewidth=0.8)
         ax.set(
@@ -1433,16 +1441,13 @@ def create_figures(
             yerr=contribution_errors,
             capsize=4 if contribution_errors is not None else 0,
         )
-        for bar, row in zip(bars, channel_contributions):
-            if row["fdr_p_value_significant_0.05"]:
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height(),
-                    "*",
-                    ha="center",
-                    va="bottom",
-                    fontsize=14,
-                )
+        annotate_bars(
+            ax,
+            bars,
+            channel_contributions,
+            p_key="fdr_p_value_correlation",
+            errors=contribution_errors,
+        )
         ax.axhline(0, color="black", linewidth=0.8)
         ax.set(
             xticks=np.arange(len(values)),
