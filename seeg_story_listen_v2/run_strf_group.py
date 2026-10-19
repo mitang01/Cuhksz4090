@@ -21,12 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-import mne
 import matplotlib
-import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import mne
+import numpy as np
 
 import run_strf as individual
 from figure_significance import annotate_bars
