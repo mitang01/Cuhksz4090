@@ -409,7 +409,18 @@ def load_subject_waveforms(
 
 def individual_strf_recordings(strf_dir: Path) -> set[str]:
     recordings: set[str] = set()
-    for path in sorted((strf_dir / "recordings").glob("*/model_metrics.csv")):
+    recording_dirs = sorted(
+        path for path in (strf_dir / "recordings").iterdir() if path.is_dir()
+    )
+    missing_metrics = [
+        path for path in recording_dirs if not (path / "model_metrics.csv").is_file()
+    ]
+    if missing_metrics:
+        raise ValueError(
+            "partial individual STRF recording outputs lack model_metrics.csv: "
+            f"{missing_metrics[:10]}"
+        )
+    for path in (directory / "model_metrics.csv" for directory in recording_dirs):
         ids = {row["recording_id"] for row in read_csv_required(path)}
         if len(ids) != 1:
             raise ValueError(f"ambiguous recording IDs in {path}: {sorted(ids)}")
@@ -1115,6 +1126,19 @@ def run(args: argparse.Namespace) -> int:
         args.epochs_group_dir / "group_timepoint_statistics.csv"
     )
     epoch_paths = sorted((args.epochs_dir / "recordings").glob("*/epoch_data.npz"))
+    epoch_recording_dirs = sorted(
+        path
+        for path in (args.epochs_dir / "recordings").iterdir()
+        if path.is_dir()
+    )
+    partial_epoch_dirs = [
+        path for path in epoch_recording_dirs if not (path / "epoch_data.npz").is_file()
+    ]
+    if partial_epoch_dirs:
+        raise ValueError(
+            "partial individual epoch outputs lack epoch_data.npz: "
+            f"{partial_epoch_dirs[:10]}"
+        )
     times, waveform_rows, missing_conditions, epoch_accounting = (
         load_subject_waveforms(epoch_paths, strf_dir=args.strf_dir)
     )
