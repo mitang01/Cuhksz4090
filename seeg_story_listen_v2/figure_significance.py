@@ -95,7 +95,9 @@ def annotate_time_significance(
     if time_values.ndim != 1 or len(time_values) != len(mask):
         raise ValueError("times and significance mask must be matching vectors")
     runs = contiguous_true_runs(mask)
-    y = 1.025 + 0.055 * level
+    # Keep marks inside the plotting area so they cannot collide with titles or
+    # panel labels in compact journal layouts.
+    y = 0.965 - 0.060 * level
     for run_index, (start, stop) in enumerate(runs):
         kwargs = {"label": label} if run_index == 0 and label else {}
         ax.plot(

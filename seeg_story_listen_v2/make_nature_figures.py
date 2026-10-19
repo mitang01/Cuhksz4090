@@ -160,8 +160,8 @@ def set_publication_style() -> None:
 
 def panel_label(ax: plt.Axes, label: str) -> None:
     ax.text(
-        -0.16,
-        1.10,
+        -0.12,
+        1.16,
         label,
         transform=ax.transAxes,
         fontsize=11,
@@ -518,16 +518,9 @@ def plot_subject_features(
         ylabel=r"Subject mean $\Delta r$",
         title="Unique feature contributions",
     )
-    ax.tick_params(axis="x", rotation=25)
-    ax.text(
-        0.02,
-        0.98,
-        "bars: mean; error: 95% CI\npoints: subjects; * BH-FDR $q<0.05$",
-        transform=ax.transAxes,
-        ha="left",
-        va="top",
-        fontsize=5.7,
-    )
+    ax.tick_params(axis="x", rotation=32, labelsize=5.5)
+    for tick in ax.get_xticklabels():
+        tick.set_ha("right")
     return marks
 
 
@@ -647,7 +640,7 @@ def plot_subject_epochs(
         ylabel="High-gamma response (z)",
         title="Observed event-related responses",
     )
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, loc="upper left")
     ax.text(
         0.02,
         0.02,
@@ -717,16 +710,7 @@ def plot_source_statistics(
         ylabel="Mean subject F statistic",
         title=title,
     )
-    ax.legend(frameon=False)
-    ax.text(
-        0.02,
-        0.98,
-        "shading/lines: BH-FDR $q<0.01$ + ≥4 samples",
-        transform=ax.transAxes,
-        ha="left",
-        va="top",
-        fontsize=5.7,
-    )
+    ax.legend(frameon=False, loc="lower right")
     return marks
 
 
@@ -774,7 +758,11 @@ def artist_collision_audit(
     renderer = fig.canvas.get_renderer()
     width, height = fig.canvas.get_width_height()
     texts: list[dict[str, object]] = []
+    seen_artists: set[int] = set()
     for index, artist in enumerate(fig.findobj(match=lambda item: hasattr(item, "get_text"))):
+        if id(artist) in seen_artists:
+            continue
+        seen_artists.add(id(artist))
         text = str(artist.get_text()).strip()
         if not text or not artist.get_visible():
             continue
@@ -1016,7 +1004,7 @@ def run(args: argparse.Namespace) -> int:
     times, waveform_rows, missing_conditions = load_subject_waveforms(epoch_paths)
 
     set_publication_style()
-    figure = plt.figure(figsize=(180 / 25.4, 145 / 25.4), layout="constrained")
+    figure = plt.figure(figsize=(180 / 25.4, 165 / 25.4), layout="constrained")
     grid = figure.add_gridspec(2, 3, height_ratios=(0.92, 1.08))
     axes = {
         "A": figure.add_subplot(grid[0, 0]),
