@@ -250,6 +250,13 @@ def build_publication_fixture(root: Path) -> Namespace:
     write_json(strf_dir / "analysis_config.json", {"max_recordings": None})
     write_json(group_dir / "analysis_config.json", {"max_recordings": None})
     write_json(epochs_dir / "analysis_config.json", {"max_recordings": None})
+    write_json(
+        epochs_dir / epoch_stats.COMPLETION_FILENAME,
+        {
+            "status": "complete",
+            "recording_ids": ["sub001/run1", "sub002/run1"],
+        },
+    )
     write_json(epochs_group_dir / "analysis_config.json", {})
     return Namespace(
         strf_dir=strf_dir,

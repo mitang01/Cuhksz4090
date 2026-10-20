@@ -447,6 +447,17 @@ group waveform—as the independent population units. It writes group
 time-point/cluster tables, membership counts, and subject-level confidence
 plots under `prosody_epochs_group`.
 
+Do not run the individual and group epoch scripts concurrently. They use a
+shared/exclusive sibling lock so a group reader cannot overlap an individual
+`--overwrite` on NFS. The individual run publishes
+`prosody_epochs/analysis_complete.json` only after every recording succeeds;
+the group run refuses missing or mismatched completion manifests.
+
+During group inference, `prosody_epochs_group/progress.json` reports the loaded
+subject, recording, story, epoch, and electrode counts together with the
+current source/predictor and completed test count. The log also reports every
+10% of the permutations for each of the 14 source-by-predictor tests.
+
 All time-resolved result figures use light shading plus a line and asterisk
 above every interval that passes both the saved FDR and minimum-duration
 criteria. The annotations reproduce existing result columns and do not add a
