@@ -134,6 +134,7 @@ def group_test(
     observed = np.mean(subject_statistics, axis=0)
     effect = np.mean(subject_effects, axis=0)
     exceedances = np.ones(len(times), dtype=int)
+    progress_interval = max(1, args.n_permutations // 10)
     for permutation in range(args.n_permutations):
         subject_null: list[np.ndarray] = []
         for subject, datasets in by_subject.items():
@@ -156,6 +157,14 @@ def group_test(
             subject_null.append(statistic)
         null = np.mean(subject_null, axis=0)
         exceedances += null >= observed
+        completed = permutation + 1
+        if completed % progress_interval == 0 or completed == args.n_permutations:
+            print(
+                f"  permutations {completed}/{args.n_permutations} "
+                f"source={source_name} predictor={predictor_name}",
+                file=sys.stderr,
+                flush=True,
+            )
     pvalues = exceedances / (args.n_permutations + 1.0)
     retained, adjusted, clusters = epoch_stats.fdr_clusters(
         times,
@@ -309,6 +318,33 @@ def plot_subject_waveforms(
 def run(args: argparse.Namespace) -> int:
     args.individual_epoch_dir = args.individual_epoch_dir.expanduser().resolve()
     args.output_dir = args.output_dir.expanduser().resolve()
+    with epoch_stats.analysis_lock(
+        args.individual_epoch_dir,
+        exclusive=False,
+        purpose="group epoch analysis",
+    ):
+        with epoch_stats.analysis_lock(
+            args.output_dir,
+            exclusive=True,
+            purpose="group epoch output",
+        ):
+            return run_locked(args)
+
+
+def run_locked(args: argparse.Namespace) -> int:
+    completion_path = (
+        args.individual_epoch_dir / epoch_stats.COMPLETION_FILENAME
+    )
+    if not completion_path.is_file():
+        raise ValueError(
+            "individual epoch analysis is incomplete: missing "
+            f"{completion_path}; wait for run_prosody_epochs.py to finish"
+        )
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    if completion.get("status") != "complete":
+        raise ValueError(
+            f"individual epoch completion marker is not complete: {completion_path}"
+        )
     paths = sorted(
         (args.individual_epoch_dir / "recordings").glob("*/epoch_data.npz")
     )
@@ -325,6 +361,18 @@ def run(args: argparse.Namespace) -> int:
     for path in paths:
         dataset = epoch_stats.load_epoch_dataset(path)
         by_subject[subject_id(dataset.recording_id)].append(dataset)
+    loaded_recording_ids = {
+        dataset.recording_id
+        for datasets in by_subject.values()
+        for dataset in datasets
+    }
+    expected_recording_ids = set(completion.get("recording_ids", []))
+    if loaded_recording_ids != expected_recording_ids:
+        raise ValueError(
+            "individual epoch files differ from the completed manifest: "
+            f"missing={sorted(expected_recording_ids - loaded_recording_ids)}, "
+            f"unexpected={sorted(loaded_recording_ids - expected_recording_ids)}"
+        )
     if len(by_subject) < 2:
         raise ValueError("group inference requires at least two subjects")
     reference = next(iter(by_subject.values()))[0]
@@ -345,8 +393,60 @@ def run(args: argparse.Namespace) -> int:
         "m2_residual",
         *(f"prediction_{model}" for model in reference.model_names),
     ]
+    stories = {
+        str(stimulus)
+        for datasets in by_subject.values()
+        for dataset in datasets
+        for stimulus in dataset.stimulus_ids
+    }
+    total_epochs = sum(
+        len(dataset.observed)
+        for datasets in by_subject.values()
+        for dataset in datasets
+    )
+    total_electrodes = sum(
+        len(dataset.channel_names)
+        for datasets in by_subject.values()
+        for dataset in datasets
+    )
+    total_tests = len(sources) * 2
+    progress_path = args.output_dir / "progress.json"
+    progress = {
+        "status": "running",
+        "n_subjects": len(by_subject),
+        "n_recordings": len(loaded_recording_ids),
+        "n_stories": len(stories),
+        "n_epochs": total_epochs,
+        "n_electrodes": total_electrodes,
+        "total_tests": total_tests,
+        "completed_tests": 0,
+        "current_source": None,
+        "current_predictor": None,
+    }
+    epoch_stats.write_json_atomic(progress_path, progress)
+    print(
+        "Loaded group epoch cohort: "
+        f"{len(by_subject)} subjects, {len(loaded_recording_ids)} recordings, "
+        f"{len(stories)} stories, {total_epochs} epochs, "
+        f"{total_electrodes} recording-electrodes; {total_tests} tests",
+        flush=True,
+    )
+    completed_tests = 0
     for source in sources:
         for predictor in ("boundary_strength", "struc_depth"):
+            progress.update(
+                {
+                    "current_source": source,
+                    "current_predictor": predictor,
+                    "completed_tests": completed_tests,
+                }
+            )
+            epoch_stats.write_json_atomic(progress_path, progress)
+            print(
+                f"START test {completed_tests + 1}/{total_tests}: "
+                f"source={source}, predictor={predictor}",
+                flush=True,
+            )
             result_rows, result_clusters = group_test(
                 by_subject,
                 source_name=source,
@@ -357,6 +457,14 @@ def run(args: argparse.Namespace) -> int:
             )
             rows.extend(result_rows)
             clusters.extend(result_clusters)
+            completed_tests += 1
+            progress["completed_tests"] = completed_tests
+            epoch_stats.write_json_atomic(progress_path, progress)
+            print(
+                f"OK test {completed_tests}/{total_tests}: "
+                f"source={source}, predictor={predictor}",
+                flush=True,
+            )
     epoch_stats.write_csv(args.output_dir / "group_timepoint_statistics.csv", rows)
     epoch_stats.write_csv(
         args.output_dir / "group_significant_clusters.csv", clusters
@@ -389,6 +497,15 @@ def run(args: argparse.Namespace) -> int:
     (args.output_dir / "analysis_config.json").write_text(
         json.dumps(configuration, indent=2), encoding="utf-8"
     )
+    progress.update(
+        {
+            "status": "complete",
+            "completed_tests": total_tests,
+            "current_source": None,
+            "current_predictor": None,
+        }
+    )
+    epoch_stats.write_json_atomic(progress_path, progress)
     print(f"OK group epoch inference: {len(by_subject)} subjects")
     return 0
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -144,16 +146,26 @@ def test_extract_epochs_uses_held_out_sample_indices(tmp_path: Path) -> None:
 
 def test_individual_and_group_epoch_outputs(tmp_path: Path) -> None:
     individual_root = tmp_path / "individual"
+    recording_ids: list[str] = []
     for subject_index in range(2):
         dataset = make_epoch_dataset(
             f"sub{subject_index + 1:03d}/run1", seed=subject_index + 3
         )
+        recording_ids.append(dataset.recording_id)
         output = (
             individual_root
             / "recordings"
             / f"sub{subject_index + 1:03d}_run1"
         )
         stats.save_epoch_dataset(output / "epoch_data.npz", dataset)
+    stats.write_json_atomic(
+        individual_root / stats.COMPLETION_FILENAME,
+        {
+            "status": "complete",
+            "recording_ids": recording_ids,
+            "n_recordings": len(recording_ids),
+        },
+    )
     args = Namespace(
         analysis_start=-0.3,
         analysis_end=0.3,
@@ -187,3 +199,48 @@ def test_individual_and_group_epoch_outputs(tmp_path: Path) -> None:
     assert (
         args.output_dir / "figures" / "group_observed_separability.png"
     ).is_file()
+    progress = json.loads(
+        (args.output_dir / "progress.json").read_text(encoding="utf-8")
+    )
+    assert progress["status"] == "complete"
+    assert progress["n_subjects"] == 2
+    assert progress["n_stories"] == 4
+    assert progress["completed_tests"] == 14
+
+
+def test_group_epoch_analysis_rejects_active_individual_writer(
+    tmp_path: Path,
+) -> None:
+    individual_root = tmp_path / "individual"
+    individual_root.mkdir()
+    args = Namespace(
+        analysis_start=-0.3,
+        analysis_end=0.3,
+        fdr_q=0.05,
+        minimum_cluster_samples=2,
+        n_permutations=2,
+        seed=7,
+        individual_epoch_dir=individual_root,
+        output_dir=tmp_path / "group",
+        overwrite=False,
+    )
+
+    with stats.analysis_lock(
+        individual_root,
+        exclusive=True,
+        purpose="test writer",
+    ):
+        with pytest.raises(ValueError, match="incompatible epoch process"):
+            run_prosody_epochs_group.run(args)
+
+
+def test_epoch_dataset_save_is_atomic(tmp_path: Path) -> None:
+    path = tmp_path / "epoch_data.npz"
+    dataset = make_epoch_dataset("sub001/run1")
+
+    stats.save_epoch_dataset(path, dataset)
+
+    assert path.is_file()
+    assert not list(tmp_path.glob(".*.tmp-*"))
+    loaded = stats.load_epoch_dataset(path)
+    np.testing.assert_array_equal(loaded.observed, dataset.observed)

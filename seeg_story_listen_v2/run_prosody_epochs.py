@@ -355,6 +355,15 @@ def run(args: argparse.Namespace) -> int:
     args.strf_dir = args.strf_dir.expanduser().resolve()
     args.output_dir = args.output_dir.expanduser().resolve()
     validate_args(args)
+    with epoch_stats.analysis_lock(
+        args.output_dir,
+        exclusive=True,
+        purpose="individual epoch analysis",
+    ):
+        return run_locked(args)
+
+
+def run_locked(args: argparse.Namespace) -> int:
     if args.output_dir.exists() and any(args.output_dir.iterdir()) and not args.overwrite:
         raise FileExistsError(
             f"output directory is not empty (use --overwrite): {args.output_dir}"
@@ -368,6 +377,10 @@ def run(args: argparse.Namespace) -> int:
         recording_dirs = recording_dirs[: args.max_recordings]
     if not recording_dirs:
         raise FileNotFoundError("no STRF recording outputs were found")
+    print(
+        f"Starting individual epoch analysis: {len(recording_dirs)} recordings",
+        flush=True,
+    )
     configuration = {
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
@@ -383,14 +396,48 @@ def run(args: argparse.Namespace) -> int:
             analyze_recording(
                 args.strf_dir, recording_dir.name, args.output_dir, args
             )
-            print(f"OK {recording_dir.name}")
+            print(f"OK {recording_dir.name}", flush=True)
         except Exception as error:
             failures += 1
             print(f"ERROR {recording_dir.name}: {error}", file=sys.stderr)
+    succeeded = len(recording_dirs) - failures
     print(
-        f"Finished epoch separability: {len(recording_dirs) - failures} succeeded, "
-        f"{failures} failed"
+        f"Finished epoch separability: {succeeded} succeeded, {failures} failed",
+        flush=True,
     )
+    if failures == 0:
+        datasets = [
+            epoch_stats.load_epoch_dataset(path)
+            for path in sorted(
+                (args.output_dir / "recordings").glob("*/epoch_data.npz")
+            )
+        ]
+        epoch_stats.write_json_atomic(
+            args.output_dir / epoch_stats.COMPLETION_FILENAME,
+            {
+                "status": "complete",
+                "n_recordings": len(datasets),
+                "n_subjects": len(
+                    {
+                        dataset.recording_id.split("/")[0]
+                        for dataset in datasets
+                    }
+                ),
+                "n_epochs": int(
+                    sum(len(dataset.observed) for dataset in datasets)
+                ),
+                "n_stories": len(
+                    {
+                        str(stimulus)
+                        for dataset in datasets
+                        for stimulus in dataset.stimulus_ids
+                    }
+                ),
+                "recording_ids": sorted(
+                    dataset.recording_id for dataset in datasets
+                ),
+            },
+        )
     return 1 if failures else 0
 
 
