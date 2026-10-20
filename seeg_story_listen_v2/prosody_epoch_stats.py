@@ -3,15 +3,63 @@
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import itertools
+import json
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Iterator, Sequence
 
 import numpy as np
 
 import preprocess_seeg as prep
+
+
+COMPLETION_FILENAME = "analysis_complete.json"
+
+
+@contextmanager
+def analysis_lock(
+    result_dir: Path,
+    *,
+    exclusive: bool,
+    purpose: str,
+) -> Iterator[Path]:
+    """Prevent readers and destructive writers from overlapping on NFS."""
+    lock_path = result_dir.parent / f".{result_dir.name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as stream:
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        try:
+            fcntl.flock(stream.fileno(), operation | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError(
+                f"cannot start {purpose}: another incompatible epoch process "
+                "is active; "
+                f"wait for it to finish ({lock_path})"
+            ) from error
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    """Write JSON completely before atomically publishing its final name."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @dataclass
@@ -214,20 +262,28 @@ def extract_recording_epochs(
 
 def save_epoch_dataset(path: Path, dataset: EpochDataset) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        recording_id=dataset.recording_id,
-        channel_names=np.asarray(dataset.channel_names),
-        times=dataset.times,
-        observed=dataset.observed,
-        predictions=dataset.predictions,
-        model_names=np.asarray(dataset.model_names),
-        residual_m2=dataset.residual_m2,
-        boundary_strength=dataset.boundary_strength,
-        struc_depth=dataset.struc_depth,
-        stimulus_ids=dataset.stimulus_ids,
-        baseline_correction="none",
-    )
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("wb") as stream:
+            np.savez_compressed(
+                stream,
+                recording_id=dataset.recording_id,
+                channel_names=np.asarray(dataset.channel_names),
+                times=dataset.times,
+                observed=dataset.observed,
+                predictions=dataset.predictions,
+                model_names=np.asarray(dataset.model_names),
+                residual_m2=dataset.residual_m2,
+                boundary_strength=dataset.boundary_strength,
+                struc_depth=dataset.struc_depth,
+                stimulus_ids=dataset.stimulus_ids,
+                baseline_correction="none",
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_epoch_dataset(path: Path) -> EpochDataset:

@@ -1107,6 +1107,11 @@ def run(args: argparse.Namespace) -> int:
             ("group epochs", args.epochs_group_dir / "analysis_config.json"),
         )
     )
+    epoch_completion = read_json_required(
+        args.epochs_dir / epoch_stats.COMPLETION_FILENAME
+    )
+    if epoch_completion.get("status") != "complete":
+        raise ValueError("individual epoch completion marker is not complete")
     group_recording = args.strf_group_dir / "recordings" / "GROUP"
     metrics = read_csv_required(group_recording / "model_metrics.csv")
     models, folds = validate_model_metrics(metrics)
@@ -1149,6 +1154,13 @@ def run(args: argparse.Namespace) -> int:
             "individual STRF/epoch recording cohorts differ: "
             f"missing_epochs={sorted(strf_recordings - epoch_recordings)}, "
             f"unexpected_epochs={sorted(epoch_recordings - strf_recordings)}"
+        )
+    completed_recordings = set(epoch_completion.get("recording_ids", []))
+    if completed_recordings != epoch_recordings:
+        raise ValueError(
+            "individual epoch completion marker differs from epoch files: "
+            f"missing={sorted(epoch_recordings - completed_recordings)}, "
+            f"unexpected={sorted(completed_recordings - epoch_recordings)}"
         )
     epoch_membership = read_csv_required(
         args.epochs_group_dir / "group_membership.csv"
@@ -1467,6 +1479,9 @@ def run(args: argparse.Namespace) -> int:
                 membership_recordings == epoch_recordings
             ),
             "epoch_retention_accounting_disclosed": True,
+            "individual_epoch_completion_manifest_matches": (
+                completed_recordings == epoch_recordings
+            ),
             "missing_conditions_disclosed": True,
             "significance_marks_match_source_tables": True,
             "alignment_status": alignment["status"],
