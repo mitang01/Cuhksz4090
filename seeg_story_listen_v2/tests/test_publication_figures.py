@@ -17,6 +17,7 @@ from matplotlib.ticker import ScalarFormatter
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import make_nature_figures
+import make_nature_figures_subfigure
 import prosody_epoch_stats as epoch_stats
 import run_strf
 from figure_significance import (
@@ -446,3 +447,43 @@ def test_publication_bundle_rejects_incomplete_epoch_cohort(
 
     with pytest.raises(ValueError, match="partial individual epoch outputs"):
         make_nature_figures.run(args)
+
+
+def test_standalone_renderer_writes_each_panel_with_explanation(
+    tmp_path: Path,
+) -> None:
+    args = build_publication_fixture(tmp_path)
+    args.output_dir = tmp_path / "nature_subfigures"
+
+    assert make_nature_figures_subfigure.run(args) == 0
+
+    pngs = sorted(args.output_dir.glob("*.png"))
+    explanations = sorted(
+        path
+        for path in args.output_dir.glob("*.md")
+        if path.name != "README.md"
+    )
+    assert len(pngs) == 10
+    assert len(explanations) == 10
+    assert not list(args.output_dir.glob("main_figure*"))
+    for png in pngs:
+        assert png.stat().st_size > 0
+        assert png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        note = png.with_suffix(".md")
+        text = note.read_text(encoding="utf-8")
+        assert f"]({png.name})" in text
+        assert "## What is shown" in text
+        assert "## Statistical annotation" in text
+        assert "## Source outputs" in text
+    manifest = json.loads(
+        (args.output_dir / "figure_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["no_composite_panels"] is True
+    assert manifest["no_sampling_or_imputation"] is True
+    assert manifest["status"] == "pass"
+    assert len(manifest["figures"]) == 10
+    assert all(
+        not audit["overlaps_plotting_area"]
+        for figure in manifest["figures"].values()
+        for audit in figure["legend_audit"]
+    )
