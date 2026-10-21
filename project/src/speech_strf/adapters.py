@@ -11,7 +11,12 @@ import h5py
 import numpy as np
 
 from .alignments import Interval
-from .model_registry import HubertAdapter, ModelSpec, RegistryEntry
+from .model_registry import (
+    HubertAdapter,
+    ModelSpec,
+    RegistryEntry,
+    validate_local_checkpoint_path,
+)
 from .timebase import make_time_grid, resample_continuous
 
 
@@ -297,6 +302,7 @@ class FeatureSpeechEncoderAdapter(ModelAdapter):
         import torch
         import transformers
 
+        validate_local_checkpoint_path(self.entry.model_id)
         self.processor = transformers.AutoFeatureExtractor.from_pretrained(
             self.entry.model_id,
             revision=self.entry.revision,
@@ -541,6 +547,7 @@ class BertTextAdapter(ModelAdapter):
         import torch
         import transformers
 
+        validate_local_checkpoint_path(self.entry.model_id)
         self.processor = transformers.AutoTokenizer.from_pretrained(
             self.entry.model_id,
             revision=self.entry.revision,
