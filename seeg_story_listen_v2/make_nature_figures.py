@@ -15,6 +15,7 @@ import json
 import math
 import re
 import sys
+import textwrap
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Rectangle
+from matplotlib.ticker import ScalarFormatter
 import numpy as np
 
 import preprocess_seeg as prep
@@ -184,10 +186,9 @@ def set_publication_style() -> None:
 
 
 def panel_label(ax: plt.Axes, label: str) -> None:
-    x, y = (-0.20, 1.25) if label == "D" else (-0.16, 1.18)
     ax.text(
-        x,
-        y,
+        -0.18,
+        1.20,
         label,
         transform=ax.transAxes,
         fontsize=11,
@@ -195,6 +196,25 @@ def panel_label(ax: plt.Axes, label: str) -> None:
         ha="left",
         va="top",
     )
+
+
+def scientific_axes(
+    ax: plt.Axes,
+    *,
+    x: bool = True,
+    y: bool = True,
+) -> None:
+    """Use math-text scientific notation on requested numeric axes."""
+    if x:
+        formatter = ScalarFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits((0, 0))
+        ax.xaxis.set_major_formatter(formatter)
+    if y:
+        formatter = ScalarFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits((0, 0))
+        ax.yaxis.set_major_formatter(formatter)
 
 
 def validate_model_metrics(
@@ -320,9 +340,11 @@ def load_subject_waveforms(
     list[dict[str, object]],
     list[dict[str, object]],
 ]:
-    by_subject_level: dict[tuple[str, float], list[np.ndarray]] = defaultdict(list)
+    by_subject_level: dict[
+        tuple[str, str, float], list[np.ndarray]
+    ] = defaultdict(list)
     subjects: set[str] = set()
-    levels: set[float] = set()
+    levels: dict[str, set[float]] = defaultdict(set)
     reference_times: np.ndarray | None = None
     epoch_accounting: list[dict[str, object]] = []
     for path in epoch_paths:
@@ -375,23 +397,38 @@ def load_subject_waveforms(
                 ),
             }
         )
-        for level in np.unique(dataset.struc_depth):
-            levels.add(float(level))
-            mask = dataset.struc_depth == level
-            if not np.any(mask):
-                raise AssertionError("unreachable empty structure-depth mask")
-            by_subject_level[(subject, float(level))].append(
-                dataset.observed[mask].mean(axis=(0, 2))
-            )
+        predictor_levels = {
+            "struc_depth": np.asarray(dataset.struc_depth, dtype=float),
+            "boundary_strength": (
+                epoch_stats.quantile_bins(dataset.boundary_strength) + 1
+            ).astype(float),
+        }
+        for predictor, labels in predictor_levels.items():
+            for level in np.unique(labels):
+                levels[predictor].add(float(level))
+                mask = labels == level
+                if not np.any(mask):
+                    raise AssertionError("unreachable empty prosody-level mask")
+                by_subject_level[(subject, predictor, float(level))].append(
+                    dataset.observed[mask].mean(axis=(0, 2))
+                )
     if reference_times is None:
         raise ValueError("no individual epoch datasets were found")
     rows: list[dict[str, object]] = []
-    for (subject, level), recording_waves in sorted(by_subject_level.items()):
+    for (subject, predictor, level), recording_waves in sorted(
+        by_subject_level.items()
+    ):
         wave = np.mean(recording_waves, axis=0)
         rows.extend(
             {
                 "subject": subject,
-                "structure_depth": level,
+                "predictor": predictor,
+                "level": level,
+                "level_label": (
+                    f"Depth {level:g}"
+                    if predictor == "struc_depth"
+                    else f"Boundary quartile {level:g}"
+                ),
                 "time_s": float(time),
                 "mean_observed_high_gamma_z": float(value),
                 "n_recordings": len(recording_waves),
@@ -399,10 +436,11 @@ def load_subject_waveforms(
             for time, value in zip(reference_times, wave)
         )
     missing = [
-        {"subject": subject, "structure_depth": level}
+        {"subject": subject, "predictor": predictor, "level": level}
         for subject in sorted(subjects)
-        for level in sorted(levels)
-        if (subject, level) not in by_subject_level
+        for predictor, predictor_levels in sorted(levels.items())
+        for level in sorted(predictor_levels)
+        if (subject, predictor, level) not in by_subject_level
     ]
     return reference_times, rows, missing, epoch_accounting
 
@@ -430,8 +468,7 @@ def individual_strf_recordings(strf_dir: Path) -> set[str]:
     return recordings
 
 
-def plot_cohort(
-    ax: plt.Axes,
+def cohort_counts(
     inclusion: list[dict[str, str]],
     membership: list[dict[str, str]],
     excluded: list[dict[str, str]],
@@ -453,6 +490,16 @@ def plot_cohort(
         "responsive_non_misc_electrodes": len(electrodes),
         "misc_channels_excluded": len(misc),
     }
+    return counts
+
+
+def plot_cohort(
+    ax: plt.Axes,
+    inclusion: list[dict[str, str]],
+    membership: list[dict[str, str]],
+    excluded: list[dict[str, str]],
+) -> dict[str, int]:
+    counts = cohort_counts(inclusion, membership, excluded)
     ax.axis("off")
     labels = [
         ("Recordings discovered", counts["recordings_discovered"]),
@@ -560,6 +607,7 @@ def plot_group_accuracy(
         va="top",
         fontsize=6,
     )
+    scientific_axes(ax, x=False)
     return source_rows
 
 
@@ -616,13 +664,12 @@ def plot_subject_features(
     ax.axhline(0, color="black", linewidth=0.6)
     ax.set(
         xticks=np.arange(len(features)),
-        xticklabels=["Mel", "Syllable", "Boundary", "Structure"],
+        xticklabels=["Mel", "Syll.", "Bound.", "Struct."],
         ylabel=r"Subject mean $\Delta r$",
-        title="Unique feature contributions",
+        title="Unique feature effects",
     )
-    ax.tick_params(axis="x", rotation=32, labelsize=5.5)
-    for tick in ax.get_xticklabels():
-        tick.set_ha("right")
+    ax.tick_params(axis="x", labelsize=5.5)
+    scientific_axes(ax, x=False)
     return marks
 
 
@@ -630,6 +677,9 @@ def plot_coefficients(
     figure: plt.Figure,
     subplot_spec,
     coefficient_path: Path,
+    *,
+    channel_name: str = "GROUP",
+    title: str = "Full-model STRF coefficients",
 ) -> tuple[list[plt.Axes], list[dict[str, object]]]:
     if not coefficient_path.is_file():
         raise FileNotFoundError(f"required coefficients do not exist: {coefficient_path}")
@@ -639,12 +689,21 @@ def plot_coefficients(
         coefficients = np.asarray(data["M5_full"], dtype=float)
         features = data["feature_names"].astype(str).tolist()
         lags = np.asarray(data["lags_s"], dtype=float)
-    if coefficients.ndim != 4 or coefficients.shape[1] != 1:
+        channel_names = data["channel_names"].astype(str).tolist()
+    if coefficients.ndim != 4:
         raise ValueError(f"unexpected GROUP coefficient shape: {coefficients.shape}")
+    if channel_name not in channel_names:
+        raise ValueError(
+            f"coefficient channel {channel_name!r} not found in {coefficient_path}"
+        )
+    channel_index = channel_names.index(channel_name)
     if not np.all(np.isfinite(coefficients)):
         raise ValueError("GROUP M5 coefficients contain non-finite values")
-    mean = coefficients.mean(axis=0)[0]
-    sem = coefficients.std(axis=0, ddof=1)[0] / math.sqrt(coefficients.shape[0])
+    mean = coefficients.mean(axis=0)[channel_index]
+    sem = (
+        coefficients.std(axis=0, ddof=1)[channel_index]
+        / math.sqrt(coefficients.shape[0])
+    )
     mel_indices = [index for index, name in enumerate(features) if name.startswith("mel_")]
     linguistic = [
         (feature, features.index(feature))
@@ -665,9 +724,13 @@ def plot_coefficients(
         vmax=limit,
         shading="auto",
     )
-    ax_mel.set(ylabel="Mel band", title="Full-model STRF coefficients")
+    ax_mel.set(ylabel="Mel band", title=title)
     ax_mel.tick_params(labelbottom=False)
-    figure.colorbar(image, ax=ax_mel, fraction=0.05, pad=0.02)
+    colorbar = figure.colorbar(image, ax=ax_mel, fraction=0.05, pad=0.02)
+    colorbar.formatter = ScalarFormatter(useMathText=True)
+    colorbar.formatter.set_scientific(True)
+    colorbar.formatter.set_powerlimits((0, 0))
+    colorbar.update_ticks()
     colors = [PALETTE["green"], PALETTE["orange"], PALETTE["purple"]]
     for (feature, index), color in zip(linguistic, colors):
         ax_lines.plot(lags, mean[index], color=color, label=FEATURE_LABELS[feature])
@@ -682,13 +745,24 @@ def plot_coefficients(
     ax_lines.axhline(0, color="black", linewidth=0.5)
     ax_lines.axvline(0, color="black", linewidth=0.5, linestyle=":")
     ax_lines.set(xlabel="Lag (s)", ylabel="Coefficient")
-    ax_lines.legend(frameon=False, ncol=1, loc="best")
+    ax_lines.legend(
+        frameon=False,
+        ncol=1,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.35),
+        fontsize=5,
+    )
+    scientific_axes(ax_mel)
+    scientific_axes(ax_lines)
     source_rows = [
         {
             "outer_fold": fold,
+            "channel": channel_name,
             "feature": feature,
             "lag_s": float(lag),
-            "coefficient": float(coefficients[fold, 0, feature_index, lag_index]),
+            "coefficient": float(
+                coefficients[fold, channel_index, feature_index, lag_index]
+            ),
         }
         for fold in range(coefficients.shape[0])
         for feature_index, feature in enumerate(features)
@@ -701,8 +775,13 @@ def plot_subject_epochs(
     ax: plt.Axes,
     times: np.ndarray,
     rows: list[dict[str, object]],
+    *,
+    predictor: str,
 ) -> None:
-    levels = sorted({float(row["structure_depth"]) for row in rows})
+    selected_rows = [row for row in rows if row["predictor"] == predictor]
+    if not selected_rows:
+        raise ValueError(f"no subject waveform rows for {predictor}")
+    levels = sorted({float(row["level"]) for row in selected_rows})
     subjects = sorted({str(row["subject"]) for row in rows})
     colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.85, len(levels)))
     for level, color in zip(levels, colors):
@@ -710,20 +789,21 @@ def plot_subject_epochs(
         for subject in subjects:
             selected = [
                 row
-                for row in rows
+                for row in selected_rows
                 if row["subject"] == subject
-                and float(row["structure_depth"]) == level
+                and float(row["level"]) == level
             ]
             if not selected:
                 continue
             wave_times = np.asarray([float(row["time_s"]) for row in selected])
             if not np.array_equal(wave_times, times):
                 raise ValueError(
-                    f"subject waveform grid is incomplete: {subject}, depth={level}"
+                    f"subject waveform grid is incomplete: "
+                    f"{subject}, {predictor}={level}"
                 )
             wave = require_finite(
                 (float(row["mean_observed_high_gamma_z"]) for row in selected),
-                f"{subject}, depth={level}",
+                f"{subject}, {predictor}={level}",
             )
             level_waves.append(wave)
             ax.plot(times, wave, color=color, alpha=0.14, linewidth=0.45)
@@ -733,16 +813,31 @@ def plot_subject_epochs(
             matrix.mean(axis=0),
             color=color,
             linewidth=1.4,
-            label=f"Depth {level:g} ($n$={len(matrix)})",
+            label=(
+                f"Depth {level:g} ($n$={len(matrix)})"
+                if predictor == "struc_depth"
+                else f"Quartile {level:g} ($n$={len(matrix)})"
+            ),
         )
     ax.axvline(0, color="black", linewidth=0.6, linestyle=":")
     ax.axhline(0, color="black", linewidth=0.5)
     ax.set(
         xlabel="Time from syllable offset (s)",
         ylabel="High-gamma response (z)",
-        title="Observed event-related responses",
+        title=(
+            "ER-Hγ by structure depth"
+            if predictor == "struc_depth"
+            else "ER-Hγ by boundary strength"
+        ),
     )
-    ax.legend(frameon=False, loc="upper left")
+    ax.legend(
+        frameon=False,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.30),
+        ncol=2,
+        fontsize=5,
+    )
+    scientific_axes(ax)
 
 
 def plot_source_statistics(
@@ -803,7 +898,13 @@ def plot_source_statistics(
         ylabel="Mean subject F statistic",
         title=title,
     )
-    ax.legend(frameon=False, loc="lower right")
+    ax.legend(
+        frameon=False,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.16),
+        ncol=2,
+    )
+    scientific_axes(ax)
     return marks
 
 
@@ -842,6 +943,312 @@ def plot_all_epoch_sources(
         )
     plt.close(figure)
     return marks
+
+
+def select_individual_strf_result(
+    strf_dir: Path,
+) -> tuple[
+    dict[str, object],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    Path,
+]:
+    candidates: list[tuple[float, str, str, str, Path, dict[str, str]]] = []
+    for path in sorted(
+        (strf_dir / "recordings").glob("*/feature_contributions.csv")
+    ):
+        for row in read_csv_required(path):
+            q_value = float(row["fdr_p_value_correlation"])
+            if not np.isfinite(q_value):
+                raise ValueError(f"non-finite individual STRF q value in {path}")
+            candidates.append(
+                (
+                    q_value,
+                    row["recording_id"],
+                    row["channel"],
+                    row["feature"],
+                    path,
+                    row,
+                )
+            )
+    if not candidates:
+        raise ValueError("no individual STRF feature tests were found")
+    q_value, recording_id, channel, feature, path, _ = min(candidates)
+    feature_rows = [
+        row
+        for row in read_csv_required(path)
+        if row["recording_id"] == recording_id and row["channel"] == channel
+    ]
+    comparison_path = path.parent / "model_comparisons.csv"
+    comparison_rows = [
+        row
+        for row in read_csv_required(comparison_path)
+        if row["recording_id"] == recording_id and row["channel"] == channel
+    ]
+    if {row["feature"] for row in feature_rows} != set(run_strf.FEATURE_FAMILIES):
+        raise ValueError("selected individual STRF channel has incomplete features")
+    selection = {
+        "recording_id": recording_id,
+        "channel": channel,
+        "selected_feature": feature,
+        "fdr_p_value_correlation": q_value,
+        "passes_bh_fdr_0.05": q_value < 0.05,
+        "selection_rule": (
+            "minimum finite fdr_p_value_correlation across every individual "
+            "recording, channel, and feature; deterministic lexical tie-break"
+        ),
+    }
+    return (
+        selection,
+        feature_rows,
+        comparison_rows,
+        path.parent / "model_coefficients.npz",
+    )
+
+
+def plot_individual_test_bars(
+    ax: plt.Axes,
+    rows: list[dict[str, str]],
+    *,
+    key: str,
+    title: str,
+) -> int:
+    labels = [str(row[key]) for row in rows]
+    values = [float(row["mean_delta_correlation"]) for row in rows]
+    colors = [
+        PALETTE["orange"]
+        if float(row["fdr_p_value_correlation"]) < 0.05
+        else PALETTE["light_grey"]
+        for row in rows
+    ]
+    bars = ax.bar(
+        np.arange(len(rows)),
+        values,
+        color=colors,
+        edgecolor="black",
+        linewidth=0.5,
+    )
+    marks = annotate_bars(
+        ax,
+        bars,
+        rows,
+        p_key="fdr_p_value_correlation",
+    )
+    ax.axhline(0, color="black", linewidth=0.6)
+    ax.set(
+        xticks=np.arange(len(rows)),
+        xticklabels=[FEATURE_LABELS.get(label, label) for label in labels],
+        ylabel=r"Held-out $\Delta r$",
+        title=title,
+    )
+    ax.tick_params(axis="x", rotation=32, labelsize=5.5)
+    for tick in ax.get_xticklabels():
+        tick.set_ha("right")
+    scientific_axes(ax, x=False)
+    return marks
+
+
+def select_individual_epoch_result(
+    epochs_dir: Path,
+) -> tuple[dict[str, object], list[dict[str, str]], Path]:
+    candidates: list[
+        tuple[int, float, str, str, str, str, float, Path, dict[str, str]]
+    ] = []
+    for path in sorted(
+        (epochs_dir / "recordings").glob("*/timepoint_statistics.csv")
+    ):
+        for row in read_csv_required(path):
+            q_value = float(row["fdr_p_value"])
+            if not np.isfinite(q_value):
+                raise ValueError(f"non-finite individual epoch q value in {path}")
+            passes = parse_bool(row["passes_fdr_and_cluster"])
+            candidates.append(
+                (
+                    0 if passes else 1,
+                    q_value,
+                    row["recording_id"],
+                    row["channel"],
+                    row["source"],
+                    row["predictor"],
+                    float(row["time_s"]),
+                    path,
+                    row,
+                )
+            )
+    if not candidates:
+        raise ValueError("no individual epoch time-point tests were found")
+    (
+        _,
+        q_value,
+        recording_id,
+        channel,
+        source,
+        predictor,
+        time_s,
+        path,
+        selected_row,
+    ) = min(candidates)
+    rows = sorted(
+        (
+            row
+            for row in read_csv_required(path)
+            if row["recording_id"] == recording_id
+            and row["channel"] == channel
+            and row["source"] == source
+            and row["predictor"] == predictor
+        ),
+        key=lambda row: float(row["time_s"]),
+    )
+    if not rows:
+        raise AssertionError("selected individual epoch time course is empty")
+    selection = {
+        "recording_id": recording_id,
+        "channel": channel,
+        "source": source,
+        "predictor": predictor,
+        "selected_time_s": time_s,
+        "fdr_p_value": q_value,
+        "passes_fdr_and_cluster": parse_bool(
+            selected_row["passes_fdr_and_cluster"]
+        ),
+        "selection_rule": (
+            "minimum finite fdr_p_value among duration-qualified individual "
+            "time points when available, otherwise global minimum; "
+            "deterministic lexical/time tie-break"
+        ),
+    }
+    return selection, rows, path.parent / "epoch_data.npz"
+
+
+def plot_individual_epoch_statistic(
+    ax: plt.Axes,
+    rows: list[dict[str, str]],
+    selection: dict[str, object],
+) -> int:
+    times = require_finite(
+        (float(row["time_s"]) for row in rows),
+        "selected individual epoch times",
+    )
+    statistics = require_finite(
+        (float(row["f_statistic"]) for row in rows),
+        "selected individual epoch F statistics",
+    )
+    significant = np.asarray(
+        [parse_bool(row["passes_fdr_and_cluster"]) for row in rows]
+    )
+    color = (
+        PALETTE["orange"]
+        if selection["predictor"] == "boundary_strength"
+        else PALETTE["purple"]
+    )
+    ax.plot(times, statistics, color=color)
+    ax.fill_between(
+        times,
+        0,
+        statistics,
+        where=significant,
+        color=color,
+        alpha=0.18,
+        linewidth=0,
+    )
+    marks = annotate_time_significance(
+        ax,
+        times,
+        significant,
+        color=color,
+        level=0,
+    )
+    ax.axvline(0, color="black", linewidth=0.6, linestyle=":")
+    ax.set(
+        xlabel="Time from syllable offset (s)",
+        ylabel="F statistic",
+        title=(
+            f"{selection['source']} × "
+            f"{PREDICTOR_LABELS[str(selection['predictor'])]}"
+        ),
+    )
+    scientific_axes(ax)
+    return marks
+
+
+def plot_individual_event_waveforms(
+    ax: plt.Axes,
+    epoch_path: Path,
+    selection: dict[str, object],
+) -> list[dict[str, object]]:
+    dataset = epoch_stats.load_epoch_dataset(epoch_path)
+    channel = str(selection["channel"])
+    if channel not in dataset.channel_names:
+        raise ValueError(f"selected epoch channel {channel!r} is absent")
+    channel_index = dataset.channel_names.index(channel)
+    source_name = str(selection["source"])
+    if source_name == "observed":
+        source = dataset.observed
+    elif source_name == "m2_residual":
+        source = dataset.residual_m2
+    elif source_name.startswith("prediction_"):
+        model = source_name.removeprefix("prediction_")
+        source = dataset.predictions[
+            :, :, dataset.model_names.index(model), :
+        ]
+    else:
+        raise ValueError(f"unknown selected epoch source: {source_name}")
+    predictor = str(selection["predictor"])
+    labels = (
+        epoch_stats.quantile_bins(dataset.boundary_strength) + 1
+        if predictor == "boundary_strength"
+        else dataset.struc_depth
+    )
+    levels = sorted(np.unique(labels))
+    colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.85, len(levels)))
+    rows: list[dict[str, object]] = []
+    for level, color in zip(levels, colors):
+        values = source[labels == level, :, channel_index]
+        mean = values.mean(axis=0)
+        sem = values.std(axis=0, ddof=1) / math.sqrt(len(values))
+        label = (
+            f"Quartile {float(level):g}"
+            if predictor == "boundary_strength"
+            else f"Depth {float(level):g}"
+        )
+        ax.plot(dataset.times, mean, color=color, label=label)
+        ax.fill_between(
+            dataset.times,
+            mean - 1.96 * sem,
+            mean + 1.96 * sem,
+            color=color,
+            alpha=0.14,
+            linewidth=0,
+        )
+        rows.extend(
+            {
+                "recording_id": dataset.recording_id,
+                "channel": channel,
+                "source": source_name,
+                "predictor": predictor,
+                "level": float(level),
+                "time_s": float(time),
+                "mean": float(mean_value),
+                "sem": float(sem_value),
+                "n_epochs": len(values),
+            }
+            for time, mean_value, sem_value in zip(dataset.times, mean, sem)
+        )
+    ax.axvline(0, color="black", linewidth=0.6, linestyle=":")
+    ax.axhline(0, color="black", linewidth=0.5)
+    ax.set(
+        xlabel="Time from syllable offset (s)",
+        ylabel="Signal (z)",
+        title="Selected individual event-related response",
+    )
+    ax.legend(
+        frameon=False,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.25),
+        ncol=2,
+    )
+    scientific_axes(ax)
+    return rows
 
 
 def artist_collision_audit(
@@ -919,6 +1326,9 @@ def write_geometry_diagnostics(
     output_dir: Path,
     fig: plt.Figure,
     panel_axes: dict[str, list[plt.Axes]],
+    *,
+    suffix: str = "",
+    aligned_rows: Sequence[Sequence[str]] = (),
 ) -> tuple[dict[str, object], dict[str, object]]:
     panels: dict[str, object] = {}
     for label, axes in panel_axes.items():
@@ -933,22 +1343,33 @@ def write_geometry_diagnostics(
                 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1
             ),
         }
-    top_row = [panels[label]["bbox_fraction"][3] for label in ("A", "B", "C")]
-    bottom_row = [panels[label]["bbox_fraction"][1] for label in ("D", "E", "F")]
+    row_spreads: list[dict[str, object]] = []
+    for labels in aligned_rows:
+        tops = [panels[label]["bbox_fraction"][3] for label in labels]
+        bottoms = [panels[label]["bbox_fraction"][1] for label in labels]
+        row_spreads.append(
+            {
+                "panels": list(labels),
+                "top_spread": float(max(tops) - min(tops)),
+                "bottom_spread": float(max(bottoms) - min(bottoms)),
+            }
+        )
+    rows_aligned = all(
+        row["top_spread"] < 0.03 and row["bottom_spread"] < 0.03
+        for row in row_spreads
+    )
     alignment = {
         "coordinate_system": "figure fraction, origin lower left",
         "panels": panels,
-        "top_row_top_spread": float(max(top_row) - min(top_row)),
-        "bottom_row_bottom_spread": float(max(bottom_row) - min(bottom_row)),
+        "aligned_rows": row_spreads,
         "status": (
             "pass"
             if all(panel["inside_canvas"] for panel in panels.values())
-            and max(top_row) - min(top_row) < 0.03
-            and max(bottom_row) - min(bottom_row) < 0.03
+            and rows_aligned
             else "review_required"
         ),
     }
-    write_json(output_dir / "alignment.json", alignment)
+    write_json(output_dir / f"alignment{suffix}.json", alignment)
     diagnostic, axis = plt.subplots(figsize=(7, 5))
     axis.set(xlim=(0, 1), ylim=(0, 1), aspect="equal", title="Panel alignment diagnostic")
     for label, panel in panels.items():
@@ -964,7 +1385,7 @@ def write_geometry_diagnostics(
             )
         )
         axis.text(x0 + 0.01, y1 - 0.02, label, va="top", fontweight="bold")
-    diagnostic.savefig(output_dir / "alignment_diagnostic.svg")
+    diagnostic.savefig(output_dir / f"alignment_diagnostic{suffix}.svg")
     plt.close(diagnostic)
 
     texts, collisions = artist_collision_audit(fig)
@@ -979,8 +1400,8 @@ def write_geometry_diagnostics(
         "collisions": collisions,
         "status": "pass" if not collisions else "review_required",
     }
-    write_json(output_dir / "collision.json", collision)
-    with PdfPages(output_dir / "collision_diagnostic.pdf") as pdf:
+    write_json(output_dir / f"collision{suffix}.json", collision)
+    with PdfPages(output_dir / f"collision_diagnostic{suffix}.pdf") as pdf:
         diagnostic, axis = plt.subplots(figsize=(8, 6))
         axis.set(
             xlim=(0, 1),
@@ -1178,30 +1599,53 @@ def run(args: argparse.Namespace) -> int:
         expected_subjects=len(epoch_subjects),
     )
 
+    counts = cohort_counts(inclusion, membership, excluded)
+    claims = significant_claims(feature_tests, group_stats)
+
     set_publication_style()
-    figure = plt.figure(figsize=(180 / 25.4, 165 / 25.4), layout="constrained")
-    grid = figure.add_gridspec(2, 3, height_ratios=(0.92, 1.08))
-    axes = {
-        "A": figure.add_subplot(grid[0, 0]),
-        "B": figure.add_subplot(grid[0, 1]),
-        "C": figure.add_subplot(grid[0, 2]),
-        "E": figure.add_subplot(grid[1, 1]),
-        "F": figure.add_subplot(grid[1, 2]),
-    }
-    counts = plot_cohort(axes["A"], inclusion, membership, excluded)
-    panel_b_rows = plot_group_accuracy(axes["B"], metrics, models, folds)
-    feature_marks = plot_subject_features(axes["C"], feature_points, feature_tests)
-    coefficient_axes, coefficient_rows = plot_coefficients(
-        figure,
-        grid[1, 0],
-        group_recording / "model_coefficients.npz",
+    figure = plt.figure(figsize=(183 / 25.4, 230 / 25.4))
+    grid = figure.add_gridspec(
+        12,
+        20,
+        left=0.07,
+        right=0.98,
+        bottom=0.08,
+        top=0.95,
+        wspace=1.0,
+        hspace=1.6,
     )
-    plot_subject_epochs(axes["E"], times, waveform_rows)
+    axes = {
+        "A": figure.add_subplot(grid[0:5, 0:4]),
+        "B": figure.add_subplot(grid[7:12, 0:4]),
+        "C": figure.add_subplot(grid[:, 5:15]),
+    }
+    panel_a_rows = plot_group_accuracy(axes["A"], metrics, models, folds)
+    feature_marks = plot_subject_features(axes["B"], feature_points, feature_tests)
     epoch_marks = plot_source_statistics(
-        axes["F"],
+        axes["C"],
         group_stats,
         source="observed",
-        title="Time-resolved prosody separability",
+        title=textwrap.fill(claims[1], width=58),
+    )
+    coefficient_axes, coefficient_rows = plot_coefficients(
+        figure,
+        grid[0:4, 16:20],
+        group_recording / "model_coefficients.npz",
+        title="Group M5 coefficients",
+    )
+    axes["E"] = figure.add_subplot(grid[5:8, 16:20])
+    axes["F"] = figure.add_subplot(grid[9:12, 16:20])
+    plot_subject_epochs(
+        axes["E"],
+        times,
+        waveform_rows,
+        predictor="struc_depth",
+    )
+    plot_subject_epochs(
+        axes["F"],
+        times,
+        waveform_rows,
+        predictor="boundary_strength",
     )
     panel_axes = {
         "A": [axes["A"]],
@@ -1220,21 +1664,110 @@ def run(args: argparse.Namespace) -> int:
             dpi=600 if suffix == "png" else 300,
             bbox_inches="tight",
         )
+
+    (
+        individual_strf_selection,
+        individual_feature_rows,
+        individual_comparison_rows,
+        individual_coefficient_path,
+    ) = select_individual_strf_result(args.strf_dir)
+    (
+        individual_epoch_selection,
+        individual_epoch_rows,
+        individual_epoch_path,
+    ) = select_individual_epoch_result(args.epochs_dir)
+    figure_2 = plt.figure(
+        figsize=(183 / 25.4, 145 / 25.4),
+        layout="constrained",
+    )
+    grid_2 = figure_2.add_gridspec(2, 2, hspace=0.30, wspace=0.22)
+    axes_2 = {
+        "A": figure_2.add_subplot(grid_2[0, 0]),
+        "C": figure_2.add_subplot(grid_2[1, 0]),
+        "D": figure_2.add_subplot(grid_2[1, 1]),
+    }
+    individual_feature_marks = plot_individual_test_bars(
+        axes_2["A"],
+        individual_feature_rows,
+        key="feature",
+        title=(
+            f"Most supported STRF channel: "
+            f"{individual_strf_selection['channel']}"
+        ),
+    )
+    individual_coefficient_axes, individual_coefficient_rows = plot_coefficients(
+        figure_2,
+        grid_2[0, 1],
+        individual_coefficient_path,
+        channel_name=str(individual_strf_selection["channel"]),
+        title="Selected individual M5 coefficients",
+    )
+    individual_epoch_marks = plot_individual_epoch_statistic(
+        axes_2["C"],
+        individual_epoch_rows,
+        individual_epoch_selection,
+    )
+    individual_waveform_rows = plot_individual_event_waveforms(
+        axes_2["D"],
+        individual_epoch_path,
+        individual_epoch_selection,
+    )
+    panel_axes_2 = {
+        "A": [axes_2["A"]],
+        "B": individual_coefficient_axes,
+        "C": [axes_2["C"]],
+        "D": [axes_2["D"]],
+    }
+    for label, label_axes in panel_axes_2.items():
+        panel_label(label_axes[0], label)
+    for suffix in ("pdf", "svg", "png"):
+        figure_2.savefig(
+            args.output_dir / f"main_figure_2.{suffix}",
+            dpi=600 if suffix == "png" else 300,
+            bbox_inches="tight",
+        )
     supplementary_marks = plot_all_epoch_sources(args.output_dir, group_stats)
 
-    write_csv(source_dir / "panel_A_cohort_counts.csv", [counts])
-    write_csv(source_dir / "panel_B_group_accuracy.csv", panel_b_rows)
-    write_csv(source_dir / "panel_C_subject_feature_points.csv", feature_points)
-    write_csv(source_dir / "panel_C_subject_feature_tests.csv", feature_tests)
+    write_csv(source_dir / "cohort_counts.csv", [counts])
+    write_csv(source_dir / "panel_A_group_accuracy.csv", panel_a_rows)
+    write_csv(source_dir / "panel_B_subject_feature_points.csv", feature_points)
+    write_csv(source_dir / "panel_B_subject_feature_tests.csv", feature_tests)
     write_csv(source_dir / "panel_D_group_coefficients.csv", coefficient_rows)
-    write_csv(source_dir / "panel_E_subject_waveforms.csv", waveform_rows)
-    panel_f_rows = [
+    write_csv(source_dir / "panel_EF_subject_waveforms.csv", waveform_rows)
+    panel_c_rows = [
         row
         for row in group_stats
         if row["source"] == "observed"
         and row["predictor"] in PREDICTOR_LABELS
     ]
-    write_csv(source_dir / "panel_F_group_timepoint_statistics.csv", panel_f_rows)
+    write_csv(source_dir / "panel_C_group_timepoint_statistics.csv", panel_c_rows)
+    write_csv(
+        source_dir / "figure_2_panel_A_feature_tests.csv",
+        individual_feature_rows,
+    )
+    write_csv(
+        source_dir / "figure_2_panel_A_model_comparisons.csv",
+        individual_comparison_rows,
+    )
+    write_csv(
+        source_dir / "figure_2_panel_B_coefficients.csv",
+        individual_coefficient_rows,
+    )
+    write_csv(
+        source_dir / "figure_2_panel_C_timepoint_statistics.csv",
+        individual_epoch_rows,
+    )
+    write_csv(
+        source_dir / "figure_2_panel_D_event_waveforms.csv",
+        individual_waveform_rows,
+    )
+    write_json(
+        args.output_dir / "individual_result_selection.json",
+        {
+            "strf": individual_strf_selection,
+            "epoch": individual_epoch_selection,
+        },
+    )
     write_csv(
         source_dir / "supplementary_all_group_timepoint_statistics.csv",
         group_stats,
@@ -1282,14 +1815,13 @@ def run(args: argparse.Namespace) -> int:
         },
     )
 
-    claims = significant_claims(feature_tests, group_stats)
     panel_notes = {
-        "A": "Cohort flow from recording inclusion, group membership, and explicit MISC exclusions.",
-        "B": "All pooled held-out story folds; bars are mean ± SEM. No absolute-performance significance test was invented.",
-        "C": "Every subject mean is shown. Bars are mean ± 1.96 SEM; stars reproduce subject-level BH-FDR-adjusted correlation tests.",
+        "A": "All pooled held-out story folds; bars are mean ± SEM. No absolute-performance significance test was invented.",
+        "B": "Every subject mean is shown. Bars are mean ± 1.96 SEM; stars reproduce subject-level BH-FDR-adjusted correlation tests.",
+        "C": "Central claim panel: observed group F statistics; shadows, lines, and stars identify BH-FDR q<0.01 intervals retained for at least four samples.",
         "D": "M5 coefficients across all folds. Linguistic ribbons are descriptive ±1.96 SEM across folds.",
         "E": "All retained subject-level observed ER-Hγ trajectories by structure depth; missing cells and source-to-epoch retention are disclosed, not imputed.",
-        "F": "Observed group F statistics; shadows, lines, and stars identify BH-FDR q<0.01 intervals retained for at least four samples.",
+        "F": "All retained subject-level observed ER-Hγ trajectories by within-recording boundary-strength quartile; quartiles are visualization-only.",
         "Supplementary": "Every tested observed, M2-residual, and model-prediction source is shown without source selection; significance marks reproduce the same saved thresholds.",
     }
     notes_text = ["# Panel notes", "", "## Data-supported claims"]
@@ -1298,6 +1830,43 @@ def run(args: argparse.Namespace) -> int:
         notes_text.extend(["", f"## Panel {label}", note])
     (args.output_dir / "panel_notes.md").write_text(
         "\n".join(notes_text) + "\n", encoding="utf-8"
+    )
+    strf_pass = bool(individual_strf_selection["passes_bh_fdr_0.05"])
+    epoch_pass = bool(individual_epoch_selection["passes_fdr_and_cluster"])
+    panel_notes_2 = {
+        "A": (
+            "Feature contributions for the individual recording/channel with "
+            "the minimum BH-FDR-adjusted correlation p value. "
+            f"Selected q={individual_strf_selection['fdr_p_value_correlation']:.3g}; "
+            f"threshold passed={strf_pass}."
+        ),
+        "B": (
+            "M5 STRF coefficients for that selected channel; ribbons are "
+            "descriptive ±1.96 SEM across dependent outer folds."
+        ),
+        "C": (
+            "Time-resolved F statistic for the duration-qualified individual "
+            "epoch result with the minimum adjusted p value when available. "
+            f"Selected q={individual_epoch_selection['fdr_p_value']:.3g}; "
+            f"FDR+duration passed={epoch_pass}."
+        ),
+        "D": (
+            "All retained epochs for the selected individual source and "
+            "predictor, shown as condition means ±1.96 SEM; boundary strength "
+            "uses equal-count quartiles for visualization only."
+        ),
+    }
+    notes_2 = [
+        "# Main Figure 2 panel notes",
+        "",
+        "Selections are deterministic across all individual result rows; no "
+        "recording, channel, source, or time point was sampled for rendering.",
+    ]
+    for label, note in panel_notes_2.items():
+        notes_2.extend(["", f"## Panel {label}", note])
+    (args.output_dir / "panel_notes_main_figure_2.md").write_text(
+        "\n".join(notes_2) + "\n",
+        encoding="utf-8",
     )
 
     source_mapping = {
@@ -1320,27 +1889,25 @@ def run(args: argparse.Namespace) -> int:
         ),
         "panels": {
             "A": {
-                "inputs": [
-                    str(args.strf_group_dir / "recording_inclusion.csv"),
-                    str(args.strf_group_dir / "group_membership.csv"),
-                    str(excluded_path),
-                ],
-                "source_data": "source_data/panel_A_cohort_counts.csv",
-            },
-            "B": {
                 "input": str(group_recording / "model_metrics.csv"),
                 "fields": ["model", "outer_fold", "correlation"],
-                "source_data": "source_data/panel_B_group_accuracy.csv",
+                "source_data": "source_data/panel_A_group_accuracy.csv",
             },
-            "C": {
+            "B": {
                 "inputs": [
                     str(args.strf_dir / "recordings/*/feature_contributions.csv"),
                     str(args.strf_group_dir / "subject_feature_contributions.csv"),
                 ],
                 "source_data": [
-                    "source_data/panel_C_subject_feature_points.csv",
-                    "source_data/panel_C_subject_feature_tests.csv",
+                    "source_data/panel_B_subject_feature_points.csv",
+                    "source_data/panel_B_subject_feature_tests.csv",
                 ],
+            },
+            "C": {
+                "input": str(
+                    args.epochs_group_dir / "group_timepoint_statistics.csv"
+                ),
+                "source_data": "source_data/panel_C_group_timepoint_statistics.csv",
             },
             "D": {
                 "input": str(group_recording / "model_coefficients.npz"),
@@ -1350,13 +1917,12 @@ def run(args: argparse.Namespace) -> int:
             "E": {
                 "input": str(args.epochs_dir / "recordings/*/epoch_data.npz"),
                 "array": "observed",
-                "source_data": "source_data/panel_E_subject_waveforms.csv",
+                "source_data": "source_data/panel_EF_subject_waveforms.csv",
             },
             "F": {
-                "input": str(
-                    args.epochs_group_dir / "group_timepoint_statistics.csv"
-                ),
-                "source_data": "source_data/panel_F_group_timepoint_statistics.csv",
+                "input": str(args.epochs_dir / "recordings/*/epoch_data.npz"),
+                "array": "observed",
+                "source_data": "source_data/panel_EF_subject_waveforms.csv",
             },
             "Supplementary": {
                 "input": str(
@@ -1364,6 +1930,44 @@ def run(args: argparse.Namespace) -> int:
                 ),
                 "source_data": (
                     "source_data/supplementary_all_group_timepoint_statistics.csv"
+                ),
+            },
+        },
+        "main_figure_2": {
+            "selection": "individual_result_selection.json",
+            "A": {
+                "inputs": [
+                    str(
+                        args.strf_dir
+                        / "recordings/*/feature_contributions.csv"
+                    ),
+                    str(
+                        args.strf_dir
+                        / "recordings/*/model_comparisons.csv"
+                    ),
+                ],
+                "source_data": [
+                    "source_data/figure_2_panel_A_feature_tests.csv",
+                    "source_data/figure_2_panel_A_model_comparisons.csv",
+                ],
+            },
+            "B": {
+                "input": str(individual_coefficient_path),
+                "source_data": "source_data/figure_2_panel_B_coefficients.csv",
+            },
+            "C": {
+                "input": str(
+                    args.epochs_dir
+                    / "recordings/*/timepoint_statistics.csv"
+                ),
+                "source_data": (
+                    "source_data/figure_2_panel_C_timepoint_statistics.csv"
+                ),
+            },
+            "D": {
+                "input": str(individual_epoch_path),
+                "source_data": (
+                    "source_data/figure_2_panel_D_event_waveforms.csv"
                 ),
             },
         },
@@ -1392,7 +1996,7 @@ def run(args: argparse.Namespace) -> int:
         )
         for predictor in PREDICTOR_LABELS
     )
-    visual_audit = {
+    visual_audit_1 = {
         label: {
             "description": panel_notes[label],
             "axes_present": bool(panel_axes[label]),
@@ -1400,39 +2004,111 @@ def run(args: argparse.Namespace) -> int:
             "xlabels": [axis.get_xlabel() for axis in panel_axes[label]],
             "ylabels": [axis.get_ylabel() for axis in panel_axes[label]],
             "source_row_count": {
-                "A": 1,
-                "B": len(panel_b_rows),
-                "C": len(feature_points),
+                "A": len(panel_a_rows),
+                "B": len(feature_points),
+                "C": len(panel_c_rows),
                 "D": len(coefficient_rows),
-                "E": len(waveform_rows),
-                "F": len(panel_f_rows),
+                "E": sum(
+                    row["predictor"] == "struc_depth"
+                    for row in waveform_rows
+                ),
+                "F": sum(
+                    row["predictor"] == "boundary_strength"
+                    for row in waveform_rows
+                ),
             }[label],
             "status": "pass",
         }
         for label in panel_axes
     }
-    visual_audit["C"]["expected_significance_marks"] = expected_feature_marks
-    visual_audit["C"]["rendered_significance_marks"] = feature_marks
-    visual_audit["F"]["expected_significance_intervals"] = expected_epoch_marks
-    visual_audit["F"]["rendered_significance_intervals"] = epoch_marks
+    visual_audit_1["B"]["expected_significance_marks"] = expected_feature_marks
+    visual_audit_1["B"]["rendered_significance_marks"] = feature_marks
+    visual_audit_1["C"]["expected_significance_intervals"] = expected_epoch_marks
+    visual_audit_1["C"]["rendered_significance_intervals"] = epoch_marks
     if feature_marks != expected_feature_marks or epoch_marks != expected_epoch_marks:
         raise AssertionError("rendered significance marks do not match result tables")
-    write_json(args.output_dir / "panel_visual_audit.json", visual_audit)
+    expected_individual_feature_marks = sum(
+        float(row["fdr_p_value_correlation"]) < 0.05
+        for row in individual_feature_rows
+    )
+    expected_individual_epoch_marks = len(
+        contiguous_true_runs(
+            [
+                parse_bool(row["passes_fdr_and_cluster"])
+                for row in individual_epoch_rows
+            ]
+        )
+    )
+    visual_audit_2 = {
+        label: {
+            "description": panel_notes_2[label],
+            "axes_present": bool(panel_axes_2[label]),
+            "titles": [axis.get_title() for axis in panel_axes_2[label]],
+            "xlabels": [axis.get_xlabel() for axis in panel_axes_2[label]],
+            "ylabels": [axis.get_ylabel() for axis in panel_axes_2[label]],
+            "source_row_count": {
+                "A": len(individual_feature_rows),
+                "B": len(individual_coefficient_rows),
+                "C": len(individual_epoch_rows),
+                "D": len(individual_waveform_rows),
+            }[label],
+            "status": "pass",
+        }
+        for label in panel_axes_2
+    }
+    visual_audit_2["A"].update(
+        {
+            "expected_significance_marks": expected_individual_feature_marks,
+            "rendered_significance_marks": individual_feature_marks,
+        }
+    )
+    visual_audit_2["C"].update(
+        {
+            "expected_significance_intervals": expected_individual_epoch_marks,
+            "rendered_significance_intervals": individual_epoch_marks,
+        }
+    )
+    if (
+        individual_feature_marks != expected_individual_feature_marks
+        or individual_epoch_marks != expected_individual_epoch_marks
+    ):
+        raise AssertionError(
+            "individual rendered significance marks do not match result tables"
+        )
+    write_json(
+        args.output_dir / "panel_visual_audit.json",
+        {
+            "main_figure": visual_audit_1,
+            "main_figure_2": visual_audit_2,
+        },
+    )
 
     alignment, collision = write_geometry_diagnostics(
         args.output_dir,
         figure,
         panel_axes,
     )
+    alignment_2, collision_2 = write_geometry_diagnostics(
+        args.output_dir,
+        figure_2,
+        panel_axes_2,
+        suffix="_main_figure_2",
+        aligned_rows=(("C", "D"),),
+    )
     plt.close(figure)
+    plt.close(figure_2)
     required_outputs = [
         "main_figure.pdf",
         "main_figure.svg",
         "main_figure.png",
+        "main_figure_2.pdf",
+        "main_figure_2.svg",
+        "main_figure_2.png",
         "supplementary_epoch_sources.pdf",
         "supplementary_epoch_sources.svg",
         "supplementary_epoch_sources.png",
         "panel_notes.md",
+        "panel_notes_main_figure_2.md",
         "source_data_mapping.json",
         "exclusion_counts.csv",
         "panel_visual_audit.json",
@@ -1440,6 +2116,11 @@ def run(args: argparse.Namespace) -> int:
         "alignment_diagnostic.svg",
         "collision.json",
         "collision_diagnostic.pdf",
+        "alignment_main_figure_2.json",
+        "alignment_diagnostic_main_figure_2.svg",
+        "collision_main_figure_2.json",
+        "collision_diagnostic_main_figure_2.pdf",
+        "individual_result_selection.json",
     ]
     output_checks = {
         name: {
@@ -1462,7 +2143,12 @@ def run(args: argparse.Namespace) -> int:
                 item["exists"] and item["bytes"] > 0
                 for item in output_checks.values()
             ),
-            "editable_vector_outputs": ["main_figure.pdf", "main_figure.svg"],
+            "editable_vector_outputs": [
+                "main_figure.pdf",
+                "main_figure.svg",
+                "main_figure_2.pdf",
+                "main_figure_2.svg",
+            ],
             "all_requested_feature_families_present": (
                 {row["feature"] for row in feature_tests}
                 == set(run_strf.FEATURE_FAMILIES)
@@ -1486,12 +2172,18 @@ def run(args: argparse.Namespace) -> int:
             "significance_marks_match_source_tables": True,
             "alignment_status": alignment["status"],
             "collision_status": collision["status"],
+            "main_figure_2_alignment_status": alignment_2["status"],
+            "main_figure_2_collision_status": collision_2["status"],
+            "individual_selection_recorded": True,
+            "scientific_axis_formatting": True,
         },
         "output_files": output_checks,
         "status": (
             "pass"
             if alignment["status"] == "pass"
             and collision["status"] == "pass"
+            and alignment_2["status"] == "pass"
+            and collision_2["status"] == "pass"
             and all(item["exists"] and item["bytes"] > 0 for item in output_checks.values())
             else "review_required"
         ),
