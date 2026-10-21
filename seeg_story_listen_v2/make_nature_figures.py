@@ -664,13 +664,16 @@ def plot_subject_features(
     ax.axhline(0, color="black", linewidth=0.6)
     ax.set(
         xticks=np.arange(len(features)),
-        xticklabels=["Mel", "Syllable", "Boundary", "Structure"],
+        xticklabels=[
+            "Mel",
+            "Syllable\nonset",
+            "Boundary\nstrength",
+            "Structure\ndepth",
+        ],
         ylabel=r"Subject mean $\Delta r$",
-        title="Unique feature contributions",
+        title="Unique feature effects",
     )
-    ax.tick_params(axis="x", rotation=32, labelsize=5.5)
-    for tick in ax.get_xticklabels():
-        tick.set_ha("right")
+    ax.tick_params(axis="x", labelsize=5.5)
     scientific_axes(ax, x=False)
     return marks
 
@@ -1603,17 +1606,17 @@ def run(args: argparse.Namespace) -> int:
     claims = significant_claims(feature_tests, group_stats)
 
     set_publication_style()
-    figure = plt.figure(figsize=(183 / 25.4, 150 / 25.4), layout="constrained")
+    figure = plt.figure(figsize=(183 / 25.4, 230 / 25.4), layout="constrained")
     grid = figure.add_gridspec(
-        2,
+        6,
         4,
-        width_ratios=(1.0, 1.45, 1.45, 1.0),
-        wspace=0.18,
-        hspace=0.22,
+        width_ratios=(1.05, 1.55, 1.55, 1.15),
+        wspace=0.24,
+        hspace=0.75,
     )
     axes = {
-        "A": figure.add_subplot(grid[0, 0]),
-        "B": figure.add_subplot(grid[1, 0]),
+        "A": figure.add_subplot(grid[0:3, 0]),
+        "B": figure.add_subplot(grid[3:6, 0]),
         "C": figure.add_subplot(grid[:, 1:3]),
     }
     panel_a_rows = plot_group_accuracy(axes["A"], metrics, models, folds)
@@ -1626,12 +1629,12 @@ def run(args: argparse.Namespace) -> int:
     )
     coefficient_axes, coefficient_rows = plot_coefficients(
         figure,
-        grid[0, 3],
+        grid[0:2, 3],
         group_recording / "model_coefficients.npz",
+        title="Group M5 coefficients",
     )
-    waveform_grid = grid[1, 3].subgridspec(2, 1, hspace=0.55)
-    axes["E"] = figure.add_subplot(waveform_grid[0])
-    axes["F"] = figure.add_subplot(waveform_grid[1])
+    axes["E"] = figure.add_subplot(grid[2:4, 3])
+    axes["F"] = figure.add_subplot(grid[4:6, 3])
     plot_subject_epochs(
         axes["E"],
         times,
@@ -2090,7 +2093,7 @@ def run(args: argparse.Namespace) -> int:
         figure_2,
         panel_axes_2,
         suffix="_main_figure_2",
-        aligned_rows=(("A", "B"), ("C", "D")),
+        aligned_rows=(("C", "D"),),
     )
     plt.close(figure)
     plt.close(figure_2)
