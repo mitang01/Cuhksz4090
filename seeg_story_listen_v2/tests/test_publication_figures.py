@@ -12,6 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from matplotlib.ticker import ScalarFormatter
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -70,7 +71,21 @@ def test_significance_annotations_use_adjusted_p_and_contiguous_runs() -> None:
     assert time_marks == 2
 
 
-def make_epoch_dataset(recording_id: str, seed: int) -> epoch_stats.EpochDataset:
+def test_scientific_axes_install_scalar_formatters() -> None:
+    fig, ax = plt.subplots()
+    make_nature_figures.scientific_axes(ax)
+    plt.close(fig)
+    assert isinstance(ax.xaxis.get_major_formatter(), ScalarFormatter)
+    assert isinstance(ax.yaxis.get_major_formatter(), ScalarFormatter)
+    assert ax.xaxis.get_major_formatter().get_useMathText() is True
+    assert ax.yaxis.get_major_formatter().get_useMathText() is True
+
+
+def make_epoch_dataset(
+    recording_id: str,
+    seed: int,
+    channel_name: str = "LA1",
+) -> epoch_stats.EpochDataset:
     rng = np.random.default_rng(seed)
     n_epochs, n_times = 12, 9
     times = np.linspace(-0.5, 0.5, n_times)
@@ -83,7 +98,7 @@ def make_epoch_dataset(recording_id: str, seed: int) -> epoch_stats.EpochDataset
     )
     return epoch_stats.EpochDataset(
         recording_id=recording_id,
-        channel_names=["LA1"],
+        channel_names=[channel_name],
         times=times,
         observed=observed,
         predictions=predictions,
@@ -104,6 +119,11 @@ def build_publication_fixture(root: Path) -> Namespace:
     for subject_index in range(2):
         recording_id = f"sub{subject_index + 1:03d}/run1"
         channel = f"L{subject_index + 1}A1"
+        recording_dir = (
+            strf_dir
+            / "recordings"
+            / f"sub{subject_index + 1:03d}_run1"
+        )
         members.append(
             {
                 "recording_id": recording_id,
@@ -117,21 +137,38 @@ def build_publication_fixture(root: Path) -> Namespace:
                 "channel": channel,
                 "feature": feature,
                 "mean_delta_correlation": 0.01 * (feature_index + subject_index + 1),
+                "fdr_p_value_correlation": (
+                    0.004
+                    if subject_index == 0 and feature == "boundary_strength"
+                    else 0.08 + 0.02 * feature_index + 0.1 * subject_index
+                ),
+                "fdr_p_value_correlation_significant_0.05": (
+                    subject_index == 0 and feature == "boundary_strength"
+                ),
+                "full_model": run_strf.FEATURE_COMPARISONS[feature][0],
+                "reduced_model": run_strf.FEATURE_COMPARISONS[feature][1],
             }
             for feature_index, feature in enumerate(run_strf.FEATURE_FAMILIES)
         ]
         write_csv(
-            strf_dir
-            / "recordings"
-            / f"sub{subject_index + 1:03d}_run1"
-            / "feature_contributions.csv",
+            recording_dir / "feature_contributions.csv",
             rows,
         )
         write_csv(
-            strf_dir
-            / "recordings"
-            / f"sub{subject_index + 1:03d}_run1"
-            / "model_metrics.csv",
+            recording_dir / "model_comparisons.csv",
+            [
+                {
+                    "recording_id": recording_id,
+                    "channel": channel,
+                    "comparison": comparison,
+                    "mean_delta_correlation": 0.005 * (index + 1),
+                    "fdr_p_value_correlation": 0.15 + 0.02 * index,
+                }
+                for index, comparison in enumerate(run_strf.MODEL_COMPARISONS)
+            ],
+        )
+        write_csv(
+            recording_dir / "model_metrics.csv",
             [
                 {
                     "recording_id": recording_id,
@@ -150,13 +187,67 @@ def build_publication_fixture(root: Path) -> Namespace:
             aligned_dir / "001_story01.npz",
             prosody_event_mask=np.ones(12, dtype=bool),
         )
-        dataset = make_epoch_dataset(recording_id, subject_index + 1)
+        dataset = make_epoch_dataset(
+            recording_id,
+            subject_index + 1,
+            channel,
+        )
         epoch_stats.save_epoch_dataset(
             epochs_dir
             / "recordings"
             / f"sub{subject_index + 1:03d}_run1"
             / "epoch_data.npz",
             dataset,
+        )
+        coefficient_features = [
+            "mel_00",
+            "mel_01",
+            "syl_onset",
+            "boundary_strength",
+            "struc_depth",
+        ]
+        coefficient_lags = np.linspace(-0.3, 0.3, 7)
+        np.savez_compressed(
+            recording_dir / "model_coefficients.npz",
+            M5_full=np.random.default_rng(subject_index + 20).normal(
+                scale=0.1,
+                size=(3, 1, len(coefficient_features), len(coefficient_lags)),
+            ),
+            feature_names=np.asarray(coefficient_features),
+            channel_names=np.asarray([channel]),
+            lags_s=coefficient_lags,
+        )
+        write_csv(
+            epochs_dir
+            / "recordings"
+            / f"sub{subject_index + 1:03d}_run1"
+            / "timepoint_statistics.csv",
+            [
+                {
+                    "recording_id": recording_id,
+                    "channel": channel,
+                    "source": "observed",
+                    "predictor": predictor,
+                    "time_s": time,
+                    "f_statistic": 3.0 + time_index,
+                    "fdr_p_value": (
+                        0.001
+                        if (
+                            subject_index == 0
+                            and predictor == "boundary_strength"
+                            and time_index < 4
+                        )
+                        else 0.1 + 0.05 * subject_index
+                    ),
+                    "passes_fdr_and_cluster": (
+                        subject_index == 0
+                        and predictor == "boundary_strength"
+                        and time_index < 4
+                    ),
+                }
+                for predictor in ("boundary_strength", "struc_depth")
+                for time_index, time in enumerate(dataset.times)
+            ],
         )
     write_csv(group_dir / "group_membership.csv", members)
     write_csv(
@@ -204,6 +295,7 @@ def build_publication_fixture(root: Path) -> Namespace:
         group_recording / "model_coefficients.npz",
         M5_full=coefficients,
         feature_names=np.asarray(features),
+        channel_names=np.asarray(["GROUP"]),
         lags_s=lags,
     )
     times = np.linspace(-0.3, 0.3, 7)
@@ -279,8 +371,12 @@ def test_publication_bundle_contains_vector_source_and_audit_outputs(
         "main_figure.pdf",
         "main_figure.svg",
         "main_figure.png",
+        "main_figure_2.pdf",
+        "main_figure_2.svg",
+        "main_figure_2.png",
         "supplementary_epoch_sources.pdf",
         "panel_notes.md",
+        "panel_notes_main_figure_2.md",
         "source_data_mapping.json",
         "exclusion_counts.csv",
         "panel_visual_audit.json",
@@ -288,20 +384,38 @@ def test_publication_bundle_contains_vector_source_and_audit_outputs(
         "alignment_diagnostic.svg",
         "collision.json",
         "collision_diagnostic.pdf",
+        "alignment_main_figure_2.json",
+        "alignment_diagnostic_main_figure_2.svg",
+        "collision_main_figure_2.json",
+        "collision_diagnostic_main_figure_2.pdf",
+        "individual_result_selection.json",
         "pre_submission_qa.json",
     }
     assert expected <= {path.name for path in args.output_dir.iterdir()}
     audit = json.loads((args.output_dir / "panel_visual_audit.json").read_text())
-    assert audit["C"]["expected_significance_marks"] == 1
-    assert audit["C"]["rendered_significance_marks"] == 1
-    assert audit["F"]["expected_significance_intervals"] == 1
-    assert audit["F"]["rendered_significance_intervals"] == 1
+    assert audit["main_figure"]["B"]["expected_significance_marks"] == 1
+    assert audit["main_figure"]["B"]["rendered_significance_marks"] == 1
+    assert audit["main_figure"]["C"]["expected_significance_intervals"] == 1
+    assert audit["main_figure"]["C"]["rendered_significance_intervals"] == 1
+    assert audit["main_figure"]["F"]["source_row_count"] > 0
+    assert audit["main_figure_2"]["A"]["expected_significance_marks"] == 1
+    assert audit["main_figure_2"]["C"]["expected_significance_intervals"] == 1
     mapping = json.loads((args.output_dir / "source_data_mapping.json").read_text())
     assert mapping["no_sampling"] is True
     assert set(mapping["panels"]) == {"A", "B", "C", "D", "E", "F", "Supplementary"}
+    assert set(mapping["main_figure_2"]) == {"selection", "A", "B", "C", "D"}
+    selection = json.loads(
+        (args.output_dir / "individual_result_selection.json").read_text()
+    )
+    assert selection["strf"]["recording_id"] == "sub001/run1"
+    assert selection["strf"]["selected_feature"] == "boundary_strength"
+    assert selection["epoch"]["recording_id"] == "sub001/run1"
+    assert selection["epoch"]["predictor"] == "boundary_strength"
     qa = json.loads((args.output_dir / "pre_submission_qa.json").read_text())
     assert qa["checks"]["alignment_status"] == "pass"
     assert qa["checks"]["collision_status"] == "pass"
+    assert qa["checks"]["main_figure_2_alignment_status"] == "pass"
+    assert qa["checks"]["main_figure_2_collision_status"] == "pass"
     assert qa["checks"]["strf_epoch_recording_cohorts_match"] is True
     assert qa["checks"]["epoch_retention_accounting_disclosed"] is True
     assert qa["status"] == "pass"
