@@ -664,12 +664,7 @@ def plot_subject_features(
     ax.axhline(0, color="black", linewidth=0.6)
     ax.set(
         xticks=np.arange(len(features)),
-        xticklabels=[
-            "Mel",
-            "Syllable\nonset",
-            "Boundary\nstrength",
-            "Structure\ndepth",
-        ],
+        xticklabels=["Mel", "Syll.", "Bound.", "Struct."],
         ylabel=r"Subject mean $\Delta r$",
         title="Unique feature effects",
     )
@@ -754,7 +749,8 @@ def plot_coefficients(
         frameon=False,
         ncol=1,
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.32),
+        bbox_to_anchor=(0.5, -0.35),
+        fontsize=5,
     )
     scientific_axes(ax_mel)
     scientific_axes(ax_lines)
@@ -837,8 +833,9 @@ def plot_subject_epochs(
     ax.legend(
         frameon=False,
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.34),
+        bbox_to_anchor=(0.5, -0.30),
         ncol=2,
+        fontsize=5,
     )
     scientific_axes(ax)
 
@@ -1606,18 +1603,21 @@ def run(args: argparse.Namespace) -> int:
     claims = significant_claims(feature_tests, group_stats)
 
     set_publication_style()
-    figure = plt.figure(figsize=(183 / 25.4, 230 / 25.4), layout="constrained")
+    figure = plt.figure(figsize=(183 / 25.4, 230 / 25.4))
     grid = figure.add_gridspec(
-        6,
-        4,
-        width_ratios=(1.05, 1.55, 1.55, 1.15),
-        wspace=0.24,
-        hspace=0.75,
+        12,
+        20,
+        left=0.07,
+        right=0.98,
+        bottom=0.08,
+        top=0.95,
+        wspace=1.0,
+        hspace=1.6,
     )
     axes = {
-        "A": figure.add_subplot(grid[0:3, 0]),
-        "B": figure.add_subplot(grid[3:6, 0]),
-        "C": figure.add_subplot(grid[:, 1:3]),
+        "A": figure.add_subplot(grid[0:5, 0:4]),
+        "B": figure.add_subplot(grid[7:12, 0:4]),
+        "C": figure.add_subplot(grid[:, 5:15]),
     }
     panel_a_rows = plot_group_accuracy(axes["A"], metrics, models, folds)
     feature_marks = plot_subject_features(axes["B"], feature_points, feature_tests)
@@ -1629,12 +1629,12 @@ def run(args: argparse.Namespace) -> int:
     )
     coefficient_axes, coefficient_rows = plot_coefficients(
         figure,
-        grid[0:2, 3],
+        grid[0:4, 16:20],
         group_recording / "model_coefficients.npz",
         title="Group M5 coefficients",
     )
-    axes["E"] = figure.add_subplot(grid[2:4, 3])
-    axes["F"] = figure.add_subplot(grid[4:6, 3])
+    axes["E"] = figure.add_subplot(grid[5:8, 16:20])
+    axes["F"] = figure.add_subplot(grid[9:12, 16:20])
     plot_subject_epochs(
         axes["E"],
         times,
