@@ -81,7 +81,11 @@ def test_scientific_axes_install_scalar_formatters() -> None:
     assert ax.yaxis.get_major_formatter().get_useMathText() is True
 
 
-def make_epoch_dataset(recording_id: str, seed: int) -> epoch_stats.EpochDataset:
+def make_epoch_dataset(
+    recording_id: str,
+    seed: int,
+    channel_name: str = "LA1",
+) -> epoch_stats.EpochDataset:
     rng = np.random.default_rng(seed)
     n_epochs, n_times = 12, 9
     times = np.linspace(-0.5, 0.5, n_times)
@@ -94,7 +98,7 @@ def make_epoch_dataset(recording_id: str, seed: int) -> epoch_stats.EpochDataset
     )
     return epoch_stats.EpochDataset(
         recording_id=recording_id,
-        channel_names=["LA1"],
+        channel_names=[channel_name],
         times=times,
         observed=observed,
         predictions=predictions,
@@ -183,7 +187,11 @@ def build_publication_fixture(root: Path) -> Namespace:
             aligned_dir / "001_story01.npz",
             prosody_event_mask=np.ones(12, dtype=bool),
         )
-        dataset = make_epoch_dataset(recording_id, subject_index + 1)
+        dataset = make_epoch_dataset(
+            recording_id,
+            subject_index + 1,
+            channel,
+        )
         epoch_stats.save_epoch_dataset(
             epochs_dir
             / "recordings"
