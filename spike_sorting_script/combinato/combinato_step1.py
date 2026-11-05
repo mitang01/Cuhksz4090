@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Extract and sort each kept microwire with Combinato's own commands.
+
+Reads the merged subject files written by merge_subject_mats.py.
+For every kept channel it runs:
+
+  css-extract
+  css-mask-artifacts
+  css-simple-clustering
+  css-plot-sorted --label sort_pos_simple
+
+The overview plot for that channel is written to:
+
+  /share/home/mitan/combinato_result/sub-007/A-017/overview/
+
+This is the default positive-spike pass. The folder name sort_pos_simple
+is the label Combinato stores.
+"""
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import h5py
+import numpy as np
+
+DATA_ROOT = Path("/share/workspace3/ieeg/micro/story_listen_v2")
+RESULT_ROOT = Path("/share/home/mitan/combinato_result")
+SUBJECTS = ["sub-007", "sub-008", "sub-010", "sub-011"]
+SR = 30000.0
+# Intan ADC counts to microvolts. The merged files are still raw integers.
+SCALE_TO_UV = np.float32(0.195)
+BLOCK = 200000
+COMMANDS = (
+    "css-extract",
+    "css-mask-artifacts",
+    "css-simple-clustering",
+    "css-plot-sorted",
+)
+
+ENV = os.environ.copy()
+ENV["MPLBACKEND"] = "Agg"
+
+
+def run(cmd, cwd):
+    print("+", " ".join(cmd))
+    subprocess.run(cmd, cwd=str(cwd), env=ENV, check=True)
+
+
+def time_axis(shape, n_channels):
+    if shape[0] == n_channels:
+        return 1
+    if shape[1] == n_channels:
+        return 0
+    raise ValueError(f"channel count {n_channels} does not match shape {shape}")
+
+
+def write_continuous(merged, index, axis, out_path):
+    """One channel as HDF5 /data plus /sr, which css-extract --h5 reads."""
+    with h5py.File(merged, "r") as src, h5py.File(out_path, "w") as out:
+        amp = src["amplifier_data"]
+        n = amp.shape[axis]
+        scale = SCALE_TO_UV if np.issubdtype(amp.dtype, np.integer) else np.float32(1)
+        out.create_dataset("sr", data=np.array([SR], dtype=np.float64))
+        data = out.create_dataset("data", shape=(n,), dtype=np.float32)
+        pos = 0
+        while pos < n:
+            take = min(BLOCK, n - pos)
+            if axis == 1:
+                piece = np.asarray(amp[index, pos:pos + take], dtype=np.float32)
+            else:
+                piece = np.asarray(amp[pos:pos + take, index], dtype=np.float32)
+            data[pos:pos + take] = piece * scale
+            pos += take
+
+
+def channel_list(merged):
+    with h5py.File(merged, "r") as f:
+        if "channel_number" not in f or "amplifier_data" not in f:
+            raise KeyError("merged file needs amplifier_data and channel_number")
+        numbers = [int(x) for x in f["channel_number"][:]]
+        if "brain_region" in f:
+            regions = []
+            for item in f["brain_region"][:]:
+                if isinstance(item, bytes):
+                    regions.append(item.decode())
+                else:
+                    regions.append(str(item))
+        else:
+            regions = [""] * len(numbers)
+        axis = time_axis(tuple(int(x) for x in f["amplifier_data"].shape), len(numbers))
+    return numbers, regions, axis
+
+
+def sort_channel(subject, number, region, merged, axis, index, result_root, run_cmd=run):
+    name = f"A-{number:03d}"
+    subject_dir = result_root / subject
+    ch_dir = subject_dir / name
+    data_h5 = ch_dir / f"data_{name}.h5"
+    overview = ch_dir / "overview"
+    subject_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n{subject} {name} {region}")
+    if overview.is_dir() and any(overview.glob("*.png")):
+        print(f"[SKIP] {next(overview.glob('*.png'))}")
+        return True
+
+    if not data_h5.is_file():
+        continuous_dir = subject_dir / "continuous"
+        continuous_dir.mkdir(parents=True, exist_ok=True)
+        continuous = continuous_dir / f"{name}.h5"
+        write_continuous(merged, index, axis, continuous)
+        run_cmd(
+            ["css-extract", "--h5", "--files", str(continuous), "--destination", str(subject_dir)],
+            subject_dir,
+        )
+        continuous.unlink()
+    if not data_h5.is_file():
+        print(f"[STOP] {subject} {name}: css-extract did not write {data_h5}")
+        return False
+
+    run_cmd(["css-mask-artifacts", "--datafile", str(data_h5)], ch_dir)
+    run_cmd(["css-simple-clustering", "--datafile", str(data_h5)], ch_dir)
+    run_cmd(
+        ["css-plot-sorted", "--datafile", str(data_h5), "--label", "sort_pos_simple"],
+        ch_dir,
+    )
+    plots = sorted(overview.glob("*.png")) if overview.is_dir() else []
+    if not plots:
+        print(f"[WARN] {subject} {name}: no overview plot was written")
+        return False
+    print(f"[PLOT] {plots[0]}")
+    return True
+
+
+def process_subject(subject, data_root=DATA_ROOT, result_root=RESULT_ROOT, run_cmd=run):
+    merged = data_root / subject / f"{subject}.mat"
+    print(f"\n{subject}")
+    if not merged.is_file():
+        print(f"[STOP] {subject}: merged file not found: {merged}")
+        return False
+    try:
+        numbers, regions, axis = channel_list(merged)
+    except Exception as exc:
+        print(f"[STOP] {subject}: {exc}")
+        return False
+    ok = True
+    for index, (number, region) in enumerate(zip(numbers, regions)):
+        if not sort_channel(subject, number, region, merged, axis, index, result_root, run_cmd):
+            ok = False
+    return ok
+
+
+def main():
+    missing = [cmd for cmd in COMMANDS if shutil.which(cmd) is None]
+    if missing:
+        raise SystemExit("Combinato command not on PATH: " + ", ".join(missing))
+    RESULT_ROOT.mkdir(parents=True, exist_ok=True)
+    print(f"[DIR] {RESULT_ROOT}")
+    ok = True
+    for subject in SUBJECTS:
+        if not process_subject(subject):
+            ok = False
+    if not ok:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
