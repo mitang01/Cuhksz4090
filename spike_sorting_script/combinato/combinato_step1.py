@@ -15,11 +15,21 @@ The overview plot for that channel is written to:
 
 This is the default positive-spike pass. The folder name sort_pos_simple
 is the label Combinato stores.
+
+There are 192 channels. The cluster allows 64 CPUs and 64 GB at once,
+so the channels are split into 64 jobs with 3 channels each:
+
+  python combinato_step1.py 1 64
+  python combinato_step1.py 2 64
+
+JOB is 1-based. Each job writes its own channel folders, so different
+jobs can run at the same time.
 """
 
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import h5py
@@ -32,6 +42,8 @@ SR = 30000.0
 # Intan ADC counts to microvolts. The merged files are still raw integers.
 SCALE_TO_UV = np.float32(0.195)
 BLOCK = 200000
+# 192 channels, 3 channels in each job.
+N_JOBS = 64
 COMMANDS = (
     "css-extract",
     "css-mask-artifacts",
@@ -41,6 +53,10 @@ COMMANDS = (
 
 ENV = os.environ.copy()
 ENV["MPLBACKEND"] = "Agg"
+ENV["OMP_NUM_THREADS"] = "1"
+ENV["MKL_NUM_THREADS"] = "1"
+ENV["OPENBLAS_NUM_THREADS"] = "1"
+ENV["NUMEXPR_NUM_THREADS"] = "1"
 
 
 def run(cmd, cwd):
@@ -134,33 +150,65 @@ def sort_channel(subject, number, region, merged, axis, index, result_root, run_
     return True
 
 
-def process_subject(subject, data_root=DATA_ROOT, result_root=RESULT_ROOT, run_cmd=run):
-    merged = data_root / subject / f"{subject}.mat"
-    print(f"\n{subject}")
-    if not merged.is_file():
-        print(f"[STOP] {subject}: merged file not found: {merged}")
-        return False
-    try:
-        numbers, regions, axis = channel_list(merged)
-    except Exception as exc:
-        print(f"[STOP] {subject}: {exc}")
-        return False
-    ok = True
-    for index, (number, region) in enumerate(zip(numbers, regions)):
-        if not sort_channel(subject, number, region, merged, axis, index, result_root, run_cmd):
-            ok = False
-    return ok
-
-
-def main():
-    missing = [cmd for cmd in COMMANDS if shutil.which(cmd) is None]
-    if missing:
-        raise SystemExit("Combinato command not on PATH: " + ", ".join(missing))
-    RESULT_ROOT.mkdir(parents=True, exist_ok=True)
-    print(f"[DIR] {RESULT_ROOT}")
-    ok = True
+def collect_tasks(data_root=DATA_ROOT):
+    tasks = []
     for subject in SUBJECTS:
-        if not process_subject(subject):
+        merged = data_root / subject / f"{subject}.mat"
+        if not merged.is_file():
+            print(f"[STOP] {subject}: merged file not found: {merged}")
+            continue
+        try:
+            numbers, regions, axis = channel_list(merged)
+        except Exception as exc:
+            print(f"[STOP] {subject}: {exc}")
+            continue
+        for index, (number, region) in enumerate(zip(numbers, regions)):
+            tasks.append((subject, number, region, merged, axis, index))
+    return tasks
+
+
+def parse_job(argv):
+    """Return (job, n_jobs). No arguments means one job that runs every channel."""
+    if len(argv) == 1:
+        return 1, 1
+    if len(argv) != 3:
+        raise SystemExit("usage: python combinato_step1.py [JOB N_JOBS]")
+    job = int(argv[1])
+    n_jobs = int(argv[2])
+    if n_jobs < 1 or job < 1 or job > n_jobs:
+        raise SystemExit("JOB must be from 1 to N_JOBS")
+    return job, n_jobs
+
+
+def slice_tasks(tasks, job, n_jobs):
+    n = len(tasks)
+    start = (job - 1) * n // n_jobs
+    stop = job * n // n_jobs
+    return tasks[start:stop]
+
+
+def main(argv=None, data_root=DATA_ROOT, result_root=RESULT_ROOT, run_cmd=run):
+    if argv is None:
+        argv = sys.argv
+    job, n_jobs = parse_job(argv)
+    tasks = collect_tasks(data_root)
+    if n_jobs == N_JOBS and len(tasks) != N_JOBS * 3:
+        print(f"[WARN] expected {N_JOBS * 3} channels for {N_JOBS} jobs, found {len(tasks)}")
+    chosen = slice_tasks(tasks, job, n_jobs)
+    print(f"[JOB] {job}/{n_jobs} channels={len(chosen)} of {len(tasks)}")
+    if not chosen:
+        if not tasks:
+            raise SystemExit(1)
+        return
+    if run_cmd is run:
+        missing = [cmd for cmd in COMMANDS if shutil.which(cmd) is None]
+        if missing:
+            raise SystemExit("Combinato command not on PATH: " + ", ".join(missing))
+    result_root.mkdir(parents=True, exist_ok=True)
+    print(f"[DIR] {result_root}")
+    ok = True
+    for subject, number, region, merged, axis, index in chosen:
+        if not sort_channel(subject, number, region, merged, axis, index, result_root, run_cmd):
             ok = False
     if not ok:
         raise SystemExit(1)
