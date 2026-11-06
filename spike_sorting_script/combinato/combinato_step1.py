@@ -16,14 +16,14 @@ The overview plot for that channel is written to:
 This is the default positive-spike pass. The folder name sort_pos_simple
 is the label Combinato stores.
 
-There are 192 channels. One process does them one after another, which
-does not finish in an hour. Split them into one channel per job:
+There are 192 channels. The cluster allows 64 CPUs and 64 GB at once,
+so the channels are split into 64 jobs with 3 channels each:
 
-  python combinato_step1.py 1 192
-  python combinato_step1.py 2 192
+  python combinato_step1.py 1 64
+  python combinato_step1.py 2 64
 
-JOB is 1-based. Each job writes its own channel folder, so the jobs can
-run at the same time.
+JOB is 1-based. Each job writes its own channel folders, so different
+jobs can run at the same time.
 """
 
 import os
@@ -42,6 +42,8 @@ SR = 30000.0
 # Intan ADC counts to microvolts. The merged files are still raw integers.
 SCALE_TO_UV = np.float32(0.195)
 BLOCK = 200000
+# 192 channels, 3 channels in each job.
+N_JOBS = 64
 COMMANDS = (
     "css-extract",
     "css-mask-artifacts",
@@ -190,6 +192,8 @@ def main(argv=None, data_root=DATA_ROOT, result_root=RESULT_ROOT, run_cmd=run):
         argv = sys.argv
     job, n_jobs = parse_job(argv)
     tasks = collect_tasks(data_root)
+    if n_jobs == N_JOBS and len(tasks) != N_JOBS * 3:
+        print(f"[WARN] expected {N_JOBS * 3} channels for {N_JOBS} jobs, found {len(tasks)}")
     chosen = slice_tasks(tasks, job, n_jobs)
     print(f"[JOB] {job}/{n_jobs} channels={len(chosen)} of {len(tasks)}")
     if not chosen:
