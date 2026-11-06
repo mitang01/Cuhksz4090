@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Plot spike rate against prosodic boundary-strength quartile.
+"""Plot spike rate and rasters against prosodic boundary-strength quartile.
 
 Uses the positive Combinato groups in sort_pos_simple. A spike counts when
 it falls in the 0–200 ms after a word boundary. Boundaries come from
 storyNN.prosodic_word_depth.tsv. Their times are placed on the recording
-clock by matching story durations to board_dig_in_data.
+clock by matching story durations to board_dig_in_data. Each group is also
+drawn as a raster of that same window, with boundaries ordered from the
+lowest quartile to the highest.
 
 Outputs are written under
 /share/home/mitan/combinato_result/boundary_strength_spike_rate/
@@ -315,6 +317,31 @@ def rates_for_group(spike_times, boundary_times):
     return (stop - start) / WINDOW_S
 
 
+def latencies_ms(spike_times, boundary_times):
+    """Spike times in each boundary window, in milliseconds after the boundary."""
+    if len(spike_times) == 0:
+        return [np.empty(0) for _ in boundary_times]
+    start = np.searchsorted(spike_times, boundary_times, side="left")
+    stop = np.searchsorted(spike_times, boundary_times + WINDOW_S, side="left")
+    return [(spike_times[a:b] - t0) * 1000.0 for a, b, t0 in zip(start, stop, boundary_times)]
+
+
+QUARTILE_COLORS = ["#4C78A8", "#F58518", "#54A24B", "#E45756"]
+
+
+def quartile_labels(strength, quartile):
+    labels = []
+    for level in (1, 2, 3, 4):
+        values = strength[quartile == level]
+        if len(values) == 0:
+            labels.append(f"Q{level}")
+        elif values.min() == values.max():
+            labels.append(f"Q{level}\n{values.min():.3g}")
+        else:
+            labels.append(f"Q{level}\n{values.min():.3g}–{values.max():.3g}")
+    return labels
+
+
 def group_name(gid):
     if gid == -1:
         return "artifact"
@@ -345,20 +372,86 @@ def plot_subject(subject, panels, strength, quartile, out_path):
             means = [item[2] if np.isfinite(item[2]) else 0.0 for item in summary]
             sems = [item[3] if np.isfinite(item[3]) else 0.0 for item in summary]
             axis.errorbar(levels, means, yerr=sems, marker="o", capsize=3, label=group_name(gid))
-        labels = []
-        for level in (1, 2, 3, 4):
-            values = strength[quartile == level]
-            if len(values) == 0:
-                labels.append(f"Q{level}")
-            else:
-                labels.append(f"Q{level}\n{values.min():.3g}–{values.max():.3g}")
-        axis.set_xticks([1, 2, 3, 4], labels)
+        axis.set_xticks([1, 2, 3, 4], quartile_labels(strength, quartile))
         axis.set_xlabel("Boundary strength quartile")
         axis.set_ylabel("Spike rate (Hz)")
         title = f"{channel} {region}".strip()
         axis.set_title(title)
         axis.legend(fontsize=8, frameon=False)
     fig.suptitle(f"{subject}: spike rate 0–200 ms after the boundary")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_raster_and_rate(subject, channel, region, groups, strength, quartile, out_path):
+    """One row per group: raster on the left, quartile rate on the right."""
+    if not groups:
+        return
+    order = np.lexsort((strength, quartile))
+    ordered_quartile = quartile[order]
+    n_rows = len(groups)
+    fig, axes = plt.subplots(
+        n_rows,
+        2,
+        figsize=(9.2, 2.6 * n_rows),
+        squeeze=False,
+        gridspec_kw={"width_ratios": [2.4, 1]},
+    )
+    labels = quartile_labels(strength, quartile)
+    for row, (gid, summary, latencies) in enumerate(groups):
+        raster = axes[row, 0]
+        rate = axes[row, 1]
+        ordered = [latencies[index] for index in order]
+        for level in (1, 2, 3, 4):
+            trials = np.flatnonzero(ordered_quartile == level)
+            if len(trials) == 0:
+                continue
+            raster.axhspan(trials[0] - 0.5, trials[-1] + 0.5, color=QUARTILE_COLORS[level - 1], alpha=0.12, zorder=0)
+            raster.text(
+                0.02,
+                float(np.mean(trials)),
+                f"Q{level}",
+                transform=raster.get_yaxis_transform(),
+                fontsize=8,
+                va="center",
+            )
+            xs = []
+            ys = []
+            for trial in trials:
+                spikes = ordered[int(trial)]
+                if len(spikes) == 0:
+                    continue
+                xs.append(spikes)
+                ys.append(np.full(len(spikes), trial))
+            if xs:
+                raster.scatter(
+                    np.concatenate(xs),
+                    np.concatenate(ys),
+                    s=8,
+                    c=QUARTILE_COLORS[level - 1],
+                    marker="|",
+                    linewidths=0.8,
+                    zorder=2,
+                )
+        raster.set_xlim(0, WINDOW_S * 1000.0)
+        raster.set_ylim(-0.5, max(len(order) - 0.5, 0.5))
+        raster.invert_yaxis()
+        raster.set_xlabel("Time after boundary (ms)")
+        raster.set_ylabel("Boundaries")
+        raster.set_title(f"{group_name(gid)} raster")
+        levels = [item[0] for item in summary]
+        means = [item[2] if np.isfinite(item[2]) else 0.0 for item in summary]
+        sems = [item[3] if np.isfinite(item[3]) else 0.0 for item in summary]
+        rate.errorbar(levels, means, yerr=sems, marker="o", capsize=3, color="0.2")
+        rate.set_xticks([1, 2, 3, 4], labels)
+        rate.set_xlabel("Boundary strength quartile")
+        rate.set_ylabel("Spike rate (Hz)")
+        rate.set_ylim(0, max(1.0, max(means) + max(sems)) * 1.15)
+        rate.set_title(f"{group_name(gid)} rate")
+    title = f"{subject} {channel} {region}".strip()
+    fig.suptitle(f"{title}: spikes 0–200 ms after the boundary")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
@@ -456,6 +549,8 @@ def analyze_subject(subject, boundary_time, strength, quartile, result_root, dat
     regions = region_by_channel(merged) if merged.is_file() else {}
     panels = []
     rate_rows = []
+    out_dir = result_root / "boundary_strength_spike_rate"
+    out_dir.mkdir(parents=True, exist_ok=True)
     for sort_path in channels:
         channel_dir = sort_path.parents[1]
         channel = channel_dir.name
@@ -464,10 +559,12 @@ def analyze_subject(subject, boundary_time, strength, quartile, result_root, dat
         data_path = channel_dir / f"data_{channel}.h5"
         groups = group_times(sort_path, data_path)
         lines = []
+        raster_groups = []
         for gid in sorted(groups):
             rates = rates_for_group(groups[gid], boundary_time)
             summary = mean_by_quartile(rates, quartile)
             lines.append((gid, summary))
+            raster_groups.append((gid, summary, latencies_ms(groups[gid], boundary_time)))
             for level, count, mean, sem in summary:
                 rate_rows.append(
                     {
@@ -482,8 +579,10 @@ def analyze_subject(subject, boundary_time, strength, quartile, result_root, dat
                     }
                 )
         panels.append((channel, region, lines))
+        raster_path = out_dir / f"{subject}_{channel}_raster_rate.png"
+        plot_raster_and_rate(subject, channel, region, raster_groups, strength, quartile, raster_path)
+        print(f"[PLOT] {raster_path}")
         print(f"[UNIT] {subject} {channel} {region}: {len(lines)} groups")
-    out_dir = result_root / "boundary_strength_spike_rate"
     plot_subject(subject, panels, strength, quartile, out_dir / f"{subject}_boundary_strength_spike_rate.png")
     print(f"[PLOT] {out_dir / f'{subject}_boundary_strength_spike_rate.png'}")
     return rate_rows
