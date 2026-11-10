@@ -11,19 +11,20 @@ For every kept channel it runs:
 
 The overview plot for that channel is written to:
 
-  /share/home/mitan/combinato_result/story_listen/sub-007/A-017/overview/
+  /share/home/mitan/combinato_result/word_boun/sub-009/A-001/overview/
 
 This is the default positive-spike pass. The folder name sort_pos_simple
 is the label Combinato stores.
 
-There are 192 channels. The cluster allows 64 CPUs and 64 GB at once,
-so the channels are split into 64 jobs with 3 channels each:
+There are 304 kept channels. The cluster still allows 64 CPUs and 64 GB
+at once, and each job still sorts at most 3 channels. 304 is not divisible
+by 3, so the channels are split into 102 jobs:
 
-  python combinato_step1.py 1 64
-  python combinato_step1.py 2 64
+  python combinato_step1.py 1 102
+  python combinato_step1.py 2 102
 
 JOB is 1-based. Each job writes its own channel folders, so different
-jobs can run at the same time.
+jobs can run at the same time. Results stay under combinato_result/word_boun.
 """
 
 import os
@@ -35,15 +36,16 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-DATA_ROOT = Path("/share/workspace3/ieeg/micro/story_listen_v2")
-RESULT_ROOT = Path("/share/home/mitan/combinato_result/story_listen")
-SUBJECTS = ["sub-007", "sub-008", "sub-010", "sub-011"]
+DATA_ROOT = Path("/share/workspace3/ieeg/micro/word_boun_perce_v2")
+RESULT_ROOT = Path("/share/home/mitan/combinato_result/word_boun")
+SUBJECTS = ["sub-007", "sub-008", "sub-009", "sub-010", "sub-011", "sub-012"]
 SR = 30000.0
 # Intan ADC counts to microvolts. The merged files are still raw integers.
 SCALE_TO_UV = np.float32(0.195)
 BLOCK = 200000
-# 192 channels, 3 channels in each job.
-N_JOBS = 64
+# 64+64+48+32+32+64 kept channels. At most 3 channels in each job.
+EXPECTED_CHANNELS = 304
+N_JOBS = 102
 COMMANDS = (
     "css-extract",
     "css-mask-artifacts",
@@ -192,8 +194,8 @@ def main(argv=None, data_root=DATA_ROOT, result_root=RESULT_ROOT, run_cmd=run):
         argv = sys.argv
     job, n_jobs = parse_job(argv)
     tasks = collect_tasks(data_root)
-    if n_jobs == N_JOBS and len(tasks) != N_JOBS * 3:
-        print(f"[WARN] expected {N_JOBS * 3} channels for {N_JOBS} jobs, found {len(tasks)}")
+    if n_jobs == N_JOBS and len(tasks) != EXPECTED_CHANNELS:
+        print(f"[WARN] expected {EXPECTED_CHANNELS} channels for {N_JOBS} jobs, found {len(tasks)}")
     chosen = slice_tasks(tasks, job, n_jobs)
     print(f"[JOB] {job}/{n_jobs} channels={len(chosen)} of {len(tasks)}")
     if not chosen:

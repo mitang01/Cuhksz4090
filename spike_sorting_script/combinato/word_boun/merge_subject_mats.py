@@ -1,34 +1,61 @@
 #!/usr/bin/env python3
-"""Merge story_listen_v2 Intan .mat chunks into one file per subject.
+"""Merge word_boun_perce_v2 Intan .mat chunks into one file per subject.
 
 Only the microwire channels listed in REGIONS are kept. Channel numbers
 are 1-based and match Intan names such as A-017. Output, when the chunks
 match and every requested channel is present:
 
-  /share/workspace3/ieeg/micro/story_listen_v2/sub-007/sub-007.mat
+  /share/workspace3/ieeg/micro/word_boun_perce_v2/sub-007/sub-007.mat
 
 Chunks are concatenated in filename order along the time axis.
 amplifier_data holds the kept channels. board_dig_in_data is copied in
 full when every chunk has it. channel_number and brain_region say which
 row is which. The merged file is HDF5. Read it with h5py.
 
+Raw folders:
+
+  /share/workspace3/ieeg/micro/word_boun_perce_v2/sub-007/ses-01
+  /share/workspace3/ieeg/micro/word_boun_perce_v2/sub-008/ses-01
+  /share/workspace3/ieeg/micro/word_boun_perce_v2/sub-009/ses-01
+  /share/workspace3/ieeg/micro/word_boun_perce_v2/sub-010/ses-01
+  /share/workspace3/ieeg/micro/word_boun_perce_v2/sub-011/ses-02
+  /share/workspace3/ieeg/micro/word_boun_perce_v2/sub-012
+
+sub-008 has one raw file, so nothing is concatenated. A raw export is
+rewritten into the merged layout. A file that already has that layout is
+moved to sub-008/sub-008.mat. Raw chunks for the other subjects stay where
+they are.
+
+sub-012 keeps its raw files directly in the subject folder. There is no
+session directory.
+
+Sorting results are not written here. combinato_step1.py writes those
+under /share/home/mitan/combinato_result/word_boun.
+
 If amplifier channel counts, digital channel counts, or channel names
 disagree inside one subject, or a requested channel is missing, that
 subject is skipped and the reason is printed. Other subjects continue.
 """
 
+import shutil
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-ROOT = Path("/share/workspace3/ieeg/micro/story_listen_v2")
+ROOT = Path("/share/workspace3/ieeg/micro/word_boun_perce_v2")
+# Session folder under the subject. None means the raw files are in the
+# subject folder itself.
 SUBJECTS = [
     ("sub-007", "ses-01"),
     ("sub-008", "ses-01"),
+    ("sub-009", "ses-01"),
     ("sub-010", "ses-01"),
     ("sub-011", "ses-02"),
+    ("sub-012", None),
 ]
+# One raw .mat. Do not concatenate. Still write <subject>/<subject>.mat.
+SINGLE_FILE_SUBJECTS = {"sub-008"}
 # Inclusive 1-based channel numbers.
 REGIONS = {
     "sub-007": [
@@ -43,6 +70,11 @@ REGIONS = {
         (49, 64, "HG"),
         (97, 112, "VmPFC"),
     ],
+    "sub-009": [
+        (1, 16, "Amygdala"),
+        (17, 32, "VmPFC"),
+        (33, 48, "HG"),
+    ],
     "sub-010": [
         (17, 32, "Amygdala"),
         (33, 48, "VmPFC"),
@@ -50,6 +82,13 @@ REGIONS = {
     "sub-011": [
         (17, 32, "HG"),
         (33, 48, "ATL"),
+    ],
+    "sub-012": [
+        (1, 16, "ATL"),
+        (17, 32, "HG"),
+        (33, 48, "Amygdala"),
+        # Same VmPFC spelling as the other subjects.
+        (49, 64, "VmPFC"),
     ],
 }
 BLOCK = 200000
@@ -271,7 +310,7 @@ def write_merged(files_info, out_path, indices, numbers, regions):
             if usable(first["amp_names"]):
                 kept_names = [first["amp_names"][i] for i in indices]
                 out.create_dataset("amplifier_channel_names", data=np.asarray(kept_names, dtype=text))
-            source = [info["path"].name for info in files_info]
+            source = [info.get("source_name", info["path"].name) for info in files_info]
             out.create_dataset("source_files", data=np.asarray(source, dtype=text))
         tmp.replace(out_path)
     except Exception:
@@ -281,14 +320,249 @@ def write_merged(files_info, out_path, indices, numbers, regions):
     return n_keep, n_time
 
 
-def merge_subject(subject, session, root=ROOT):
-    session_dir = root / subject / session
-    out_path = root / subject / f"{subject}.mat"
+def raw_directory(subject, session, root):
+    if session is None:
+        return root / subject
+    return root / subject / session
+
+
+def output_path(subject, root):
+    return root / subject / f"{subject}.mat"
+
+
+def text_list(dataset):
+    values = []
+    for item in np.asarray(dataset).ravel():
+        if isinstance(item, bytes):
+            values.append(item.decode())
+        else:
+            values.append(str(item))
+    return values
+
+
+def layout_status(path, numbers, regions):
+    """Return 'prepared', 'raw', or a reason the file cannot be used."""
+    if not path.is_file():
+        return "missing"
+    if not h5py.is_hdf5(str(path)):
+        return "raw"
+    with h5py.File(path, "r") as h5:
+        if "amplifier_data" not in h5:
+            return f"{path.name} has no amplifier_data"
+        if "channel_number" not in h5 or "brain_region" not in h5:
+            return "raw"
+        got_numbers = [int(x) for x in np.asarray(h5["channel_number"]).ravel()]
+        got_regions = text_list(h5["brain_region"])
+        shape = tuple(int(x) for x in h5["amplifier_data"].shape)
+    if got_numbers == list(numbers) and got_regions == list(regions) and len(numbers) in shape:
+        return "prepared"
+    return (
+        f"{path.name} already has channel_number and brain_region, "
+        "but they do not match the word_boun channel map"
+    )
+
+
+def as_text(value):
+    if isinstance(value, bytes):
+        return value.decode().strip()
+    if isinstance(value, str):
+        return value.strip()
+    arr = np.asarray(value).ravel()
+    if arr.size == 0:
+        return ""
+    if arr.dtype.kind in {"U", "S"}:
+        return "".join(str(x) for x in arr).strip()
+    if np.issubdtype(arr.dtype, np.integer):
+        return "".join(chr(int(c)) for c in arr if 0 < int(c) < 256).strip()
+    return ""
+
+
+def legacy_channel_names(channels):
+    names = []
+    for obj in np.asarray(channels).ravel():
+        name = ""
+        if isinstance(obj, np.void) and obj.dtype.names:
+            for field in ("native_channel_name", "custom_channel_name"):
+                if field in obj.dtype.names:
+                    name = as_text(obj[field])
+                    if name:
+                        break
+        else:
+            for field in ("native_channel_name", "custom_channel_name"):
+                if hasattr(obj, field):
+                    name = as_text(getattr(obj, field))
+                    if name:
+                        break
+        names.append(name)
+    return names
+
+
+def write_name_refs(h5, group_name, names):
+    group = h5.create_group(group_name)
+    ref_dtype = h5py.special_dtype(ref=h5py.Reference)
+    refs = []
+    for i, name in enumerate(names):
+        ds = h5.create_dataset(
+            f"_names/{group_name}/{i}",
+            data=np.array([ord(c) for c in name], dtype=np.uint16),
+        )
+        refs.append(ds.ref)
+    group.create_dataset(
+        "native_channel_name",
+        data=np.array(refs, dtype=ref_dtype).reshape(len(names), 1),
+    )
+
+
+def convert_legacy_mat(src, dest):
+    """Copy a pre-v7.3 .mat into the HDF5 layout inspect_file reads."""
+    try:
+        from scipy.io import loadmat
+    except ImportError as exc:
+        raise RuntimeError(
+            f"{src.name} is not an HDF5/v7.3 mat file, and scipy is not installed"
+        ) from exc
+    mat = loadmat(str(src), squeeze_me=True, struct_as_record=True)
+    if "amplifier_data" not in mat:
+        raise KeyError(f"{src.name} has no amplifier_data")
+    amp = np.asarray(mat["amplifier_data"])
+    if amp.ndim != 2:
+        raise ValueError(f"{src.name}: amplifier_data shape {amp.shape} is not 2D")
+    names = legacy_channel_names(mat["amplifier_channels"]) if "amplifier_channels" in mat else []
+    if not names or len(names) not in amp.shape:
+        names = []
+    if dest.exists():
+        dest.unlink()
+    with h5py.File(dest, "w") as h5:
+        h5.create_dataset("amplifier_data", data=amp)
+        if names:
+            write_name_refs(h5, "amplifier_channels", names)
+        if "board_dig_in_data" in mat:
+            dig = np.asarray(mat["board_dig_in_data"])
+            if dig.ndim != 2:
+                raise ValueError(f"{src.name}: board_dig_in_data shape {dig.shape} is not 2D")
+            h5.create_dataset("board_dig_in_data", data=dig)
+            if "board_dig_in_channels" in mat:
+                dig_names = legacy_channel_names(mat["board_dig_in_channels"])
+                if dig_names and len(dig_names) in dig.shape:
+                    write_name_refs(h5, "board_dig_in_channels", dig_names)
+
+
+def list_raw_mats(directory, out_path, other_names=False):
+    """Raw inputs in directory. The merged output file is not an input.
+
+    Chunks are named Temp_*.mat. A single-file subject may instead have one
+    differently named .mat.
+    """
+    temps = sorted(p for p in directory.glob("Temp_*.mat") if p.is_file())
+    if temps or not other_names:
+        mats = temps
+    else:
+        mats = sorted(p for p in directory.glob("*.mat") if p.is_file())
+    skipped = out_path.resolve() if out_path.exists() else None
+    return [p for p in mats if skipped is None or p.resolve() != skipped]
+
+
+def write_one(subject, src, out_path):
+    """Select this subject's channels from one raw file and write out_path."""
+    numbers, regions = wanted(subject)
+    converted = None
+    read_path = src
+    try:
+        if not h5py.is_hdf5(str(src)):
+            converted = out_path.with_name(out_path.name + ".legacy.h5")
+            convert_legacy_mat(src, converted)
+            read_path = converted
+            print(f"  transformed {src.name} from MATLAB into HDF5")
+        info = inspect_file(read_path)
+        info["source_name"] = src.name
+        detail, reasons = mismatch_lines([info])
+        for line in detail:
+            print(line)
+        if reasons:
+            print(f"[STOP] {subject}: not written.")
+            for line in reasons:
+                print(f"  {line}")
+            return False
+        indices, how = channel_indices(info, numbers)
+        if indices is None:
+            print(f"[STOP] {subject}: not written.")
+            print(f"  {how}")
+            return False
+        if how == "position":
+            print("  channel names were not found; selected channels by 1-based position")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        n_keep, n_time = write_merged([info], out_path, indices, numbers, regions)
+    finally:
+        if converted is not None and converted.exists():
+            converted.unlink()
+    print(f"[WROTE] {out_path}")
+    print(f"  single file, no concatenation; source {src.name}")
+    print(f"  amplifier_channels={n_keep} samples={n_time}")
+    for start, end, region in REGIONS[subject]:
+        print(f"  {region}: {start}-{end}")
+    return True
+
+
+def place_single(subject, session, root):
+    """Put one raw subject file at the merged-file path."""
+    src_dir = raw_directory(subject, session, root)
+    out_path = output_path(subject, root)
+    numbers, regions = wanted(subject)
+    print(f"\n{subject}")
+    print("  one raw file: select channels and write the merged-file layout")
+    mats = list_raw_mats(src_dir, out_path, other_names=True) if src_dir.is_dir() else []
+    if len(mats) > 1:
+        print(f"[STOP] {subject}: expected one raw .mat in {src_dir}, found {len(mats)}")
+        for path in mats:
+            print(f"  {path.name}")
+        return False
+    if not mats:
+        if not src_dir.is_dir() and not out_path.is_file():
+            print(f"[STOP] {subject}: raw folder not found: {src_dir}")
+            return False
+        status = layout_status(out_path, numbers, regions)
+        if status == "prepared":
+            print(f"[SKIP] {out_path} is already the merged file")
+            return True
+        if status == "raw":
+            print(f"  raw file is already at {out_path}; rewriting the merged layout")
+            return write_one(subject, out_path, out_path)
+        print(f"[STOP] {subject}: no raw .mat in {src_dir}")
+        if status != "missing":
+            print(f"  {status}")
+        return False
+
+    src = mats[0]
+    status = layout_status(src, numbers, regions)
+    if status == "prepared":
+        if src.resolve() == out_path.resolve():
+            print(f"[SKIP] {out_path} is already the merged file")
+            return True
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        holding = out_path.with_name(out_path.name + ".moving")
+        if holding.exists():
+            holding.unlink()
+        shutil.move(str(src), str(holding))
+        if out_path.exists():
+            out_path.unlink()
+        holding.replace(out_path)
+        print(f"[MOVED] {src} -> {out_path}")
+        return True
+    if status != "raw":
+        print(f"[STOP] {subject}: not written.")
+        print(f"  {status}")
+        return False
+    return write_one(subject, src, out_path)
+
+
+def merge_subject(subject, session, root):
+    session_dir = raw_directory(subject, session, root)
+    out_path = output_path(subject, root)
     print(f"\n{subject}")
     if not session_dir.is_dir():
-        print(f"[STOP] {subject}: session folder not found: {session_dir}")
+        print(f"[STOP] {subject}: raw folder not found: {session_dir}")
         return False
-    mats = sorted(session_dir.glob("Temp_*.mat"))
+    mats = list_raw_mats(session_dir, out_path)
     if not mats:
         print(f"[STOP] {subject}: no Temp_*.mat files in {session_dir}")
         return False
@@ -327,7 +601,11 @@ def merge_subject(subject, session, root=ROOT):
 def main():
     ok = True
     for subject, session in SUBJECTS:
-        if not merge_subject(subject, session):
+        if subject in SINGLE_FILE_SUBJECTS:
+            done = place_single(subject, session, ROOT)
+        else:
+            done = merge_subject(subject, session, ROOT)
+        if not done:
             ok = False
     if not ok:
         raise SystemExit(1)
