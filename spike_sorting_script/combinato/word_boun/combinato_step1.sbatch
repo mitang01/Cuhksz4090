@@ -8,7 +8,9 @@
 #SBATCH --array=1-102%8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
-#SBATCH --time=03:00:00
+#SBATCH --partition=gpu3node
+#SBATCH --nodelist=gpu05
+#SBATCH --time=04:00:00
 #SBATCH --output=/share/home/mitan/combinato_result/word_boun/logs/%A_%a.out
 #SBATCH --error=/share/home/mitan/combinato_result/word_boun/logs/%A_%a.err
 
