@@ -17,11 +17,11 @@ This is the default positive-spike pass. The folder name sort_pos_simple
 is the label Combinato stores.
 
 There are 304 kept channels. The cluster still allows 64 CPUs and 64 GB
-at once, and each job still sorts at most 3 channels. 304 is not divisible
-by 3, so the channels are split into 102 jobs:
+at once. The channels are split into 38 jobs with 8 channels each, and
+each job is allowed 4 hours:
 
-  python combinato_step1.py 1 102
-  python combinato_step1.py 2 102
+  python combinato_step1.py 1 38
+  python combinato_step1.py 2 38
 
 JOB is 1-based. Each job writes its own channel folders, so different
 jobs can run at the same time. Results stay under combinato_result/word_boun.
@@ -43,9 +43,9 @@ SR = 30000.0
 # Intan ADC counts to microvolts. The merged files are still raw integers.
 SCALE_TO_UV = np.float32(0.195)
 BLOCK = 200000
-# 64+64+48+32+32+64 kept channels. At most 3 channels in each job.
+# 64+64+48+32+32+64 kept channels. 8 channels in each of 38 jobs.
 EXPECTED_CHANNELS = 304
-N_JOBS = 102
+N_JOBS = 38
 COMMANDS = (
     "css-extract",
     "css-mask-artifacts",
