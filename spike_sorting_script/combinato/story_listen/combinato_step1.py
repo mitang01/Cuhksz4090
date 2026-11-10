@@ -11,7 +11,7 @@ For every kept channel it runs:
 
 The overview plot for that channel is written to:
 
-  /share/home/mitan/combinato_result/sub-007/A-017/overview/
+  /share/home/mitan/combinato_result/story_listen/sub-007/A-017/overview/
 
 This is the default positive-spike pass. The folder name sort_pos_simple
 is the label Combinato stores.
@@ -36,7 +36,7 @@ import h5py
 import numpy as np
 
 DATA_ROOT = Path("/share/workspace3/ieeg/micro/story_listen_v2")
-RESULT_ROOT = Path("/share/home/mitan/combinato_result")
+RESULT_ROOT = Path("/share/home/mitan/combinato_result/story_listen")
 SUBJECTS = ["sub-007", "sub-008", "sub-010", "sub-011"]
 SR = 30000.0
 # Intan ADC counts to microvolts. The merged files are still raw integers.

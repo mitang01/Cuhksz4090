@@ -9,7 +9,7 @@ drawn as a raster of that same window, with boundaries ordered from the
 lowest quartile to the highest.
 
 Outputs are written under
-/share/home/mitan/combinato_result/boundary_strength_spike_rate/
+/share/home/mitan/combinato_result/story_listen/boundary_strength_spike_rate/
 """
 
 import csv
@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 DATA_ROOT = Path("/share/workspace3/ieeg/micro/story_listen_v2")
-RESULT_ROOT = Path("/share/home/mitan/combinato_result")
+RESULT_ROOT = Path("/share/home/mitan/combinato_result/story_listen")
 STORY_ROOT = Path("/share/workspace3/ieeg/seeg/story_listen_v2")
 PROSODY_ROOT = Path("/share/home/mitan/seeg_story_listen_v2/prosodic_word_depth")
 SUBJECTS = ["sub-007", "sub-008", "sub-010", "sub-011"]

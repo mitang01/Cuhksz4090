@@ -11,7 +11,7 @@ One channel per job, so four jobs can finish within an hour:
 
   python combinato_step1_test.py 1 4
 
-Plots are written under /share/home/mitan/combinato_result/sub-007/.
+Plots are written under /share/home/mitan/combinato_result/story_listen/sub-007/.
 """
 
 import shutil
