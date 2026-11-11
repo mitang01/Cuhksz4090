@@ -10,7 +10,7 @@
 #SBATCH --mem=8G
 #SBATCH --partition=gpu3node
 #SBATCH --nodelist=gpu05
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=/share/home/mitan/combinato_result/word_boun/logs/%A_%a.out
 #SBATCH --error=/share/home/mitan/combinato_result/word_boun/logs/%A_%a.err
 
