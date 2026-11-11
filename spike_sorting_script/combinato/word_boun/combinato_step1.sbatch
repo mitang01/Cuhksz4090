@@ -3,7 +3,8 @@
 # 8 x 8 CPUs = 64 CPUs and 8 x 8 GB = 64 GB.
 # Submit from the Cuhksz4090 repo:
 #   mkdir -p /share/home/mitan/combinato_result/word_boun/logs
-#   sbatch spike_sorting_script/combinato/word_boun/combinato_step1.sbatch
+#   cd /share/home/mitan/Cuhksz4090/spike_sorting_script/combinato/word_boun
+#   sbatch combinato_step1.sbatch
 #SBATCH --job-name=word-boun-step1
 #SBATCH --array=1-38%8
 #SBATCH --cpus-per-task=8
@@ -20,4 +21,4 @@ eval "$(conda shell.bash hook)"
 conda activate data-proc
 
 cd "${SLURM_SUBMIT_DIR}"
-python spike_sorting_script/combinato/word_boun/combinato_step1.py "${SLURM_ARRAY_TASK_ID}" 38
+python combinato_step1.py "${SLURM_ARRAY_TASK_ID}" 38
