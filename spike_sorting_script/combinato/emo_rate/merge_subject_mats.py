@@ -13,8 +13,10 @@ triggers match:
 
 Raw chunks, concatenated in this order:
 
-  /share/workspace3/ieeg/micro/Temp_260823_182352.mat
-  /share/workspace3/ieeg/micro/Temp_260823_183352.mat
+  /share/workspace3/ieeg/micro/Temp_260823_153855.mat
+  /share/workspace3/ieeg/micro/Temp_260823_154855.mat
+  /share/workspace3/ieeg/micro/Temp_260823_155855.mat
+  /share/workspace3/ieeg/micro/Temp_260823_160855.mat
 
 A filename with a leading space is used only when the path above is
 missing and that spaced name is present.
@@ -37,8 +39,10 @@ import h5py
 import numpy as np
 
 RAW_FILES = [
-    Path("/share/workspace3/ieeg/micro/Temp_260823_182352.mat"),
-    Path("/share/workspace3/ieeg/micro/Temp_260823_183352.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_153855.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_154855.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_155855.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_160855.mat"),
 ]
 OUT = Path("/share/workspace3/ieeg/micro/sub-012.mat")
 SUBJECT = "sub-012"
@@ -799,7 +803,7 @@ def evaluate_triggers(files_info):
         if all(info["n_dig"] is None for info in files_info):
             reason = "board_dig_in_data is missing, so the stimulus triggers cannot be checked."
         else:
-            reason = "board_dig_in_data cannot be concatenated across the two files."
+            reason = "board_dig_in_data cannot be concatenated across the raw chunks."
         return {
             "ok": False,
             "pattern": None,
@@ -855,7 +859,7 @@ def merge_subject(paths, out_path, subject=SUBJECT):
         not_written(out_path, "a raw chunk is missing.")
         return False
     if len({path.resolve() for path in paths}) != len(paths):
-        not_written(out_path, "the two raw paths are the same file.")
+        not_written(out_path, "a raw path is repeated.")
         return False
     if any(path.resolve() == out_path.resolve() for path in paths):
         not_written(out_path, "the output path is one of the raw inputs.")
