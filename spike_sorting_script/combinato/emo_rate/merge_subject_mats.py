@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
-"""Merge the emotion-rating Intan chunks for sub-012.
+"""Merge confirmed audio-emotion-rating Intan chunks for four subjects.
 
-The task sends 25 stimulus triggers, and the subject makes three
-responses to each stimulus. Those events are read from board_dig_in_data
-(the Intan digital input, also called broad_dig_in). The merged file is
-written only when that pattern is present.
+Each subject has two Temp_*.mat chunks. They are concatenated in the
+order listed below. board_dig_in_data (the Intan digital input, also
+called broad_dig_in) is scanned with the same 25-stimulus, 3-response
+report used for sub-012. These four recordings are confirmed task data,
+so the merged file is still written when that pattern is absent. The
+report is what shows whether the pattern is present.
 
-Output, when the chunks agree, the requested microwires exist, and the
-triggers match:
+Outputs, when the chunks agree and the requested microwires exist:
 
-  /share/workspace3/ieeg/micro/sub-012.mat
+  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-007/sub-007.mat
+  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-008/sub-008.mat
+  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-010/sub-010.mat
+  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-011/sub-011.mat
 
-Raw chunks, concatenated in this order:
+Raw chunks:
 
-  /share/workspace3/ieeg/micro/Temp_260823_174625.mat
-  /share/workspace3/ieeg/micro/Temp_260823_175625.mat
-  /share/workspace3/ieeg/micro/Temp_260823_180625.mat
-  /share/workspace3/ieeg/micro/Temp_260823_181625.mat
+  sub-007: Temp_260323_102648.mat, Temp_260323_103648.mat
+  sub-008/ses-01: Temp_260404_130758.mat, Temp_260404_131758.mat
+  sub-010/ses-01: Temp_260604_102828.mat, Temp_260604_103828.mat
+  sub-011/ses-02: Temp_260615_095633.mat, Temp_260615_100633.mat
 
-A filename with a leading space is used only when the path above is
+A filename with a leading space is used only when the listed path is
 missing and that spaced name is present.
 
-Only sub-012 is part of this project. Kept microwires use the same map
-as sub-012 in word_boun. amplifier_data holds those channels.
-board_dig_in_data is copied in full. channel_number and brain_region say
-which row is which. The merged file is HDF5. Read it with h5py.
+Kept microwires use the same maps as these subjects in word_boun.
+amplifier_data holds those channels. board_dig_in_data is copied in
+full. channel_number and brain_region say which row is which. The
+merged file is HDF5. Read it with h5py.
 
-Sorting results are not written here. combinato_step1.py writes those
-under /share/home/mitan/combinato_result/emo_rate.
-
-If the digital input does not show the task, or the chunks disagree, the
-reason is printed and sub-012.mat is not written.
+sub-012 is not merged here. Sorting results are not written here.
 """
 
 from pathlib import Path
@@ -38,21 +38,37 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-RAW_FILES = [
-    Path("/share/workspace3/ieeg/micro/Temp_260823_174625.mat"),
-    Path("/share/workspace3/ieeg/micro/Temp_260823_175625.mat"),
-    Path("/share/workspace3/ieeg/micro/Temp_260823_180625.mat"),
-    Path("/share/workspace3/ieeg/micro/Temp_260823_181625.mat"),
+ROOT = Path("/share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1")
+# Subject, session folder or None, chunk names in concatenation order.
+SUBJECTS = [
+    ("sub-007", None, ["Temp_260323_102648.mat", "Temp_260323_103648.mat"]),
+    ("sub-008", "ses-01", ["Temp_260404_130758.mat", "Temp_260404_131758.mat"]),
+    ("sub-010", "ses-01", ["Temp_260604_102828.mat", "Temp_260604_103828.mat"]),
+    ("sub-011", "ses-02", ["Temp_260615_095633.mat", "Temp_260615_100633.mat"]),
 ]
-OUT = Path("/share/workspace3/ieeg/micro/sub-012.mat")
-SUBJECT = "sub-012"
-# Inclusive 1-based channel numbers. Same map as word_boun sub-012.
-REGIONS = [
-    (1, 16, "ATL"),
-    (17, 32, "HG"),
-    (33, 48, "Amygdala"),
-    (49, 64, "VmPFC"),
-]
+# Inclusive 1-based channel numbers. Same maps as word_boun.
+REGIONS = {
+    "sub-007": [
+        (17, 32, "ATL"),
+        (33, 48, "VmPFC"),
+        (65, 80, "HG"),
+        (97, 112, "Amygdala"),
+    ],
+    "sub-008": [
+        (17, 32, "ATL"),
+        (33, 48, "Amygdala"),
+        (49, 64, "HG"),
+        (97, 112, "VmPFC"),
+    ],
+    "sub-010": [
+        (17, 32, "Amygdala"),
+        (33, 48, "VmPFC"),
+    ],
+    "sub-011": [
+        (17, 32, "HG"),
+        (33, 48, "ATL"),
+    ],
+}
 BLOCK = 200000
 N_STIMULI = 25
 RESPONSES_PER_STIMULUS = 3
@@ -151,10 +167,20 @@ def name_number(name):
     return int(digits)
 
 
-def wanted():
+def raw_directory(subject, session):
+    if session is None:
+        return ROOT / subject
+    return ROOT / subject / session
+
+
+def output_path(subject):
+    return ROOT / subject / f"{subject}.mat"
+
+
+def wanted(subject):
     numbers = []
     regions = []
-    for start, end, region in REGIONS:
+    for start, end, region in REGIONS[subject]:
         for number in range(start, end + 1):
             numbers.append(number)
             regions.append(region)
@@ -819,7 +845,7 @@ def evaluate_triggers(files_info):
     return decision
 
 
-def resolve_raw_files(paths):
+def resolve_raw_files(subject, paths):
     resolved = []
     for path in paths:
         if path.is_file():
@@ -830,45 +856,45 @@ def resolve_raw_files(paths):
             print(f"  using {spaced} in place of missing {path}")
             resolved.append(spaced)
             continue
-        print(f"[STOP] {SUBJECT}: raw file not found: {path}")
+        print(f"[STOP] {subject}: raw file not found: {path}")
         parent = path.parent
         if parent.is_dir():
-            nearby = sorted(item.name for item in parent.glob("Temp_260823*.mat"))
+            nearby = sorted(item.name for item in parent.glob("Temp_*.mat"))
             if nearby:
-                print("  Temp_260823 files in that folder:")
+                print("  Temp_*.mat files in that folder:")
                 for name in nearby:
                     print(f"    {name}")
             else:
-                print(f"  no Temp_260823*.mat files in {parent}")
+                print(f"  no Temp_*.mat files in {parent}")
         else:
             print(f"  folder not found: {parent}")
         return None
     return resolved
 
 
-def not_written(out_path, reason):
-    print(f"[STOP] {SUBJECT}: {reason} {out_path} was not written.")
+def not_written(subject, out_path, reason):
+    print(f"[STOP] {subject}: {reason} {out_path} was not written.")
     if out_path.exists():
         print(f"  existing file left unchanged: {out_path}")
 
 
-def merge_subject(paths, out_path, subject=SUBJECT):
+def merge_subject(paths, out_path, subject):
     print(f"\n{subject}")
-    paths = resolve_raw_files(paths)
+    paths = resolve_raw_files(subject, paths)
     if paths is None:
-        not_written(out_path, "a raw chunk is missing.")
+        not_written(subject, out_path, "a raw chunk is missing.")
         return False
     if len({path.resolve() for path in paths}) != len(paths):
-        not_written(out_path, "a raw path is repeated.")
+        not_written(subject, out_path, "a raw path is repeated.")
         return False
     if any(path.resolve() == out_path.resolve() for path in paths):
-        not_written(out_path, "the output path is one of the raw inputs.")
+        not_written(subject, out_path, "the output path is one of the raw inputs.")
         return False
     try:
         files_info = [inspect_file(path) for path in paths]
     except Exception as exc:
         print(f"[STOP] {subject}: could not read chunks: {exc}")
-        not_written(out_path, "the chunks could not be read.")
+        not_written(subject, out_path, "the chunks could not be read.")
         return False
 
     detail, reasons = mismatch_lines(files_info)
@@ -877,28 +903,26 @@ def merge_subject(paths, out_path, subject=SUBJECT):
     triggers = evaluate_triggers(files_info)
     for line in triggers["lines"]:
         print(line)
-    if reasons or not triggers["ok"]:
-        if reasons:
-            print(f"[STOP] {subject}: chunks do not match.")
-            for line in reasons:
-                print(f"  {line}")
-        if not triggers["ok"]:
-            not_written(
-                out_path,
-                "board_dig_in does not show 25 stimuli with 3 responses each.",
-            )
-            for line in triggers["diagnostics"]:
-                print(line)
-        elif reasons:
-            not_written(out_path, "the chunks do not match.")
+    if not triggers["ok"]:
+        print(
+            f"[TRIGGERS] {subject}: board_dig_in does not show 25 stimuli "
+            "with 3 responses each."
+        )
+        for line in triggers["diagnostics"]:
+            print(line)
+    if reasons:
+        print(f"[STOP] {subject}: chunks do not match.")
+        for line in reasons:
+            print(f"  {line}")
+        not_written(subject, out_path, "the chunks do not match.")
         return False
 
-    numbers, regions = wanted()
+    numbers, regions = wanted(subject)
     indices, how = channel_indices(files_info[0], numbers)
     if indices is None:
-        print(f"[STOP] {subject}: triggers match, but channels were not selected.")
+        print(f"[STOP] {subject}: channels were not selected.")
         print(f"  {how}")
-        not_written(out_path, "the requested microwires are missing.")
+        not_written(subject, out_path, "the requested microwires are missing.")
         return False
     if how == "position":
         print("  channel names were not found; selected channels by 1-based position")
@@ -907,13 +931,19 @@ def merge_subject(paths, out_path, subject=SUBJECT):
     n_keep, n_time = write_merged(files_info, out_path, indices, numbers, regions)
     print(f"[WROTE] {out_path}")
     print(f"  amplifier_channels={n_keep} samples={n_time} files={len(paths)}")
-    for start, end, region in REGIONS:
+    for start, end, region in REGIONS[subject]:
         print(f"  {region}: {start}-{end}")
     return True
 
 
 def main():
-    if not merge_subject(RAW_FILES, OUT, SUBJECT):
+    ok = True
+    for subject, session, names in SUBJECTS:
+        folder = raw_directory(subject, session)
+        paths = [folder / name for name in names]
+        if not merge_subject(paths, output_path(subject), subject):
+            ok = False
+    if not ok:
         raise SystemExit(1)
 
 
