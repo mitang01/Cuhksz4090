@@ -13,10 +13,10 @@ triggers match:
 
 Raw chunks, concatenated in this order:
 
-  /share/workspace3/ieeg/micro/Temp_260823_153855.mat
-  /share/workspace3/ieeg/micro/Temp_260823_154855.mat
-  /share/workspace3/ieeg/micro/Temp_260823_155855.mat
-  /share/workspace3/ieeg/micro/Temp_260823_160855.mat
+  /share/workspace3/ieeg/micro/Temp_260823_174625.mat
+  /share/workspace3/ieeg/micro/Temp_260823_175625.mat
+  /share/workspace3/ieeg/micro/Temp_260823_180625.mat
+  /share/workspace3/ieeg/micro/Temp_260823_181625.mat
 
 A filename with a leading space is used only when the path above is
 missing and that spaced name is present.
@@ -39,10 +39,10 @@ import h5py
 import numpy as np
 
 RAW_FILES = [
-    Path("/share/workspace3/ieeg/micro/Temp_260823_153855.mat"),
-    Path("/share/workspace3/ieeg/micro/Temp_260823_154855.mat"),
-    Path("/share/workspace3/ieeg/micro/Temp_260823_155855.mat"),
-    Path("/share/workspace3/ieeg/micro/Temp_260823_160855.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_174625.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_175625.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_180625.mat"),
+    Path("/share/workspace3/ieeg/micro/Temp_260823_181625.mat"),
 ]
 OUT = Path("/share/workspace3/ieeg/micro/sub-012.mat")
 SUBJECT = "sub-012"
