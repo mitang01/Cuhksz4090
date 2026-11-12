@@ -1,82 +1,125 @@
 #!/usr/bin/env python3
-"""Merge confirmed audio-emotion-rating Intan chunks for four subjects.
+"""Find and merge the emotion-rating chunks for sub-012.
 
-Each subject has two Temp_*.mat chunks. They are concatenated in the
-order listed below. board_dig_in_data (the Intan digital input, also
-called broad_dig_in) is scanned with the same 25-stimulus, 3-response
-report used for sub-012. These four recordings are confirmed task data,
-so the merged file is still written when that pattern is absent. The
-report is what shows whether the pattern is present.
+The confirmed task pattern, measured on sub-007
+(Temp_260323_102648.mat + Temp_260323_103648.mat), is this many rising
+edges on board_dig_in_data (the Intan digital input, also called
+broad_dig_in):
 
-Outputs, when the chunks agree and the requested microwires exist:
+  channel 1: 12
+  channel 2: 12
+  channel 3: 12
+  channel 4: 10
+  channel 5: 10
+  channel 6: 0
+  channel 7: 1
+  channel 8: 1
 
-  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-007/sub-007.mat
-  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-008/sub-008.mat
-  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-010/sub-010.mat
-  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-011/sub-011.mat
+Each listed directory is searched on its own. Temp file names carry the
+start time. Successive files are adjacent when those start times are at
+most 15 minutes apart. The chunks here are named 10 minutes apart, so a
+missing file leaves a 20 minute gap and splits the run.
 
-Raw chunks:
+A candidate is a contiguous slice of an adjacent run lasting at least 20
+minutes. The task may run longer than 20 minutes when something in the
+room delays it. The saved slice is the shortest one whose rising-edge
+counts match. A chunk before or after that slice that adds no rising
+edges is left out. A quiet chunk in the middle stays, because the edges
+on either side hold it in the slice.
 
-  sub-007: Temp_260323_102648.mat, Temp_260323_103648.mat
-  sub-008/ses-01: Temp_260404_130758.mat, Temp_260404_131758.mat
-  sub-010/ses-01: Temp_260604_102828.mat, Temp_260604_103828.mat
-  sub-011/ses-02: Temp_260615_095633.mat, Temp_260615_100633.mat
+When exactly one slice matches, it is written to:
 
-A filename with a leading space is used only when the listed path is
-missing and that spaced name is present.
+  /share/workspace3/ieeg/micro/sub-012.mat
 
-Kept microwires use the same maps as these subjects in word_boun.
-amplifier_data holds those channels. board_dig_in_data is copied in
-full. channel_number and brain_region say which row is which. The
-merged file is HDF5. Read it with h5py.
+Kept microwires are the sub-012 map from word_boun: 1-16 ATL, 17-32 HG,
+33-48 Amygdala, 49-64 VmPFC. amplifier_data holds those channels.
+board_dig_in_data is copied in full. The merged file is HDF5.
 
-sub-012 is not merged here. Sorting results are not written here.
+When no slice matches, or more than one does, the trigger counts are
+printed and sub-012.mat is not written.
 """
 
+import re
+from datetime import datetime
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-ROOT = Path("/share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1")
-# Subject, session folder or None, chunk names in concatenation order.
-SUBJECTS = [
-    ("sub-007", None, ["Temp_260323_102648.mat", "Temp_260323_103648.mat"]),
-    ("sub-008", "ses-01", ["Temp_260404_130758.mat", "Temp_260404_131758.mat"]),
-    ("sub-010", "ses-01", ["Temp_260604_102828.mat", "Temp_260604_103828.mat"]),
-    ("sub-011", "ses-02", ["Temp_260615_095633.mat", "Temp_260615_100633.mat"]),
-]
-# Inclusive 1-based channel numbers. Same maps as word_boun.
-REGIONS = {
-    "sub-007": [
-        (17, 32, "ATL"),
-        (33, 48, "VmPFC"),
-        (65, 80, "HG"),
-        (97, 112, "Amygdala"),
-    ],
-    "sub-008": [
-        (17, 32, "ATL"),
-        (33, 48, "Amygdala"),
-        (49, 64, "HG"),
-        (97, 112, "VmPFC"),
-    ],
-    "sub-010": [
-        (17, 32, "Amygdala"),
-        (33, 48, "VmPFC"),
-    ],
-    "sub-011": [
-        (17, 32, "HG"),
-        (33, 48, "ATL"),
-    ],
-}
+SUBJECT = "sub-012"
+OUT = Path("/share/workspace3/ieeg/micro") / f"{SUBJECT}.mat"
+# Rising edges on digital channels 1..8, in that order.
+TARGET_COUNTS = (12, 12, 12, 10, 10, 0, 1, 1)
+MIN_SECONDS = 20 * 60
+# Named chunk step is 10 minutes. 15 minutes still rejects a skipped chunk.
+MAX_STEP_SECONDS = 15 * 60
+SR = 30000.0
 BLOCK = 200000
-N_STIMULI = 25
-RESPONSES_PER_STIMULUS = 3
-N_RESPONSES = N_STIMULI * RESPONSES_PER_STIMULUS
-N_PULSES = N_STIMULI + N_RESPONSES
-# Rising and falling indices are kept up to one stimulus plus its responses.
-KEEP_EDGES = N_PULSES
-
+# Edge indices are only stored up to this many. Counts themselves are complete.
+KEEP_EDGES = 128
+REGIONS = [
+    (1, 16, "ATL"),
+    (17, 32, "HG"),
+    (33, 48, "Amygdala"),
+    (49, 64, "VmPFC"),
+]
+# Directory, then the Temp chunk names to consider there.
+CANDIDATES = [
+    (
+        Path("/share/workspace3/ieeg/micro/0821/Temp_260821_163538"),
+        [
+            "Temp_260821_163538.mat",
+            "Temp_260821_164538.mat",
+            "Temp_260821_165538.mat",
+        ],
+    ),
+    (
+        Path("/share/workspace3/ieeg/micro/Temp_260822_160822"),
+        [
+            "Temp_260822_160822.mat",
+            "Temp_260822_161822.mat",
+            "Temp_260822_162822.mat",
+        ],
+    ),
+    (
+        Path("/share/workspace3/ieeg/micro/Temp_260822_163240"),
+        [
+            "Temp_260822_163240.mat",
+            "Temp_260822_164240.mat",
+            "Temp_260822_165240.mat",
+            "Temp_260822_170240.mat",
+            "Temp_260822_171240.mat",
+        ],
+    ),
+    (
+        Path("/share/workspace3/ieeg/micro/Temp_260822_171950"),
+        [
+            "Temp_260822_171950.mat",
+            "Temp_260822_172950.mat",
+        ],
+    ),
+    (
+        Path("/share/workspace3/ieeg/micro/Temp_260822_173235"),
+        [
+            "Temp_260822_173235.mat",
+            "Temp_260822_174235.mat",
+            "Temp_260822_175235.mat",
+            "Temp_260822_180235.mat",
+            "Temp_260822_181235.mat",
+        ],
+    ),
+    (
+        Path("/share/workspace3/ieeg/micro/Temp_260823_144306"),
+        [
+            "Temp_260823_144306.mat",
+            "Temp_260823_145306.mat",
+            "Temp_260823_150306.mat",
+            "Temp_260823_151306.mat",
+            "Temp_260823_152306.mat",
+        ],
+    ),
+]
+STAMP = re.compile(r"^Temp_(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.mat$")
 
 def channel_names(h5, group_key):
     if group_key not in h5:
@@ -165,26 +208,6 @@ def name_number(name):
     if not digits:
         return None
     return int(digits)
-
-
-def raw_directory(subject, session):
-    if session is None:
-        return ROOT / subject
-    return ROOT / subject / session
-
-
-def output_path(subject):
-    return ROOT / subject / f"{subject}.mat"
-
-
-def wanted(subject):
-    numbers = []
-    regions = []
-    for start, end, region in REGIONS[subject]:
-        for number in range(start, end + 1):
-            numbers.append(number)
-            regions.append(region)
-    return numbers, regions
 
 
 def channel_indices(info, numbers):
@@ -618,258 +641,449 @@ def build_candidates(files_info):
     return lines, candidates
 
 
-def grouping(stim, resp, per_stim):
-    stim = np.asarray(sorted(int(x) for x in stim), dtype=np.int64)
-    resp = np.asarray(sorted(int(x) for x in resp), dtype=np.int64)
-    if stim.size != N_STIMULI or resp.size != N_STIMULI * per_stim:
-        return False, None, None
-    before = int(np.sum(resp < stim[0]))
-    counts = []
-    for i in range(N_STIMULI - 1):
-        counts.append(int(np.sum((resp > stim[i]) & (resp < stim[i + 1]))))
-    counts.append(int(np.sum(resp > stim[-1])))
-    exact = int(np.sum(np.isin(resp, stim)))
-    ok = (
-        before == 0
-        and exact == 0
-        and counts == [per_stim] * N_STIMULI
-        and before + sum(counts) + exact == int(resp.size)
-    )
-    return ok, before, counts
+def wanted():
+    numbers = []
+    regions = []
+    for start, end, region in REGIONS:
+        for number in range(start, end + 1):
+            numbers.append(number)
+            regions.append(region)
+    return numbers, regions
 
 
-def pulses_from_edges(rising, falling):
-    if rising is None or falling is None:
+def file_stamp(path):
+    match = STAMP.match(path.name)
+    if match is None:
         return None
-    falling = [int(x) for x in falling]
-    pulses = []
-    j = 0
-    for onset in (int(x) for x in rising):
-        while j < len(falling) and falling[j] <= onset:
-            j += 1
-        if j >= len(falling):
-            return None
-        pulses.append((onset, falling[j] - onset))
-        j += 1
-    return pulses
+    year, month, day, hour, minute, second = (int(part) for part in match.groups())
+    return datetime(2000 + year, month, day, hour, minute, second)
 
 
-def width_groups(pulses):
-    """Split 100 pulses into 25 stimuli and 75 responses by width."""
-    if pulses is None or len(pulses) != N_PULSES:
-        return None
-    widths = np.array([width for _, width in pulses], dtype=np.int64)
-    onsets = np.array([onset for onset, _ in pulses], dtype=np.int64)
-    order = np.argsort(widths, kind="mergesort")
-    sorted_w = widths[order]
-    gap_short = int(sorted_w[N_STIMULI] - sorted_w[N_STIMULI - 1])
-    gap_long = int(sorted_w[N_RESPONSES] - sorted_w[N_RESPONSES - 1])
-    if gap_short <= 0 and gap_long <= 0:
-        return None
-    if gap_short > 0 and gap_long > 0 and min(gap_short, gap_long) * 2 >= max(gap_short, gap_long):
-        return None
-    if gap_long > gap_short:
-        stim_idx = order[N_RESPONSES:]
-        resp_idx = order[:N_RESPONSES]
-    else:
-        stim_idx = order[:N_STIMULI]
-        resp_idx = order[N_STIMULI:]
-    stim = np.sort(onsets[stim_idx])
-    resp = np.sort(onsets[resp_idx])
-    return stim, resp
-
-
-def edge_key(values):
-    if values is None:
-        return None
-    return tuple(int(x) for x in values)
-
-
-def decide(candidates):
-    """Return ok, pattern, confirm lines, and diagnostics.
-
-    A match is one of:
-      one response line with 75 rising edges, three after each stimulus
-      three response lines with 25 rising edges each, one after each stimulus
-      one line whose pulse widths split into 25 stimuli and 75 responses
-    Mirrored copies of the same edges count as one match.
-    """
-    matches = []
-    diagnostics = []
-    by_count = {}
-    for cand in candidates:
-        by_count.setdefault(cand["count"], []).append(cand)
-
-    c25 = [c for c in by_count.get(N_STIMULI, []) if c["rising"] is not None]
-    c75 = [c for c in by_count.get(N_RESPONSES, []) if c["rising"] is not None]
-    for stim in c25:
-        for resp in c75:
-            ok, before, counts = grouping(stim["rising"], resp["rising"], RESPONSES_PER_STIMULUS)
-            if ok:
-                matches.append(("one_response_line", stim, [resp]))
-            elif before is not None:
-                diagnostics.append(
-                    f"  {stim['name']} has 25 edges and {resp['name']} has 75, "
-                    f"but the responses are not 3 after each stimulus "
-                    f"(before first={before}, per stimulus={counts})"
-                )
-
-    if len(c25) >= 4:
-        for stim in c25:
-            good = []
-            for resp in c25:
-                if resp is stim:
-                    continue
-                ok, before, counts = grouping(stim["rising"], resp["rising"], 1)
-                if ok:
-                    good.append(resp)
-            if len(good) == 3:
-                matches.append(("three_response_lines", stim, good))
-
-    for cand in candidates:
-        if cand["count"] != N_PULSES or cand["rising"] is None:
-            continue
-        pulses = pulses_from_edges(cand["rising"], cand["falling"])
-        grouped = width_groups(pulses)
-        if grouped is None:
-            if cand["falling"] is None:
-                diagnostics.append(
-                    f"  {cand['name']} has 100 rising edges, but the falling edges "
-                    "were not kept, so pulse width could not be checked"
-                )
-            else:
-                diagnostics.append(
-                    f"  {cand['name']} has 100 rising edges, but the pulse widths do not "
-                    "separate into 25 stimuli and 75 responses"
-                )
-            continue
-        stim, resp = grouped
-        ok, before, counts = grouping(stim, resp, RESPONSES_PER_STIMULUS)
-        if ok:
-            stim_cand = {"name": cand["name"], "count": N_STIMULI, "rising": stim.tolist()}
-            resp_cand = {"name": cand["name"], "count": N_RESPONSES, "rising": resp.tolist()}
-            matches.append(("pulse_width", stim_cand, [resp_cand]))
-        else:
-            diagnostics.append(
-                f"  {cand['name']} pulse widths split into 25 and 75, but the 75 are not "
-                f"3 after each of the 25 (before first={before}, per stimulus={counts})"
-            )
-
-    grouped = {}
-    for pattern, stim, responses in matches:
-        key = (
-            pattern,
-            edge_key(stim["rising"]),
-            tuple(edge_key(item["rising"]) for item in responses),
-        )
-        bucket = grouped.setdefault(key, {"pattern": pattern, "stim": [], "responses": []})
-        if stim["name"] not in bucket["stim"]:
-            bucket["stim"].append(stim["name"])
-        for item in responses:
-            if item["name"] not in bucket["responses"]:
-                bucket["responses"].append(item["name"])
-
-    if len(grouped) == 1:
-        chosen = next(iter(grouped.values()))
-        pattern = chosen["pattern"]
-        stim_names = ", ".join(chosen["stim"])
-        resp_names = ", ".join(chosen["responses"])
-        if pattern == "one_response_line":
-            detail = "each of the 25 stimuli is followed by exactly 3 responses on that line"
-            resp_line = f"[CONFIRM] response triggers: {resp_names}, {N_RESPONSES} rising edges"
-        elif pattern == "three_response_lines":
-            detail = (
-                "each of the 25 stimuli is followed by exactly 1 response "
-                "on each of those 3 lines"
-            )
-            resp_line = (
-                f"[CONFIRM] response triggers: {resp_names}, "
-                f"{N_STIMULI} rising edges on each line ({N_RESPONSES} total)"
-            )
-        else:
-            detail = (
-                "pulse width separates 25 stimuli from 75 responses, and each stimulus "
-                "is followed by exactly 3 responses"
-            )
-            resp_line = f"[CONFIRM] response triggers: {resp_names}, {N_RESPONSES} rising edges"
-        lines = [
-            f"[CONFIRM] stimulus triggers: {stim_names}, {N_STIMULI} rising edges",
-            resp_line,
-            f"[CONFIRM] {detail}",
-        ]
-        return {"ok": True, "pattern": pattern, "lines": lines, "diagnostics": []}
-
-    if len(grouped) > 1:
-        diagnostics.insert(
-            0,
-            "  more than one trigger pattern matches, so the file was not written:",
-        )
-        for item in grouped.values():
-            diagnostics.append(
-                f"    {item['pattern']}: stimuli {', '.join(item['stim'])}; "
-                f"responses {', '.join(item['responses'])}"
-            )
-    elif not diagnostics:
-        counts = sorted((cand["count"], cand["name"]) for cand in candidates)
-        if not any(count == N_STIMULI for count, _ in counts):
-            diagnostics.append(f"  no line has {N_STIMULI} rising edges")
-        if not any(count in (N_RESPONSES, N_PULSES) for count, _ in counts) and len(c25) < 4:
-            diagnostics.append(
-                f"  no line has {N_RESPONSES} rising edges, and there are not 4 lines with "
-                f"{N_STIMULI}"
-            )
-        preview = ", ".join(f"{name}={count}" for count, name in counts[:12])
-        if preview:
-            diagnostics.append(f"  rising-edge counts: {preview}")
-    return {"ok": False, "pattern": None, "lines": [], "diagnostics": diagnostics}
-
-
-def evaluate_triggers(files_info):
-    if not can_scan(files_info):
-        if all(info["n_dig"] is None for info in files_info):
-            reason = "board_dig_in_data is missing, so the stimulus triggers cannot be checked."
-        else:
-            reason = "board_dig_in_data cannot be concatenated across the raw chunks."
-        return {
-            "ok": False,
-            "pattern": None,
-            "lines": [],
-            "diagnostics": [f"  {reason}"],
-        }
-    table, candidates = build_candidates(files_info)
-    decision = decide(candidates)
-    decision["lines"] = table + decision["lines"]
-    rate = sample_rate(files_info[0]["path"])
-    if rate is not None and decision["ok"]:
-        decision["lines"].append(f"[CONFIRM] board_dig_in sample rate: {rate:.6f} Hz")
-    return decision
-
-
-def resolve_raw_files(subject, paths):
-    resolved = []
+def split_runs(paths):
+    """Group paths into runs whose start times step by at most 15 minutes."""
+    stamped = []
     for path in paths:
-        if path.is_file():
-            resolved.append(path)
+        stamp = file_stamp(path)
+        if stamp is None:
+            print(f"  [SKIP] {path.name} does not match Temp_YYMMDD_HHMMSS.mat")
             continue
-        spaced = path.parent / f" {path.name}"
-        if spaced.is_file():
-            print(f"  using {spaced} in place of missing {path}")
-            resolved.append(spaced)
-            continue
-        print(f"[STOP] {subject}: raw file not found: {path}")
-        parent = path.parent
-        if parent.is_dir():
-            nearby = sorted(item.name for item in parent.glob("Temp_*.mat"))
-            if nearby:
-                print("  Temp_*.mat files in that folder:")
-                for name in nearby:
-                    print(f"    {name}")
-            else:
-                print(f"  no Temp_*.mat files in {parent}")
+        stamped.append((stamp, path))
+    stamped.sort(key=lambda item: (item[0], item[1].name))
+    runs = []
+    current = []
+    previous = None
+    for stamp, path in stamped:
+        if previous is not None:
+            delta = (stamp - previous).total_seconds()
+            if delta <= 0 or delta > MAX_STEP_SECONDS:
+                runs.append(current)
+                current = []
+        current.append(path)
+        previous = stamp
+    if current:
+        runs.append(current)
+    return runs
+
+
+def resolve_listed(directory, names):
+    found = []
+    missing = []
+    for name in names:
+        plain = directory / name
+        spaced = directory / f" {name}"
+        if plain.is_file():
+            found.append(plain)
+        elif spaced.is_file():
+            print(f"  using {spaced.name!r} in place of {name}")
+            found.append(spaced)
         else:
-            print(f"  folder not found: {parent}")
-        return None
-    return resolved
+            missing.append(name)
+    return found, missing
+
+
+def unlisted_temp(directory, names):
+    accepted = set(names)
+    accepted.update(f" {name}" for name in names)
+    extras = []
+    for pattern in ("Temp_*.mat", " Temp_*.mat"):
+        for path in sorted(directory.glob(pattern)):
+            if path.name not in accepted:
+                extras.append(path.name)
+    return extras
+
+
+def profile_digital(info):
+    """Rising edges inside one file, plus the first and last sample.
+
+    The first sample is not a rising edge. A later file can still count a
+    rise on its first sample when the previous file ended low.
+    """
+    n_ch = info["n_dig"]
+    axis = info["dig_time_axis"]
+    internal = np.zeros(n_ch, dtype=np.int64)
+    max_value = np.zeros(n_ch, dtype=np.float64)
+    uniques = [set() for _ in range(n_ch)]
+    many = [False] * n_ch
+    high_first = None
+    high_last = None
+    prev = np.zeros(n_ch, dtype=bool)
+    at_start = True
+    with h5py.File(info["path"], "r") as h5:
+        data = h5["board_dig_in_data"]
+        n = info["n_dig_time"]
+        pos = 0
+        while pos < n:
+            take = min(BLOCK, n - pos)
+            block = load_block(data, axis, pos, take)
+            np.maximum(max_value, np.max(block, axis=1), out=max_value)
+            for ch in range(n_ch):
+                if many[ch]:
+                    continue
+                found = np.unique(block[ch])
+                uniques[ch].update(float(x) for x in found.tolist())
+                if len(uniques[ch]) > 4:
+                    many[ch] = True
+                    uniques[ch].clear()
+            high = block > 0.5
+            if high_first is None and take:
+                high_first = high[:, 0].copy()
+            rise, _fall, prev = edges_in_block(high, prev, at_start)
+            for ch in range(n_ch):
+                internal[ch] += len(rise[ch])
+            if take:
+                high_last = high[:, -1].copy()
+            at_start = False
+            pos += take
+    if high_first is None:
+        high_first = np.zeros(n_ch, dtype=bool)
+        high_last = np.zeros(n_ch, dtype=bool)
+    state = {"max_value": max_value, "uniques": uniques, "many": many}
+    plain = all(channel_kind(state, ch) == "binary" for ch in range(n_ch))
+    return internal, high_first, high_last, plain
+
+
+def attach_profile(info):
+    info["sample_rate"] = sample_rate(info["path"])
+    if info["n_dig"] is None:
+        info["dig_plain"] = False
+        return
+    internal, first, last, plain = profile_digital(info)
+    info["dig_internal"] = internal
+    info["dig_first"] = first
+    info["dig_last"] = last
+    info["dig_plain"] = plain
+
+
+def load_pieces(paths):
+    """Read each file. An unreadable file splits the run instead of being skipped over."""
+    pieces = []
+    current = []
+    for path in paths:
+        try:
+            info = inspect_file(path)
+            attach_profile(info)
+        except Exception as exc:
+            print(f"  [STOP] could not read {path.name}: {exc}")
+            if current:
+                pieces.append(current)
+                current = []
+            continue
+        current.append(info)
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def seconds_of(info):
+    rate = info["sample_rate"] or SR
+    return info["n_amp_time"] / rate
+
+
+def slice_seconds(infos):
+    return sum(seconds_of(info) for info in infos)
+
+
+def long_windows(infos):
+    prefix = [0.0]
+    for info in infos:
+        prefix.append(prefix[-1] + seconds_of(info))
+    windows = []
+    n = len(infos)
+    for start in range(n):
+        for end in range(start + 1, n + 1):
+            seconds = prefix[end] - prefix[start]
+            if seconds + 1e-6 >= MIN_SECONDS:
+                windows.append((infos[start:end], seconds))
+    return windows
+
+
+def composed_counts(infos):
+    n_ch = infos[0]["n_dig"]
+    total = np.zeros(n_ch, dtype=np.int64)
+    for info in infos:
+        total += info["dig_internal"]
+    for prev, nxt in zip(infos, infos[1:]):
+        total += (nxt["dig_first"] & ~prev["dig_last"]).astype(np.int64)
+    return tuple(int(count) for count in total)
+
+
+def assess(infos):
+    """Return counts, a short mark, and chunk-mismatch reasons."""
+    _detail, reasons = mismatch_lines(infos)
+    if not can_scan(infos) or any("dig_internal" not in info for info in infos):
+        return None, "digital input cannot be concatenated", reasons
+    if any(not info["dig_plain"] for info in infos):
+        return None, "a digital line is not a plain 0/1 signal", reasons
+    counts = composed_counts(infos)
+    if counts == TARGET_COUNTS and reasons:
+        return counts, "counts match but chunks differ", reasons
+    if counts == TARGET_COUNTS:
+        return counts, "MATCH", reasons
+    return counts, "no", reasons
+
+
+def file_list(infos):
+    return ", ".join(info["path"].name for info in infos)
+
+
+def counts_text(counts):
+    if counts is None:
+        return "unavailable"
+    return ", ".join(str(count) for count in counts)
+
+
+def minutes(seconds):
+    return f"{seconds / 60:.2f} min"
+
+
+def spans(outer, inner):
+    """True when inner is a shorter contiguous slice of outer in the same directory."""
+    if outer["directory"] != inner["directory"]:
+        return False
+    outer_paths = [info["path"] for info in outer["infos"]]
+    inner_paths = [info["path"] for info in inner["infos"]]
+    n = len(inner_paths)
+    m = len(outer_paths)
+    if n == 0 or n >= m:
+        return False
+    for start in range(m - n + 1):
+        if outer_paths[start:start + n] == inner_paths:
+            return True
+    return False
+
+
+def minimal_matches(matches):
+    return [item for item in matches if not any(spans(item, other) for other in matches)]
+
+
+def edge_report(files_info):
+    """Return (counts or None, printed lines) for one concatenated slice.
+
+    counts is None when a digital line is not a plain 0/1 signal. The lines
+    still describe what was found.
+    """
+    if not can_scan(files_info):
+        return None, []
+    level = scan_level(files_info)
+    n_ch = files_info[0]["n_dig"]
+    if any(channel_kind(level, ch) != "binary" for ch in range(n_ch)):
+        lines, _candidates = build_candidates(files_info)
+        return None, lines
+    labels = dig_labels(files_info[0])
+    names = [info["path"].name for info in files_info]
+    lines = [
+        "board_dig_in_data rising edges on the concatenated recording "
+        "(digital input, also called broad_dig_in):"
+    ]
+    counts = []
+    for ch in range(n_ch):
+        count = int(level["rise_count"][ch])
+        split = file_split(level["per_file_rise"], ch, names)
+        lines.append(f"  channel {ch + 1} ({labels[ch]}): {count} ({split})")
+        counts.append(count)
+    return tuple(counts), lines
+
+
+def print_report(infos, seconds):
+    counts, lines = edge_report(infos)
+    print(f"  duration {minutes(seconds)} | {file_list(infos)}")
+    for line in lines:
+        print(line)
+    if not lines:
+        print("  board_dig_in_data cannot be concatenated across these chunks.")
+    return counts
+
+
+def explain_longer(matches, chosen):
+    chosen_ids = {id(item) for item in chosen}
+    for item in matches:
+        if id(item) in chosen_ids:
+            continue
+        inners = [keep for keep in chosen if spans(item, keep)]
+        if not inners:
+            continue
+        covered = {info["path"] for keep in inners for info in keep["infos"]}
+        extra = [info["path"].name for info in item["infos"] if info["path"] not in covered]
+        print(
+            f"[KEEP] {file_list(inners[0]['infos'])} holds the trigger pattern. "
+            f"Left out {', '.join(extra)} because those chunks add no rising edges."
+        )
+
+
+def write_subject(infos, out_path, subject):
+    paths = [info["path"] for info in infos]
+    if any(path.resolve() == out_path.resolve() for path in paths):
+        not_written(subject, out_path, "the output path is one of the raw inputs.")
+        return False
+    numbers, regions = wanted()
+    indices, how = channel_indices(infos[0], numbers)
+    if indices is None:
+        print(f"[STOP] {subject}: channels were not selected.")
+        print(f"  {how}")
+        not_written(subject, out_path, "the requested microwires are missing.")
+        return False
+    if how == "position":
+        print("  channel names were not found; selected channels by 1-based position")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    n_keep, n_time = write_merged(infos, out_path, indices, numbers, regions)
+    print(f"[WROTE] {out_path}")
+    print(f"  amplifier_channels={n_keep} samples={n_time} files={len(paths)}")
+    for start, end, region in REGIONS:
+        print(f"  {region}: {start}-{end}")
+    return True
+
+
+def confirm_and_write(match, out_path, subject):
+    infos = match["infos"]
+    print(f"\n[CONFIRM] {subject}: one adjacent group matches")
+    print(f"[CONFIRM] duration {minutes(match['seconds'])} (at least {minutes(MIN_SECONDS)})")
+    print(f"[CONFIRM] files: {file_list(infos)}")
+    counts = print_report(infos, match["seconds"])
+    if counts != TARGET_COUNTS:
+        print("[STOP] the full trigger scan does not match the selected counts.")
+        not_written(subject, out_path, "the trigger pattern did not confirm.")
+        return False
+    text = ", ".join(str(count) for count in TARGET_COUNTS)
+    print(f"[CONFIRM] rising edges match {text}")
+    recorded = [info["sample_rate"] for info in infos if info["sample_rate"] is not None]
+    if recorded and all(rate == recorded[0] for rate in recorded):
+        print(f"[CONFIRM] board_dig_in sample rate: {recorded[0]:.6f} Hz")
+    _detail, reasons = mismatch_lines(infos)
+    if reasons:
+        print(f"[STOP] {subject}: chunks do not match.")
+        for line in reasons:
+            print(f"  {line}")
+        not_written(subject, out_path, "the chunks do not match.")
+        return False
+    return write_subject(infos, out_path, subject)
+
+
+def scan_directory(directory, names):
+    print(f"\n{directory}")
+    if not directory.is_dir():
+        print("  folder not found")
+        return [], [], []
+    found, missing = resolve_listed(directory, names)
+    for name in missing:
+        print(f"  missing {name}")
+    extras = unlisted_temp(directory, names)
+    if extras:
+        print("  Temp files left out of this scan:")
+        for name in extras:
+            print(f"    {name}")
+    if not found:
+        print("  no listed chunks were found")
+        return [], [], []
+    matches = []
+    pieces = []
+    blocked = []
+    for run_paths in split_runs(found):
+        print("  adjacent: " + ", ".join(path.name for path in run_paths))
+        for piece in load_pieces(run_paths):
+            for info in piece:
+                dig = "none" if info["n_dig"] is None else str(info["n_dig"])
+                print(
+                    f"  {info['path'].name}: amplifier_channels={info['n_amp']} "
+                    f"amplifier_samples={info['n_amp_time']} "
+                    f"dig_channels={dig} duration={minutes(seconds_of(info))}"
+                )
+            _detail, piece_reasons = mismatch_lines(piece)
+            if piece_reasons:
+                print("  chunk check for this adjacent run:")
+                for reason in piece_reasons:
+                    print(f"    {reason}")
+            windows = long_windows(piece)
+            if not windows:
+                print(
+                    f"  [SHORT] {minutes(slice_seconds(piece))} is below "
+                    f"{minutes(MIN_SECONDS)}"
+                )
+                continue
+            pieces.append((piece, slice_seconds(piece)))
+            for infos, seconds in windows:
+                counts, mark, reasons = assess(infos)
+                print(
+                    f"  [SCAN] {minutes(seconds)} | {file_list(infos)} | "
+                    f"{counts_text(counts)} | {mark}"
+                )
+                if mark != "no":
+                    for reason in reasons:
+                        print(f"    {reason}")
+                if mark == "MATCH":
+                    matches.append(
+                        {
+                            "directory": directory,
+                            "infos": infos,
+                            "seconds": seconds,
+                            "counts": counts,
+                        }
+                    )
+                elif counts == TARGET_COUNTS:
+                    blocked.append(file_list(infos))
+    return matches, pieces, blocked
+
+
+def run(groups, out_path, subject):
+    text = ", ".join(str(count) for count in TARGET_COUNTS)
+    print(
+        "Selecting adjacent Temp chunks of at least "
+        f"{minutes(MIN_SECONDS)} whose board_dig_in rising edges are {text}."
+    )
+    print(f"Merged output: {out_path}")
+    matches = []
+    pieces = []
+    blocked = []
+    for directory, names in groups:
+        found, whole, held = scan_directory(directory, names)
+        matches.extend(found)
+        pieces.extend(whole)
+        blocked.extend(held)
+    chosen = minimal_matches(matches)
+    explain_longer(matches, chosen)
+    if len(chosen) == 1:
+        return confirm_and_write(chosen[0], out_path, subject)
+    if not chosen:
+        if blocked:
+            reason = (
+                "the trigger pattern was found, but those chunks cannot be merged."
+            )
+        else:
+            reason = "no adjacent group has the trigger pattern and the required length."
+        not_written(subject, out_path, reason)
+        if pieces:
+            print("\nTrigger report for each adjacent run of sufficient length:")
+            for infos, seconds in pieces:
+                print_report(infos, seconds)
+                print()
+        return False
+    print(f"\n[STOP] {subject}: {len(chosen)} adjacent groups match.")
+    for item in chosen:
+        print(f"  {item['directory']}: {file_list(item['infos'])} ({minutes(item['seconds'])})")
+    not_written(subject, out_path, "more than one adjacent group matches.")
+    for item in chosen:
+        print()
+        print_report(item["infos"], item["seconds"])
+    return False
 
 
 def not_written(subject, out_path, reason):
@@ -878,72 +1092,8 @@ def not_written(subject, out_path, reason):
         print(f"  existing file left unchanged: {out_path}")
 
 
-def merge_subject(paths, out_path, subject):
-    print(f"\n{subject}")
-    paths = resolve_raw_files(subject, paths)
-    if paths is None:
-        not_written(subject, out_path, "a raw chunk is missing.")
-        return False
-    if len({path.resolve() for path in paths}) != len(paths):
-        not_written(subject, out_path, "a raw path is repeated.")
-        return False
-    if any(path.resolve() == out_path.resolve() for path in paths):
-        not_written(subject, out_path, "the output path is one of the raw inputs.")
-        return False
-    try:
-        files_info = [inspect_file(path) for path in paths]
-    except Exception as exc:
-        print(f"[STOP] {subject}: could not read chunks: {exc}")
-        not_written(subject, out_path, "the chunks could not be read.")
-        return False
-
-    detail, reasons = mismatch_lines(files_info)
-    for line in detail:
-        print(line)
-    triggers = evaluate_triggers(files_info)
-    for line in triggers["lines"]:
-        print(line)
-    if not triggers["ok"]:
-        print(
-            f"[TRIGGERS] {subject}: board_dig_in does not show 25 stimuli "
-            "with 3 responses each."
-        )
-        for line in triggers["diagnostics"]:
-            print(line)
-    if reasons:
-        print(f"[STOP] {subject}: chunks do not match.")
-        for line in reasons:
-            print(f"  {line}")
-        not_written(subject, out_path, "the chunks do not match.")
-        return False
-
-    numbers, regions = wanted(subject)
-    indices, how = channel_indices(files_info[0], numbers)
-    if indices is None:
-        print(f"[STOP] {subject}: channels were not selected.")
-        print(f"  {how}")
-        not_written(subject, out_path, "the requested microwires are missing.")
-        return False
-    if how == "position":
-        print("  channel names were not found; selected channels by 1-based position")
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    n_keep, n_time = write_merged(files_info, out_path, indices, numbers, regions)
-    print(f"[WROTE] {out_path}")
-    print(f"  amplifier_channels={n_keep} samples={n_time} files={len(paths)}")
-    for start, end, region in REGIONS[subject]:
-        print(f"  {region}: {start}-{end}")
-    return True
-
-
 def main():
-    ok = True
-    for subject, session, names in SUBJECTS:
-        folder = raw_directory(subject, session)
-        paths = [folder / name for name in names]
-        if not merge_subject(paths, output_path(subject), subject):
-            ok = False
-    if not ok:
+    if not run(CANDIDATES, OUT, SUBJECT):
         raise SystemExit(1)
 
 
