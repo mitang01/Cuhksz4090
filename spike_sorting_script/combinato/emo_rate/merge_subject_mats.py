@@ -1,33 +1,16 @@
 #!/usr/bin/env python3
-"""Find and merge the emotion-rating chunks for sub-012.
+"""Merge the confirmed sub-012 emotion-rating session and report its triggers.
 
-The confirmed task pattern, measured on sub-007
-(Temp_260323_102648.mat + Temp_260323_103648.mat), is this many rising
-edges on board_dig_in_data (the Intan digital input, also called
-broad_dig_in):
+The experimenter identified this session:
 
-  channel 1: 12
-  channel 2: 12
-  channel 3: 12
-  channel 4: 10
-  channel 5: 10
-  channel 6: 0
-  channel 7: 1
-  channel 8: 1
+  /share/workspace3/ieeg/micro/Temp_260823_144306
+    Temp_260823_144306.mat
+    Temp_260823_145306.mat
+    Temp_260823_150306.mat
+    Temp_260823_151306.mat
+    Temp_260823_152306.mat
 
-Each listed directory is searched on its own. Temp file names carry the
-start time. Successive files are adjacent when those start times are at
-most 15 minutes apart. The chunks here are named 10 minutes apart, so a
-missing file leaves a 20 minute gap and splits the run.
-
-A candidate is a contiguous slice of an adjacent run lasting at least 20
-minutes. The task may run longer than 20 minutes when something in the
-room delays it. The saved slice is the shortest one whose rising-edge
-counts match. A chunk before or after that slice that adds no rising
-edges is left out. A quiet chunk in the middle stays, because the edges
-on either side hold it in the slice.
-
-When exactly one slice matches, it is written to:
+The chunks are concatenated in time order and written to:
 
   /share/workspace3/ieeg/micro/sub-012.mat
 
@@ -35,8 +18,12 @@ Kept microwires are the sub-012 map from word_boun: 1-16 ATL, 17-32 HG,
 33-48 Amygdala, 49-64 VmPFC. amplifier_data holds those channels.
 board_dig_in_data is copied in full. The merged file is HDF5.
 
-When no slice matches, or more than one does, the trigger counts are
-printed and sub-012.mat is not written.
+The script prints a table of rising edges on board_dig_in_data (the Intan
+digital input, also called broad_dig_in), with one column per chunk. It
+also saves a timeline of those edges, one row per digital channel, time
+running left to right as during collection:
+
+  /share/workspace3/ieeg/micro/sub-012_dig_in_edges.png
 """
 
 import re
@@ -48,76 +35,26 @@ import numpy as np
 
 SUBJECT = "sub-012"
 OUT = Path("/share/workspace3/ieeg/micro") / f"{SUBJECT}.mat"
-# Rising edges on digital channels 1..8, in that order.
-TARGET_COUNTS = (12, 12, 12, 10, 10, 0, 1, 1)
-MIN_SECONDS = 20 * 60
-# Named chunk step is 10 minutes. 15 minutes still rejects a skipped chunk.
-MAX_STEP_SECONDS = 15 * 60
+FIG = OUT.with_name(f"{SUBJECT}_dig_in_edges.png")
 SR = 30000.0
 BLOCK = 200000
-# Edge indices are only stored up to this many. Counts themselves are complete.
+# Edge indices are only stored up to this many inside the older scanner.
+# The timeline keeps its own, higher cap. Counts themselves are complete.
 KEEP_EDGES = 128
+MAX_PLOT_EDGES = 50000
 REGIONS = [
     (1, 16, "ATL"),
     (17, 32, "HG"),
     (33, 48, "Amygdala"),
     (49, 64, "VmPFC"),
 ]
-# Directory, then the Temp chunk names to consider there.
-CANDIDATES = [
-    (
-        Path("/share/workspace3/ieeg/micro/0821/Temp_260821_163538"),
-        [
-            "Temp_260821_163538.mat",
-            "Temp_260821_164538.mat",
-            "Temp_260821_165538.mat",
-        ],
-    ),
-    (
-        Path("/share/workspace3/ieeg/micro/Temp_260822_160822"),
-        [
-            "Temp_260822_160822.mat",
-            "Temp_260822_161822.mat",
-            "Temp_260822_162822.mat",
-        ],
-    ),
-    (
-        Path("/share/workspace3/ieeg/micro/Temp_260822_163240"),
-        [
-            "Temp_260822_163240.mat",
-            "Temp_260822_164240.mat",
-            "Temp_260822_165240.mat",
-            "Temp_260822_170240.mat",
-            "Temp_260822_171240.mat",
-        ],
-    ),
-    (
-        Path("/share/workspace3/ieeg/micro/Temp_260822_171950"),
-        [
-            "Temp_260822_171950.mat",
-            "Temp_260822_172950.mat",
-        ],
-    ),
-    (
-        Path("/share/workspace3/ieeg/micro/Temp_260822_173235"),
-        [
-            "Temp_260822_173235.mat",
-            "Temp_260822_174235.mat",
-            "Temp_260822_175235.mat",
-            "Temp_260822_180235.mat",
-            "Temp_260822_181235.mat",
-        ],
-    ),
-    (
-        Path("/share/workspace3/ieeg/micro/Temp_260823_144306"),
-        [
-            "Temp_260823_144306.mat",
-            "Temp_260823_145306.mat",
-            "Temp_260823_150306.mat",
-            "Temp_260823_151306.mat",
-            "Temp_260823_152306.mat",
-        ],
-    ),
+RAW_DIR = Path("/share/workspace3/ieeg/micro/Temp_260823_144306")
+RAW_NAMES = [
+    "Temp_260823_144306.mat",
+    "Temp_260823_145306.mat",
+    "Temp_260823_150306.mat",
+    "Temp_260823_151306.mat",
+    "Temp_260823_152306.mat",
 ]
 STAMP = re.compile(r"^Temp_(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.mat$")
 
@@ -652,37 +589,18 @@ def wanted():
 
 
 def file_stamp(path):
-    match = STAMP.match(path.name)
+    match = STAMP.match(path.name.strip())
     if match is None:
         return None
     year, month, day, hour, minute, second = (int(part) for part in match.groups())
     return datetime(2000 + year, month, day, hour, minute, second)
 
 
-def split_runs(paths):
-    """Group paths into runs whose start times step by at most 15 minutes."""
-    stamped = []
-    for path in paths:
-        stamp = file_stamp(path)
-        if stamp is None:
-            print(f"  [SKIP] {path.name} does not match Temp_YYMMDD_HHMMSS.mat")
-            continue
-        stamped.append((stamp, path))
-    stamped.sort(key=lambda item: (item[0], item[1].name))
-    runs = []
-    current = []
-    previous = None
-    for stamp, path in stamped:
-        if previous is not None:
-            delta = (stamp - previous).total_seconds()
-            if delta <= 0 or delta > MAX_STEP_SECONDS:
-                runs.append(current)
-                current = []
-        current.append(path)
-        previous = stamp
-    if current:
-        runs.append(current)
-    return runs
+def short_stamp(name):
+    match = STAMP.match(name.strip())
+    if match is None:
+        return name.strip()
+    return "".join(match.groups()[3:])
 
 
 def resolve_listed(directory, names):
@@ -712,222 +630,184 @@ def unlisted_temp(directory, names):
     return extras
 
 
-def profile_digital(info):
-    """Rising edges inside one file, plus the first and last sample.
+def order_paths(paths):
+    stamped = []
+    loose = []
+    for path in paths:
+        stamp = file_stamp(path)
+        if stamp is None:
+            print(f"  {path.name} has no Temp timestamp and is appended after the timed chunks")
+            loose.append(path)
+            continue
+        stamped.append((stamp, path))
+    stamped.sort(key=lambda item: (item[0], item[1].name))
+    return [path for _stamp, path in stamped] + loose
 
-    The first sample is not a rising edge. A later file can still count a
-    rise on its first sample when the previous file ended low.
+
+def rate_of(info):
+    recorded = info.get("sample_rate")
+    if recorded is None or recorded <= 0:
+        return SR
+    return recorded
+
+
+def collect_rises(files_info):
+    """Rising-edge times in seconds, per-file counts, and channel kinds.
+
+    The first sample of the recording is not a rising edge. The first sample
+    of each later chunk is compared with the last sample of the chunk before it.
     """
-    n_ch = info["n_dig"]
-    axis = info["dig_time_axis"]
-    internal = np.zeros(n_ch, dtype=np.int64)
+    n_ch = files_info[0]["n_dig"]
+    stored = [[] for _ in range(n_ch)]
+    counts = [0] * n_ch
+    truncated = [False] * n_ch
+    per_file = []
     max_value = np.zeros(n_ch, dtype=np.float64)
     uniques = [set() for _ in range(n_ch)]
     many = [False] * n_ch
-    high_first = None
-    high_last = None
-    prev = np.zeros(n_ch, dtype=bool)
-    at_start = True
-    with h5py.File(info["path"], "r") as h5:
-        data = h5["board_dig_in_data"]
-        n = info["n_dig_time"]
-        pos = 0
-        while pos < n:
-            take = min(BLOCK, n - pos)
-            block = load_block(data, axis, pos, take)
-            np.maximum(max_value, np.max(block, axis=1), out=max_value)
-            for ch in range(n_ch):
-                if many[ch]:
-                    continue
-                found = np.unique(block[ch])
-                uniques[ch].update(float(x) for x in found.tolist())
-                if len(uniques[ch]) > 4:
-                    many[ch] = True
-                    uniques[ch].clear()
-            high = block > 0.5
-            if high_first is None and take:
-                high_first = high[:, 0].copy()
-            rise, _fall, prev = edges_in_block(high, prev, at_start)
-            for ch in range(n_ch):
-                internal[ch] += len(rise[ch])
-            if take:
-                high_last = high[:, -1].copy()
-            at_start = False
-            pos += take
-    if high_first is None:
-        high_first = np.zeros(n_ch, dtype=bool)
-        high_last = np.zeros(n_ch, dtype=bool)
+    prev = None
+    file_index = None
+    before = None
+    offset_s = 0.0
+    for info_i, pos, block, at_start in iter_dig_blocks(files_info):
+        if file_index != info_i:
+            if file_index is not None:
+                per_file.append([counts[ch] - before[ch] for ch in range(n_ch)])
+                offset_s += files_info[file_index]["n_dig_time"] / rate_of(files_info[file_index])
+            file_index = info_i
+            before = counts[:]
+        n_ch_block, _take = block.shape
+        if n_ch_block != n_ch:
+            raise ValueError(f"digital block has {n_ch_block} channels, expected {n_ch}")
+        np.maximum(max_value, np.max(block, axis=1), out=max_value)
+        for ch in range(n_ch):
+            if many[ch]:
+                continue
+            found = np.unique(block[ch])
+            uniques[ch].update(float(value) for value in found.tolist())
+            if len(uniques[ch]) > 4:
+                many[ch] = True
+                uniques[ch].clear()
+        high = block > 0.5
+        if prev is None:
+            prev = np.zeros(n_ch, dtype=bool)
+        rise, _fall, prev = edges_in_block(high, prev, at_start)
+        rate = rate_of(files_info[info_i])
+        for ch, rel in enumerate(rise):
+            n_new = len(rel)
+            if n_new == 0:
+                continue
+            room = MAX_PLOT_EDGES - len(stored[ch])
+            if room > 0:
+                take = rel[:room]
+                base = offset_s + pos / rate
+                stored[ch].extend(base + (int(index) / rate) for index in take)
+            if n_new > room:
+                truncated[ch] = True
+            counts[ch] += n_new
+    if file_index is not None:
+        per_file.append([counts[ch] - before[ch] for ch in range(n_ch)])
     state = {"max_value": max_value, "uniques": uniques, "many": many}
-    plain = all(channel_kind(state, ch) == "binary" for ch in range(n_ch))
-    return internal, high_first, high_last, plain
+    kinds = [channel_kind(state, ch) for ch in range(n_ch)]
+    return stored, per_file, counts, truncated, kinds
 
 
-def attach_profile(info):
-    info["sample_rate"] = sample_rate(info["path"])
-    if info["n_dig"] is None:
-        info["dig_plain"] = False
-        return
-    internal, first, last, plain = profile_digital(info)
-    info["dig_internal"] = internal
-    info["dig_first"] = first
-    info["dig_last"] = last
-    info["dig_plain"] = plain
-
-
-def load_pieces(paths):
-    """Read each file. An unreadable file splits the run instead of being skipped over."""
-    pieces = []
-    current = []
-    for path in paths:
-        try:
-            info = inspect_file(path)
-            attach_profile(info)
-        except Exception as exc:
-            print(f"  [STOP] could not read {path.name}: {exc}")
-            if current:
-                pieces.append(current)
-                current = []
-            continue
-        current.append(info)
-    if current:
-        pieces.append(current)
-    return pieces
-
-
-def seconds_of(info):
-    rate = info["sample_rate"] or SR
-    return info["n_amp_time"] / rate
-
-
-def slice_seconds(infos):
-    return sum(seconds_of(info) for info in infos)
-
-
-def long_windows(infos):
-    prefix = [0.0]
-    for info in infos:
-        prefix.append(prefix[-1] + seconds_of(info))
-    windows = []
-    n = len(infos)
-    for start in range(n):
-        for end in range(start + 1, n + 1):
-            seconds = prefix[end] - prefix[start]
-            if seconds + 1e-6 >= MIN_SECONDS:
-                windows.append((infos[start:end], seconds))
-    return windows
-
-
-def composed_counts(infos):
-    n_ch = infos[0]["n_dig"]
-    total = np.zeros(n_ch, dtype=np.int64)
-    for info in infos:
-        total += info["dig_internal"]
-    for prev, nxt in zip(infos, infos[1:]):
-        total += (nxt["dig_first"] & ~prev["dig_last"]).astype(np.int64)
-    return tuple(int(count) for count in total)
-
-
-def assess(infos):
-    """Return counts, a short mark, and chunk-mismatch reasons."""
-    _detail, reasons = mismatch_lines(infos)
-    if not can_scan(infos) or any("dig_internal" not in info for info in infos):
-        return None, "digital input cannot be concatenated", reasons
-    if any(not info["dig_plain"] for info in infos):
-        return None, "a digital line is not a plain 0/1 signal", reasons
-    counts = composed_counts(infos)
-    if counts == TARGET_COUNTS and reasons:
-        return counts, "counts match but chunks differ", reasons
-    if counts == TARGET_COUNTS:
-        return counts, "MATCH", reasons
-    return counts, "no", reasons
-
-
-def file_list(infos):
-    return ", ".join(info["path"].name for info in infos)
-
-
-def counts_text(counts):
-    if counts is None:
-        return "unavailable"
-    return ", ".join(str(count) for count in counts)
-
-
-def minutes(seconds):
-    return f"{seconds / 60:.2f} min"
-
-
-def spans(outer, inner):
-    """True when inner is a shorter contiguous slice of outer in the same directory."""
-    if outer["directory"] != inner["directory"]:
-        return False
-    outer_paths = [info["path"] for info in outer["infos"]]
-    inner_paths = [info["path"] for info in inner["infos"]]
-    n = len(inner_paths)
-    m = len(outer_paths)
-    if n == 0 or n >= m:
-        return False
-    for start in range(m - n + 1):
-        if outer_paths[start:start + n] == inner_paths:
-            return True
-    return False
-
-
-def minimal_matches(matches):
-    return [item for item in matches if not any(spans(item, other) for other in matches)]
-
-
-def edge_report(files_info):
-    """Return (counts or None, printed lines) for one concatenated slice.
-
-    counts is None when a digital line is not a plain 0/1 signal. The lines
-    still describe what was found.
-    """
-    if not can_scan(files_info):
-        return None, []
-    level = scan_level(files_info)
-    n_ch = files_info[0]["n_dig"]
-    if any(channel_kind(level, ch) != "binary" for ch in range(n_ch)):
-        lines, _candidates = build_candidates(files_info)
-        return None, lines
-    labels = dig_labels(files_info[0])
-    names = [info["path"].name for info in files_info]
-    lines = [
-        "board_dig_in_data rising edges on the concatenated recording "
-        "(digital input, also called broad_dig_in):"
+def summary_lines(labels, per_file, names):
+    shorts = [short_stamp(name) for name in names]
+    n_ch = len(labels)
+    n_files = len(names)
+    totals = [
+        sum(per_file[file_i][ch] for file_i in range(n_files))
+        for ch in range(n_ch)
     ]
-    counts = []
+    shown = [f"{ch + 1} {labels[ch]}" for ch in range(n_ch)]
+    label_w = max([len("channel")] + [len(text) for text in shown])
+    col_w = max([5] + [len(text) for text in shorts] + [len(str(total)) for total in totals])
+    header = "channel".ljust(label_w)
+    for text in shorts:
+        header += text.rjust(col_w + 2)
+    header += "total".rjust(col_w + 2)
+    lines = [
+        "board_dig_in rising edges (digital input, also called broad_dig_in):",
+        header,
+        "-" * len(header),
+    ]
     for ch in range(n_ch):
-        count = int(level["rise_count"][ch])
-        split = file_split(level["per_file_rise"], ch, names)
-        lines.append(f"  channel {ch + 1} ({labels[ch]}): {count} ({split})")
-        counts.append(count)
-    return tuple(counts), lines
+        row = shown[ch].ljust(label_w)
+        for file_i in range(n_files):
+            row += str(per_file[file_i][ch]).rjust(col_w + 2)
+        row += str(totals[ch]).rjust(col_w + 2)
+        lines.append(row)
+    return lines
 
 
-def print_report(infos, seconds):
-    counts, lines = edge_report(infos)
-    print(f"  duration {minutes(seconds)} | {file_list(infos)}")
-    for line in lines:
-        print(line)
-    if not lines:
-        print("  board_dig_in_data cannot be concatenated across these chunks.")
-    return counts
+def plot_rising_edges(rises, labels, infos, out_path, subject):
+    """One row per digital channel. Time runs left to right, as during collection."""
+    import matplotlib
 
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-def explain_longer(matches, chosen):
-    chosen_ids = {id(item) for item in chosen}
-    for item in matches:
-        if id(item) in chosen_ids:
+    n_ch = len(rises)
+    bounds = [0.0]
+    for info in infos:
+        bounds.append(bounds[-1] + info["n_dig_time"] / rate_of(info))
+    duration_min = bounds[-1] / 60.0
+    if duration_min <= 0:
+        duration_min = 1.0
+    fig_h = max(4.8, 0.62 * n_ch + 1.6)
+    fig, ax = plt.subplots(figsize=(12.5, fig_h), constrained_layout=True)
+    for ch in range(n_ch):
+        ax.hlines(ch, 0, duration_min, color="0.88", linewidth=0.8, zorder=0)
+        if not rises[ch]:
             continue
-        inners = [keep for keep in chosen if spans(item, keep)]
-        if not inners:
-            continue
-        covered = {info["path"] for keep in inners for info in keep["infos"]}
-        extra = [info["path"].name for info in item["infos"] if info["path"] not in covered]
-        print(
-            f"[KEEP] {file_list(inners[0]['infos'])} holds the trigger pattern. "
-            f"Left out {', '.join(extra)} because those chunks add no rising edges."
+        minutes = np.asarray(rises[ch], dtype=np.float64) / 60.0
+        ax.vlines(
+            minutes,
+            ch - 0.34,
+            ch + 0.34,
+            color="#1f4e79",
+            linewidth=0.9,
+            zorder=2,
         )
+    for edge in bounds[1:-1]:
+        ax.axvline(edge / 60.0, color="0.55", linestyle="--", linewidth=0.7, zorder=1)
+    for file_i, info in enumerate(infos):
+        mid = 0.5 * (bounds[file_i] + bounds[file_i + 1]) / 60.0
+        ax.annotate(
+            short_stamp(info["path"].name),
+            xy=(mid, 1.01),
+            xycoords=("data", "axes fraction"),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color="0.35",
+            annotation_clip=False,
+        )
+    ax.set_yticks(list(range(n_ch)))
+    ax.set_yticklabels([f"{ch + 1}  {labels[ch]}" for ch in range(n_ch)])
+    # Channel 1 sits on the top row, in the same order as the summary table.
+    ax.set_ylim(n_ch - 0.3, -0.7)
+    ax.set_xlim(0, duration_min)
+    ax.set_xlabel("Time from the start of the merged recording (minutes)")
+    ax.set_ylabel("board_dig_in channel")
+    ax.grid(True, axis="x", color="0.9", linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.tick_params(axis="y", labelsize=8)
+    fig.suptitle(
+        f"{subject}  board_dig_in rising edges\n"
+        f"{bounds[-1] / 60.0:.2f} min, {len(infos)} chunks, each tick is one rising edge",
+        fontsize=12,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def not_written(subject, out_path, reason):
+    print(f"[STOP] {subject}: {reason} {out_path} was not written.")
+    if out_path.exists():
+        print(f"  existing file left unchanged: {out_path}")
 
 
 def write_subject(infos, out_path, subject):
@@ -953,147 +833,103 @@ def write_subject(infos, out_path, subject):
     return True
 
 
-def confirm_and_write(match, out_path, subject):
-    infos = match["infos"]
-    print(f"\n[CONFIRM] {subject}: one adjacent group matches")
-    print(f"[CONFIRM] duration {minutes(match['seconds'])} (at least {minutes(MIN_SECONDS)})")
-    print(f"[CONFIRM] files: {file_list(infos)}")
-    counts = print_report(infos, match["seconds"])
-    if counts != TARGET_COUNTS:
-        print("[STOP] the full trigger scan does not match the selected counts.")
-        not_written(subject, out_path, "the trigger pattern did not confirm.")
+def load_infos(paths):
+    infos = []
+    for path in paths:
+        info = inspect_file(path)
+        info["sample_rate"] = sample_rate(path)
+        infos.append(info)
+    return infos
+
+
+def report_triggers(infos, fig_path, subject):
+    if not can_scan(infos):
+        print("board_dig_in_data cannot be concatenated across these chunks.")
         return False
-    text = ", ".join(str(count) for count in TARGET_COUNTS)
-    print(f"[CONFIRM] rising edges match {text}")
-    recorded = [info["sample_rate"] for info in infos if info["sample_rate"] is not None]
-    if recorded and all(rate == recorded[0] for rate in recorded):
-        print(f"[CONFIRM] board_dig_in sample rate: {recorded[0]:.6f} Hz")
+    labels = dig_labels(infos[0])
+    rises, per_file, _counts, truncated, kinds = collect_rises(infos)
+    names = [info["path"].name for info in infos]
+    for line in summary_lines(labels, per_file, names):
+        print(line)
+    for ch, kind in enumerate(kinds):
+        if kind != "binary":
+            print(
+                f"  channel {ch + 1} is {kind}; the table counts crossings of 0.5"
+            )
+    for ch, flag in enumerate(truncated):
+        if flag:
+            print(
+                f"  channel {ch + 1} has more than {MAX_PLOT_EDGES} rising edges; "
+                "the figure shows the first ones and the table count is complete"
+            )
+    rates = [info["sample_rate"] for info in infos if info["sample_rate"] is not None]
+    if rates and all(rate == rates[0] for rate in rates):
+        print(f"board_dig_in sample rate: {rates[0]:.6f} Hz")
+    seconds = sum(info["n_dig_time"] / rate_of(info) for info in infos)
+    print(f"concatenated digital duration: {seconds / 60.0:.2f} min ({seconds:.1f} s)")
+    plot_rising_edges(rises, labels, infos, fig_path, subject)
+    print(f"[FIGURE] {fig_path}")
+    return True
+
+
+def merge_session(directory, names, out_path, fig_path, subject):
+    print(subject)
+    print(f"session: {directory}")
+    print(f"merged file: {out_path}")
+    print(f"figure: {fig_path}")
+    if not directory.is_dir():
+        print("  folder not found")
+        not_written(subject, out_path, "the session folder is missing.")
+        return False
+    found, missing = resolve_listed(directory, names)
+    for name in missing:
+        print(f"  missing {name}")
+    extras = unlisted_temp(directory, names)
+    if extras:
+        print("  Temp files left out of this merge:")
+        for name in extras:
+            print(f"    {name}")
+    if missing or len(found) != len(names):
+        not_written(subject, out_path, "a raw chunk is missing.")
+        return False
+    paths = order_paths(found)
+    if len({path.resolve() for path in paths}) != len(paths):
+        not_written(subject, out_path, "a raw path is repeated.")
+        return False
+    print("  time order: " + ", ".join(path.name for path in paths))
+    try:
+        infos = load_infos(paths)
+    except Exception as exc:
+        print(f"[STOP] {subject}: could not read chunks: {exc}")
+        not_written(subject, out_path, "the chunks could not be read.")
+        return False
+    for info in infos:
+        dig = "none" if info["n_dig"] is None else str(info["n_dig"])
+        print(
+            f"  {info['path'].name}: amplifier_channels={info['n_amp']} "
+            f"amplifier_samples={info['n_amp_time']} "
+            f"dig_channels={dig} "
+            f"duration={info['n_amp_time'] / rate_of(info) / 60.0:.2f} min"
+        )
     _detail, reasons = mismatch_lines(infos)
+    reported = False
+    if can_scan(infos):
+        reported = report_triggers(infos, fig_path, subject)
+    else:
+        print("board_dig_in_data cannot be concatenated across these chunks.")
     if reasons:
         print(f"[STOP] {subject}: chunks do not match.")
         for line in reasons:
             print(f"  {line}")
         not_written(subject, out_path, "the chunks do not match.")
         return False
+    if not reported and any(info["n_dig"] is None for info in infos):
+        print("board_dig_in_data is missing, so no trigger figure was saved.")
     return write_subject(infos, out_path, subject)
 
 
-def scan_directory(directory, names):
-    print(f"\n{directory}")
-    if not directory.is_dir():
-        print("  folder not found")
-        return [], [], []
-    found, missing = resolve_listed(directory, names)
-    for name in missing:
-        print(f"  missing {name}")
-    extras = unlisted_temp(directory, names)
-    if extras:
-        print("  Temp files left out of this scan:")
-        for name in extras:
-            print(f"    {name}")
-    if not found:
-        print("  no listed chunks were found")
-        return [], [], []
-    matches = []
-    pieces = []
-    blocked = []
-    for run_paths in split_runs(found):
-        print("  adjacent: " + ", ".join(path.name for path in run_paths))
-        for piece in load_pieces(run_paths):
-            for info in piece:
-                dig = "none" if info["n_dig"] is None else str(info["n_dig"])
-                print(
-                    f"  {info['path'].name}: amplifier_channels={info['n_amp']} "
-                    f"amplifier_samples={info['n_amp_time']} "
-                    f"dig_channels={dig} duration={minutes(seconds_of(info))}"
-                )
-            _detail, piece_reasons = mismatch_lines(piece)
-            if piece_reasons:
-                print("  chunk check for this adjacent run:")
-                for reason in piece_reasons:
-                    print(f"    {reason}")
-            windows = long_windows(piece)
-            if not windows:
-                print(
-                    f"  [SHORT] {minutes(slice_seconds(piece))} is below "
-                    f"{minutes(MIN_SECONDS)}"
-                )
-                continue
-            pieces.append((piece, slice_seconds(piece)))
-            for infos, seconds in windows:
-                counts, mark, reasons = assess(infos)
-                print(
-                    f"  [SCAN] {minutes(seconds)} | {file_list(infos)} | "
-                    f"{counts_text(counts)} | {mark}"
-                )
-                if mark != "no":
-                    for reason in reasons:
-                        print(f"    {reason}")
-                if mark == "MATCH":
-                    matches.append(
-                        {
-                            "directory": directory,
-                            "infos": infos,
-                            "seconds": seconds,
-                            "counts": counts,
-                        }
-                    )
-                elif counts == TARGET_COUNTS:
-                    blocked.append(file_list(infos))
-    return matches, pieces, blocked
-
-
-def run(groups, out_path, subject):
-    text = ", ".join(str(count) for count in TARGET_COUNTS)
-    print(
-        "Selecting adjacent Temp chunks of at least "
-        f"{minutes(MIN_SECONDS)} whose board_dig_in rising edges are {text}."
-    )
-    print(f"Merged output: {out_path}")
-    matches = []
-    pieces = []
-    blocked = []
-    for directory, names in groups:
-        found, whole, held = scan_directory(directory, names)
-        matches.extend(found)
-        pieces.extend(whole)
-        blocked.extend(held)
-    chosen = minimal_matches(matches)
-    explain_longer(matches, chosen)
-    if len(chosen) == 1:
-        return confirm_and_write(chosen[0], out_path, subject)
-    if not chosen:
-        if blocked:
-            reason = (
-                "the trigger pattern was found, but those chunks cannot be merged."
-            )
-        else:
-            reason = "no adjacent group has the trigger pattern and the required length."
-        not_written(subject, out_path, reason)
-        if pieces:
-            print("\nTrigger report for each adjacent run of sufficient length:")
-            for infos, seconds in pieces:
-                print_report(infos, seconds)
-                print()
-        return False
-    print(f"\n[STOP] {subject}: {len(chosen)} adjacent groups match.")
-    for item in chosen:
-        print(f"  {item['directory']}: {file_list(item['infos'])} ({minutes(item['seconds'])})")
-    not_written(subject, out_path, "more than one adjacent group matches.")
-    for item in chosen:
-        print()
-        print_report(item["infos"], item["seconds"])
-    return False
-
-
-def not_written(subject, out_path, reason):
-    print(f"[STOP] {subject}: {reason} {out_path} was not written.")
-    if out_path.exists():
-        print(f"  existing file left unchanged: {out_path}")
-
-
 def main():
-    if not run(CANDIDATES, OUT, SUBJECT):
+    if not merge_session(RAW_DIR, RAW_NAMES, OUT, FIG, SUBJECT):
         raise SystemExit(1)
 
 
