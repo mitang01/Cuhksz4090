@@ -60,6 +60,16 @@ contains model weights, `config.json`, and the processor/tokenizer metadata.
 No separate calculation creates these files. Transfer the entire directory;
 manually copying only `pytorch_model.bin` or `model.safetensors` is insufficient.
 BERT needs its tokenizer files and Whisper needs `preprocessor_config.json`.
+Before submitting an offline job, verify that the exact checkpoint directory
+exists on the compute node and directly contains `config.json`:
+
+```bash
+test -d "$CHECKPOINT" && test -f "$CHECKPOINT/config.json"
+```
+
+If this check fails, inspect the directory name and whether the download was
+copied into an additional nested subdirectory. Absolute paths that do not exist
+are rejected before Transformers can misinterpret them as Hugging Face repo IDs.
 
 Run one model after staging its checkpoint locally. Pass the same local
 checkpoint identity to every stage:

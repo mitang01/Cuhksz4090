@@ -119,6 +119,34 @@ class ModelSpec:
     sample_rate_hz: int
 
 
+def validate_local_checkpoint_path(checkpoint: str) -> None:
+    """Fail clearly when a filesystem checkpoint reference is absent or nested."""
+    path = Path(checkpoint).expanduser()
+    looks_local = path.is_absolute() or checkpoint.startswith((".", "~"))
+    if not looks_local:
+        return
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Local checkpoint path does not exist: {path}. Check the path spelling, "
+            "filesystem mount, and downloaded directory name before submitting the job."
+        )
+    if not path.is_dir():
+        raise NotADirectoryError(
+            f"Local checkpoint path is not a directory: {path}"
+        )
+    if not (path / "config.json").is_file():
+        nested = sorted(path.glob("*/config.json"))
+        suggestion = (
+            f" Use the nested checkpoint directory: {nested[0].parent}"
+            if len(nested) == 1
+            else ""
+        )
+        raise FileNotFoundError(
+            f"Local checkpoint directory does not contain config.json: {path}."
+            f"{suggestion}"
+        )
+
+
 class HubertAdapter:
     """Hugging Face HuBERT adapter with explicit device and precision controls."""
 
@@ -151,6 +179,7 @@ class HubertAdapter:
             "mismatched_keys": [],
         }
         if processor is None or model is None:
+            validate_local_checkpoint_path(spec.checkpoint)
             import transformers
 
             processor = transformers.AutoFeatureExtractor.from_pretrained(

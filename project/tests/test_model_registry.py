@@ -10,7 +10,11 @@ from speech_strf.adapters import (
     WhisperEncoderAdapter,
     build_adapter,
 )
-from speech_strf.model_registry import get_model_entry, load_model_registry
+from speech_strf.model_registry import (
+    get_model_entry,
+    load_model_registry,
+    validate_local_checkpoint_path,
+)
 
 
 REGISTRY = Path(__file__).parents[1] / "configs" / "models.yaml"
@@ -64,6 +68,24 @@ def test_each_family_resolves_without_loading_weights(key, adapter_type):
 def test_unknown_model_fails_without_substitution():
     with pytest.raises(KeyError, match="Unknown model"):
         get_model_entry(REGISTRY, "invented_checkpoint")
+
+
+def test_missing_absolute_checkpoint_path_has_actionable_error(tmp_path):
+    missing = tmp_path / "wavlm_large"
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"Local checkpoint path does not exist: .*wavlm_large",
+    ):
+        validate_local_checkpoint_path(str(missing))
+
+
+def test_nested_checkpoint_directory_is_suggested(tmp_path):
+    outer = tmp_path / "wavlm_large"
+    inner = outer / "wavlm-large"
+    inner.mkdir(parents=True)
+    (inner / "config.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match=str(inner)):
+        validate_local_checkpoint_path(str(outer))
 
 
 def test_installed_transformers_exposes_every_registered_loading_class():
