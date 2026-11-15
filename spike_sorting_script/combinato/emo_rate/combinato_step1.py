@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Extract and sort each kept microwire with Combinato's own commands.
 
-Reads the merged subject file written by merge_subject_mats.py:
+Reads the merged subject file:
 
-  /share/workspace3/ieeg/micro/sub-012.mat
+  /share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1/sub-008/sub-008.mat
 
 For every kept channel it runs:
 
@@ -14,15 +14,15 @@ For every kept channel it runs:
 
 The overview plot for that channel is written to:
 
-  /share/home/mitan/combinato_result/emo_rate/sub-012/A-001/overview/
+  /share/home/mitan/combinato_result/emo_rate/sub-008/A-017/overview/
 
 This is the default positive-spike pass. The folder name sort_pos_simple
-is the label Combinato stores.
+is the label Combinato stores. Channel folders use the microwire number
+stored in the merged file, so sub-008 starts at A-017.
 
-This project has only sub-012, 64 kept channels. The cluster still allows
-64 CPUs and 64 GB at once. The channels are split into 8 jobs with 8
-channels each, the same per-job size as word_boun, and each job is
-allowed 8 hours:
+sub-008 keeps 64 channels. The cluster still allows 64 CPUs and 64 GB
+at once. The channels are split into 8 jobs with 8 channels each, the
+same per-job size as word_boun, and each job is allowed 8 hours:
 
   python combinato_step1.py 1 8
   python combinato_step1.py 2 8
@@ -40,14 +40,14 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-DATA_ROOT = Path("/share/workspace3/ieeg/micro")
+DATA_ROOT = Path("/share/workspace3/ieeg/micro/audio_emotion_rating_pcm_1")
 RESULT_ROOT = Path("/share/home/mitan/combinato_result/emo_rate")
-SUBJECTS = ["sub-012"]
+SUBJECTS = ["sub-008"]
 SR = 30000.0
 # Intan ADC counts to microvolts. The merged files are still raw integers.
 SCALE_TO_UV = np.float32(0.195)
 BLOCK = 200000
-# sub-012 keeps 64 channels. 8 channels in each of 8 jobs.
+# sub-008 keeps 64 channels. 8 channels in each of 8 jobs.
 EXPECTED_CHANNELS = 64
 N_JOBS = 8
 COMMANDS = (
@@ -156,10 +156,14 @@ def sort_channel(subject, number, region, merged, axis, index, result_root, run_
     return True
 
 
+def merged_path(data_root, subject):
+    return data_root / subject / f"{subject}.mat"
+
+
 def collect_tasks(data_root=DATA_ROOT):
     tasks = []
     for subject in SUBJECTS:
-        merged = data_root / f"{subject}.mat"
+        merged = merged_path(data_root, subject)
         if not merged.is_file():
             print(f"[STOP] {subject}: merged file not found: {merged}")
             continue

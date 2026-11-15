@@ -1,11 +1,12 @@
 #!/bin/bash
-# 8 jobs, 8 channels each. At most 8 jobs run at once:
+# Sort sub-008.mat: 8 jobs, 8 channels each. At most 8 jobs run at once:
 # 8 x 8 CPUs = 64 CPUs and 8 x 8 GB = 64 GB.
+# The subject and merged-file path are set in combinato_step1.py.
 # Submit from the Cuhksz4090 repo:
 #   mkdir -p /share/home/mitan/combinato_result/emo_rate/logs
 #   cd /share/home/mitan/Cuhksz4090/spike_sorting_script/combinato/emo_rate
 #   sbatch combinato_step1.sbatch
-#SBATCH --job-name=emo-rate-step1
+#SBATCH --job-name=emo-rate-sub008
 #SBATCH --array=1-8%8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
