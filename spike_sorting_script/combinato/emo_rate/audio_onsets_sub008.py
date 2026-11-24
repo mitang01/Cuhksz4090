@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find the 25 audio onsets in the merged sub-008 recording.
+"""Find the audio onsets in the merged sub-008 recording.
 
 Reads the merged digital input:
 
@@ -10,26 +10,24 @@ Writes next to the Combinato results:
   /share/home/mitan/combinato_result/emo_rate/sub-008/sub-008_triggers.png
   /share/home/mitan/combinato_result/emo_rate/sub-008/sub-008_audio_onsets.csv
   /share/home/mitan/combinato_result/emo_rate/sub-008/sub-008_audio_onsets.txt
+  /share/home/mitan/combinato_result/emo_rate/sub-008/sub-008_trigger_events.csv
 
-Time zero is the first sample of that merged file. An onset time of 12.5 s
-is sample 12.5 * sample_rate on board_dig_in_data.
+Time zero is the first sample of that merged file.
 
-The first three audios last 15-16 s, 17-18 s, and about 16 s. Those three
-lengths decide which edges are the audios. A digital line that stays high
-for the whole sound, and a short onset pulse paired with a short offset
-pulse, are both accepted. The audio length is the time from the onset
-edge to the offset edge. The gap from one onset to the next onset is not
-used, because that gap also contains the rating time.
+Each trigger is one parallel-port byte, read down the digital channels at
+one moment. Channel 1 is bit 0 (value 1), channel 2 is bit 1 (value 2),
+and so on. Channels that rise within 1 ms are the same byte. A code from
+1 to 25 is an audio onset. Any other code is listed with the events and
+is not an audio onset.
 
 Run from the emo_rate directory on the cluster:
 
   python audio_onsets_sub008.py
   python audio_onsets_sub008.py /path/to/sub-008.mat /path/to/output_dir
 
-Exit 0 when one set of 25 audios matches. Exit 2 when more than one set
-matches and they disagree, so the script does not pick one. Exit 1 when
-nothing matches the three lengths. The trigger plot is written in every
-case where the mat file can be read.
+Exit 0 when at least one audio code is found. Exit 1 when the file cannot
+be read or no code in 1..25 appears. The trigger plot is written whenever
+the mat file can be read.
 """
 
 import sys
@@ -45,20 +43,11 @@ MERGED = DATA_ROOT / SUBJECT / f"{SUBJECT}.mat"
 OUT_DIR = RESULT_ROOT / SUBJECT
 SR_FALLBACK = 30000.0
 BLOCK = 200000
-N_AUDIO = 25
-# Inclusive windows, seconds. A tenth of a second of slack covers a length
-# that lands on the stated boundary.
-WINDOWS = (
-    (14.75, 16.25),  # 15-16 s
-    (16.75, 18.25),  # 17-18 s
-    (15.25, 16.75),  # around 16 s
-)
-MIN_LENGTH = 2.0
-MAX_LENGTH = 90.0
-# A low gap shorter than this is a dropout inside one pulse, not a new event.
-DROPOUT_S = 0.002
-# Two matches that land inside this tolerance are the same 25 audios.
-AGREE_S = 0.05
+# Port bytes 1..25 are the audio onsets. Channel 1 is the least significant bit.
+AUDIO_CODE_MIN = 1
+AUDIO_CODE_MAX = 25
+# Rising edges this close belong to one port write.
+CLUSTER_S = 0.001
 
 
 def channel_names(h5, group_key):
@@ -313,301 +302,78 @@ def scan_bits(data, axis, n_time, bit_plan, block):
     return found
 
 
-def pulse_intervals(rise, fall, sr):
-    """Each rising edge paired with the next falling edge."""
-    fall = np.asarray(fall, dtype=np.int64)
-    intervals = []
-    j = 0
-    for onset in np.asarray(rise, dtype=np.int64):
-        onset = int(onset)
-        while j < fall.size and int(fall[j]) <= onset:
-            j += 1
-        if j >= fall.size:
-            break
-        offset = int(fall[j])
-        intervals.append((onset, offset, (offset - onset) / sr))
-        j += 1
-    return merge_dropouts(intervals, sr)
+def physical_lines(lines):
+    """One row per digital input. Unpacked bits and the OR line are not rows."""
+    return [line for line in lines if line["bit"] is None and not line["synthetic"]]
 
 
-def merge_dropouts(intervals, sr):
-    """Join a pulse that a sub-millisecond low gap split in two."""
-    if not intervals:
+def vertical_events(lines, sr):
+    """One port byte for each moment when one or more channels rise together.
+
+    Channel 1 is bit 0. Edges within CLUSTER_S are one write to the port.
+    """
+    stamps = []
+    for line in physical_lines(lines):
+        channel = int(line["channel"])
+        for sample in np.asarray(line["rise"], dtype=np.int64):
+            stamps.append((int(sample), channel))
+    stamps.sort()
+    if not stamps:
         return []
-    gap = max(1, int(round(DROPOUT_S * sr)))
-    merged = [list(intervals[0])]
-    for onset, offset, _length in intervals[1:]:
-        if onset - merged[-1][1] <= gap:
-            merged[-1][1] = offset
-            merged[-1][2] = (offset - merged[-1][0]) / sr
+    tol = max(1, int(round(CLUSTER_S * sr)))
+    groups = [[stamps[0]]]
+    for sample, channel in stamps[1:]:
+        if sample - groups[-1][0][0] <= tol:
+            groups[-1].append((sample, channel))
         else:
-            merged.append([onset, offset, (offset - onset) / sr])
-    return [tuple(item) for item in merged]
-
-
-def first_three_ok(lengths):
-    if len(lengths) < 3:
-        return False
-    for length, (low, high) in zip(lengths[:3], WINDOWS):
-        if length < low or length > high:
-            return False
-    return True
-
-
-def lengths_ok(lengths):
-    if len(lengths) != N_AUDIO:
-        return False
-    if any(length < MIN_LENGTH or length > MAX_LENGTH for length in lengths):
-        return False
-    return first_three_ok(lengths)
-
-
-def matching_runs(intervals):
-    """Contiguous runs of 25 intervals whose first three lengths are the anchors."""
-    if len(intervals) < N_AUDIO:
-        return []
-    found = []
-    last = len(intervals) - N_AUDIO
-    for start in range(last + 1):
-        chunk = intervals[start:start + N_AUDIO]
-        if lengths_ok([item[2] for item in chunk]):
-            found.append(chunk)
-    return found
-
-
-def long_pulses(intervals):
-    return [item for item in intervals if MIN_LENGTH <= item[2] <= MAX_LENGTH]
-
-
-def add_runs(found, line, other, method, rank, detail, intervals):
-    for chunk in matching_runs(intervals):
-        found.append(
+            groups.append([(sample, channel)])
+    events = []
+    for group in groups:
+        channels = sorted({channel for _sample, channel in group})
+        code = 0
+        for channel in channels:
+            if 1 <= channel <= 16:
+                code |= 1 << (channel - 1)
+        events.append(
             {
-                "method": method,
-                "rank": rank,
-                "bit_penalty": 0 if line["bit"] is None and other["bit"] is None else 1,
-                "onset_line": line,
-                "offset_line": other,
-                "detail": detail,
-                "intervals": chunk,
+                "sample": min(sample for sample, _channel in group),
+                "channels": channels,
+                "code": int(code),
             }
         )
+    return events
 
 
-def cross_pairs(onsets, offsets, sr):
-    """Pair each onset with the next offset that lands before the next onset."""
-    onsets = np.asarray(onsets, dtype=np.int64)
-    offsets = np.asarray(offsets, dtype=np.int64)
-    if onsets.size == 0 or offsets.size == 0:
-        return []
-    horizon = int(round(MAX_LENGTH * sr))
-    pairs = []
-    j = 0
-    for i, onset in enumerate(onsets):
-        onset = int(onset)
-        limit = int(onsets[i + 1]) if i + 1 < onsets.size else onset + horizon
-        while j < offsets.size and int(offsets[j]) <= onset:
+def is_audio(event):
+    return AUDIO_CODE_MIN <= int(event["code"]) <= AUDIO_CODE_MAX
+
+
+def channel_text(channels):
+    return "+".join(str(channel) for channel in channels)
+
+
+def pulse_width_s(lines, sr):
+    """Median rising-to-falling width, in seconds, across the physical lines."""
+    widths = []
+    for line in physical_lines(lines):
+        falls = np.asarray(line["fall"], dtype=np.int64)
+        j = 0
+        for onset in np.asarray(line["rise"], dtype=np.int64):
+            while j < falls.size and int(falls[j]) <= int(onset):
+                j += 1
+            if j >= falls.size:
+                break
+            widths.append((int(falls[j]) - int(onset)) / sr)
             j += 1
-        if j >= offsets.size or int(offsets[j]) >= limit:
-            pairs.append(None)
-            continue
-        offset = int(offsets[j])
-        pairs.append((onset, offset, (offset - onset) / sr))
-        j += 1
-    return pairs
+    if not widths:
+        return None
+    return float(np.median(np.asarray(widths, dtype=np.float64)))
 
 
-def complete_runs(pairs):
-    """Break the pair list at a missing offset, then take runs of 25."""
-    runs = []
-    current = []
-    for item in pairs:
-        if item is None:
-            runs.extend(matching_runs(current))
-            current = []
-            continue
-        current.append(item)
-    runs.extend(matching_runs(current))
-    return runs
-
-
-def alternate_pairs(rises, sr):
-    """Onset, offset, onset, offset on one line. Also the one-edge shift."""
-    rises = np.asarray(rises, dtype=np.int64)
-    runs = []
-    for shift in (0, 1):
-        pairs = []
-        idx = shift
-        while idx + 1 < rises.size:
-            onset = int(rises[idx])
-            offset = int(rises[idx + 1])
-            pairs.append((onset, offset, (offset - onset) / sr))
-            idx += 2
-        runs.extend(matching_runs(pairs))
-    return runs
-
-
-def locate_audios(lines, sr):
-    """Return every 25-audio match. Callers decide whether they agree."""
-    found = []
-    for line in lines:
-        pulses = long_pulses(pulse_intervals(line["rise"], line["fall"], sr))
-        add_runs(
-            found,
-            line,
-            line,
-            "pulse",
-            0,
-            f"{line['label']}: the line stays high for the length of each audio",
-            pulses,
-        )
-        if line["rise"].size <= 5000:
-            for chunk in alternate_pairs(line["rise"], sr):
-                found.append(
-                    {
-                        "method": "alternate",
-                        "rank": 1,
-                        "bit_penalty": 0 if line["bit"] is None else 1,
-                        "onset_line": line,
-                        "offset_line": line,
-                        "detail": (
-                            f"{line['label']}: rising edges alternate "
-                            "between audio onset and audio offset"
-                        ),
-                        "intervals": chunk,
-                    }
-                )
-    for onset_line in lines:
-        if onset_line["rise"].size == 0 or onset_line["rise"].size > 5000:
-            continue
-        for offset_line in lines:
-            if offset_line is onset_line:
-                continue
-            if offset_line["rise"].size > 5000 and offset_line["fall"].size > 5000:
-                continue
-            for event, offsets, rank, how in (
-                ("rise", offset_line["rise"], 2, "rising edge"),
-                ("fall", offset_line["fall"], 3, "falling edge"),
-            ):
-                if offsets.size == 0 or offsets.size > 5000:
-                    continue
-                detail = (
-                    f"onset is a rising edge on {onset_line['label']}; "
-                    f"offset is a {how} on {offset_line['label']}"
-                )
-                for chunk in complete_runs(cross_pairs(onset_line["rise"], offsets, sr)):
-                    found.append(
-                        {
-                            "method": "cross",
-                            "rank": rank,
-                            "bit_penalty": (
-                                0
-                                if onset_line["bit"] is None and offset_line["bit"] is None
-                                else 1
-                            ),
-                            "onset_line": onset_line,
-                            "offset_line": offset_line,
-                            "detail": detail,
-                            "intervals": chunk,
-                        }
-                    )
-    return found
-
-
-def agree(one, other, sr):
-    tol = AGREE_S * sr
-    for (onset_a, _off_a, len_a), (onset_b, _off_b, len_b) in zip(
-        one["intervals"], other["intervals"]
-    ):
-        if abs(onset_a - onset_b) > tol or abs(len_a - len_b) > AGREE_S:
-            return False
-    return True
-
-
-def cluster_matches(matches, sr):
-    parent = list(range(len(matches)))
-
-    def find(index):
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    for i in range(len(matches)):
-        for j in range(i + 1, len(matches)):
-            if agree(matches[i], matches[j], sr):
-                left, right = find(i), find(j)
-                if left != right:
-                    parent[right] = left
-    groups = {}
-    for index, match in enumerate(matches):
-        groups.setdefault(find(index), []).append(match)
-    ordered = []
-    for group in groups.values():
-        group.sort(key=lambda item: (item["rank"], item["bit_penalty"], item["detail"]))
-        ordered.append(group)
-    ordered.sort(key=lambda group: group[0]["intervals"][0][0])
-    return ordered
-
-
-def line_summary(lines, sr):
-    rows = ["board_dig_in edges (rising / falling), counted on the merged file:"]
-    for line in lines:
-        if line["synthetic"]:
-            continue
-        pulses = long_pulses(pulse_intervals(line["rise"], line["fall"], sr))
-        text = (
-            f"  {line['label']}: {line['rise'].size} rising, "
-            f"{line['fall'].size} falling, {len(pulses)} pulses of "
-            f"{MIN_LENGTH:.0f}-{MAX_LENGTH:.0f} s"
-        )
-        if pulses:
-            shown = ", ".join(f"{item[2]:.3f}" for item in pulses[:3])
-            text += f"; first long pulses {shown} s"
-        rows.append(text)
-    return rows
-
-
-def table_lines(intervals, sr):
-    header = (
-        f"{'audio':>5}  {'onset_s':>12}  {'offset_s':>12}  "
-        f"{'length_s':>10}  {'onset_sample':>14}  {'offset_sample':>14}"
-    )
-    rows = [header]
-    for index, (onset, offset, length) in enumerate(intervals, start=1):
-        rows.append(
-            f"{index:5d}  {onset / sr:12.6f}  {offset / sr:12.6f}  "
-            f"{length:10.6f}  {onset:14d}  {offset:14d}"
-        )
-    return rows
-
-
-def write_csv(path, intervals, sr):
-    lines = ["audio,onset_s,offset_s,length_s,onset_sample,offset_sample"]
-    for index, (onset, offset, length) in enumerate(intervals, start=1):
-        lines.append(
-            f"{index},{onset / sr:.6f},{offset / sr:.6f},{length:.6f},{onset},{offset}"
-        )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def format_match(match, sr):
-    lengths = [item[2] for item in match["intervals"]]
-    rows = [
-        match["detail"],
-        (
-            "first three lengths: "
-            f"{lengths[0]:.3f} s, {lengths[1]:.3f} s, {lengths[2]:.3f} s"
-        ),
-        (
-            "windows used: "
-            f"{WINDOWS[0][0]:.2f}-{WINDOWS[0][1]:.2f} s, "
-            f"{WINDOWS[1][0]:.2f}-{WINDOWS[1][1]:.2f} s, "
-            f"{WINDOWS[2][0]:.2f}-{WINDOWS[2][1]:.2f} s"
-        ),
-        "",
-    ]
-    rows.extend(table_lines(match["intervals"], sr))
+def line_summary(lines):
+    rows = ["board_dig_in rising edges, counted on the merged file:"]
+    for line in physical_lines(lines):
+        rows.append(f"  {line['label']}: {line['rise'].size} rising, {line['fall'].size} falling")
     return rows
 
 
@@ -620,117 +386,112 @@ def header_lines(path, info):
         f"samples: {info['n_time']}",
         f"duration: {duration:.3f} s ({duration / 60.0:.3f} min)",
         "time zero: first sample of the merged file",
-        "length: offset sample minus onset sample, divided by the sample rate",
+        "code: channel 1 is bit 0 (value 1), channel 2 is bit 1 (value 2), and so on",
+        f"one code: rising edges within {CLUSTER_S * 1000:.0f} ms",
+        f"audio onset: port code {AUDIO_CODE_MIN} through {AUDIO_CODE_MAX}",
+        "audio length: not estimated; each code is a short pulse at the onset",
         "",
     ]
 
 
-def same_line(one, other):
-    return (
-        not other["synthetic"]
-        and one["channel"] == other["channel"]
-        and one["bit"] == other["bit"]
+def event_table(events, sr, numbered_as):
+    header = (
+        f"{numbered_as:>5}  {'code':>6}  {'onset_s':>12}  "
+        f"{'onset_sample':>14}  channels"
     )
+    rows = [header]
+    for index, event in enumerate(events, start=1):
+        rows.append(
+            f"{index:5d}  {event['code']:6d}  {event['sample'] / sr:12.6f}  "
+            f"{event['sample']:14d}  {channel_text(event['channels'])}"
+        )
+    return rows
+
+
+def write_event_csv(path, events, sr, index_name):
+    lines = [f"{index_name},code,onset_s,onset_sample,channels"]
+    for index, event in enumerate(events, start=1):
+        lines.append(
+            f"{index},{event['code']},{event['sample'] / sr:.6f},"
+            f"{event['sample']},{channel_text(event['channels'])}"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def nearest(samples, target, tol):
+    """Return the stored sample within tol of target, or None."""
     if len(samples) == 0:
-        return False
-    samples = np.asarray(samples)
+        return None
+    samples = np.sort(np.asarray(samples, dtype=np.int64))
     index = int(np.searchsorted(samples, target))
+    found = None
+    best = tol + 1
     for pos in (index - 1, index):
-        if 0 <= pos < samples.size and abs(int(samples[pos]) - int(target)) <= tol:
-            return True
-    return False
+        if 0 <= pos < samples.size:
+            gap = abs(int(samples[pos]) - int(target))
+            if gap <= tol and gap < best:
+                best = gap
+                found = int(samples[pos])
+    return found
 
 
-def offset_on_rise(chosen):
-    """True when the offset event is a rising edge rather than a falling edge."""
-    if chosen["method"] == "alternate":
-        return True
-    if chosen["method"] == "cross" and "falling" not in chosen["detail"]:
-        return True
-    return False
+def audio_marks(plotted, audios, sr):
+    tol = max(1, int(round(CLUSTER_S * sr)))
+    marks = [[] for _ in plotted]
+    for event in audios:
+        for row, line in enumerate(plotted):
+            if int(line["channel"]) not in event["channels"]:
+                continue
+            hit = nearest(line["rise"], event["sample"], tol)
+            if hit is not None:
+                marks[row].append(hit)
+    return marks
 
 
-def mark_sets(plotted, chosen):
-    """Sample indices to paint as onset (red) or offset (green) on each row."""
-    onset = [[] for _ in plotted]
-    offset_rise = [[] for _ in plotted]
-    offset_fall = [[] for _ in plotted]
-    on_rise = offset_on_rise(chosen)
-    onset_line = chosen["onset_line"]
-    offset_line = chosen["offset_line"]
-    for start, stop, _length in chosen["intervals"]:
-        for ch, line in enumerate(plotted):
-            if same_line(line, onset_line) or onset_line["synthetic"]:
-                if nearest(line["rise"], start, 1):
-                    onset[ch].append(start)
-            if same_line(line, offset_line):
-                pool = line["rise"] if on_rise else line["fall"]
-                if nearest(pool, stop, 1):
-                    (offset_rise if on_rise else offset_fall)[ch].append(stop)
-            elif offset_line["synthetic"] and nearest(line["fall"], stop, 1):
-                offset_fall[ch].append(stop)
-    return onset, offset_rise, offset_fall
-
-
-def draw_edges(ax, row, samples, sr, onset, offset, plain_color, half):
+def draw_edges(ax, row, samples, sr, marked, plain_color, mark_color, half):
     if samples.size == 0:
         return
     minutes = samples.astype(np.float64) / sr / 60.0
-    kind = np.zeros(samples.size, dtype=np.int8)
+    chosen = np.zeros(samples.size, dtype=bool)
     for index, sample in enumerate(samples):
-        if nearest(onset, int(sample), 0):
-            kind[index] = 1
-        elif nearest(offset, int(sample), 0):
-            kind[index] = 2
-    if np.any(kind == 0):
+        if nearest(marked, int(sample), 0) is not None:
+            chosen[index] = True
+    if np.any(~chosen):
         ax.vlines(
-            minutes[kind == 0],
+            minutes[~chosen],
             row - half,
             row + half,
             color=plain_color,
             linewidth=0.8,
             zorder=2,
         )
-    if np.any(kind == 2):
+    if np.any(chosen):
         ax.vlines(
-            minutes[kind == 2],
+            minutes[chosen],
             row - half,
             row + half,
-            color="#1e8449",
-            linewidth=1.3,
-            zorder=3,
-        )
-    if np.any(kind == 1):
-        ax.vlines(
-            minutes[kind == 1],
-            row - half,
-            row + half,
-            color="#c0392b",
+            color=mark_color,
             linewidth=1.4,
             zorder=4,
         )
 
 
-def draw_audio_bars(ax, intervals, sr):
-    onsets = np.array([item[0] / sr / 60.0 for item in intervals], dtype=np.float64)
-    widths = np.array([item[2] / 60.0 for item in intervals], dtype=np.float64)
-    ys = np.arange(1, len(intervals) + 1)
-    ax.barh(ys, widths, left=onsets, height=0.62, color="#1f4e79", zorder=2)
+def draw_audio_onsets(ax, audios, sr):
+    minutes = np.array([event["sample"] / sr / 60.0 for event in audios], dtype=np.float64)
+    ys = np.arange(1, len(audios) + 1)
+    ax.plot(minutes, ys, linestyle="None", marker="|", markersize=14, color="#c0392b", zorder=2)
     ax.set_yticks(list(ys))
-    ax.set_yticklabels([str(y) for y in ys], fontsize=7)
-    ax.set_ylim(len(intervals) + 0.7, 0.3)
+    ax.set_yticklabels([str(event["code"]) for event in audios], fontsize=7)
+    ax.set_ylim(len(audios) + 0.7, 0.3)
     ax.set_xlabel("Time from the start of the merged recording (minutes)")
-    ax.set_ylabel("audio")
+    ax.set_ylabel("port code")
     ax.grid(True, axis="x", color="0.9", linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.set_title("Estimated audio intervals, onset to offset", fontsize=10, loc="left")
+    ax.set_title("Audio onsets, one port code read down the channels", fontsize=10, loc="left")
 
 
-def render_plot(path, info, chosen):
-    """Every rising and falling edge, with the 25 audios marked when known."""
+def render_plot(path, info, audios):
+    """Every edge. Red ticks are the bits of an audio code."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -741,18 +502,12 @@ def render_plot(path, info, chosen):
     duration_min = info["n_time"] / sr / 60.0
     if duration_min <= 0:
         duration_min = 1.0
-    plotted = [line for line in info["lines"] if not line["synthetic"]]
+    plotted = physical_lines(info["lines"])
     n_ch = len(plotted)
-    intervals = [] if chosen is None else chosen["intervals"]
-    if chosen is None:
-        onset = [[] for _ in plotted]
-        offset_rise = [[] for _ in plotted]
-        offset_fall = [[] for _ in plotted]
-    else:
-        onset, offset_rise, offset_fall = mark_sets(plotted, chosen)
-    fig_h = max(4.6, 0.48 * n_ch + 1.7) + (5.6 if intervals else 0.3)
+    marks = audio_marks(plotted, audios, sr) if audios else [[] for _ in plotted]
+    fig_h = max(4.6, 0.48 * n_ch + 1.7) + (5.6 if audios else 0.3)
     fig = plt.figure(figsize=(12.8, fig_h), constrained_layout=True)
-    if intervals:
+    if audios:
         grid = fig.add_gridspec(2, 1, height_ratios=[max(2.4, 0.48 * n_ch), 5.4])
         ax = fig.add_subplot(grid[0, 0])
         ax_audio = fig.add_subplot(grid[1, 0], sharex=ax)
@@ -760,13 +515,12 @@ def render_plot(path, info, chosen):
     else:
         ax = fig.add_subplot(1, 1, 1)
         ax_audio = None
-    for ch, line in enumerate(plotted):
-        ax.hlines(ch, 0, duration_min, color="0.90", linewidth=0.8, zorder=0)
-        draw_edges(ax, ch, line["fall"], sr, [], offset_fall[ch], "0.62", 0.28)
-        draw_edges(ax, ch, line["rise"], sr, onset[ch], offset_rise[ch], "#1f4e79", 0.36)
+    for row, line in enumerate(plotted):
+        ax.hlines(row, 0, duration_min, color="0.90", linewidth=0.8, zorder=0)
+        draw_edges(ax, row, line["fall"], sr, [], "0.62", "#c0392b", 0.28)
+        draw_edges(ax, row, line["rise"], sr, marks[row], "#1f4e79", "#c0392b", 0.36)
     ax.set_yticks(list(range(n_ch)))
     ax.set_yticklabels([line["label"] for line in plotted])
-    # Channel 1 is the top row, matching the edge table.
     ax.set_ylim(n_ch - 0.35, -0.75)
     pad = max(0.04, duration_min * 0.012)
     ax.set_xlim(-pad, duration_min + pad)
@@ -782,21 +536,15 @@ def render_plot(path, info, chosen):
         f"{SUBJECT}  board_dig_in triggers\n"
         f"{info['n_time'] / sr / 60.0:.2f} min from the start of the merged file"
     )
-    if intervals:
-        handles.extend(
-            [
-                Line2D([0], [0], color="#c0392b", lw=1.8, label="audio onset"),
-                Line2D([0], [0], color="#1e8449", lw=1.8, label="audio offset"),
-            ]
-        )
-        lengths = [item[2] for item in intervals]
+    if audios:
+        handles.append(Line2D([0], [0], color="#c0392b", lw=1.8, label="audio onset"))
+        codes = [event["code"] for event in audios]
         title += (
-            f"\n25 audios; first three lengths "
-            f"{lengths[0]:.2f} s, {lengths[1]:.2f} s, {lengths[2]:.2f} s"
+            f"\n{len(audios)} audio onsets, port codes {min(codes)}-{max(codes)}"
         )
-        draw_audio_bars(ax_audio, intervals, sr)
+        draw_audio_onsets(ax_audio, audios, sr)
     else:
-        title += "\naudio onsets were not identified from the length anchors"
+        title += "\nno port code in 1..25"
         ax.set_xlabel("Time from the start of the merged recording (minutes)")
     ax.legend(
         handles=handles,
@@ -817,87 +565,63 @@ def output_paths(out_dir):
     return {
         "png": out_dir / f"{SUBJECT}_triggers.png",
         "csv": out_dir / f"{SUBJECT}_audio_onsets.csv",
+        "events": out_dir / f"{SUBJECT}_trigger_events.csv",
         "txt": out_dir / f"{SUBJECT}_audio_onsets.txt",
         "candidates": out_dir / f"{SUBJECT}_audio_onset_candidates.txt",
     }
-
-
-def analyze(info):
-    matches = locate_audios(info["lines"], info["sr"])
-    groups = cluster_matches(matches, info["sr"])
-    if len(groups) == 1:
-        status = "ok"
-    elif len(groups) > 1:
-        status = "ambiguous"
-    else:
-        status = "none"
-    return {"status": status, "groups": groups}
 
 
 def emit(path, info, out_dir):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = output_paths(out_dir)
-    result = analyze(info)
-    status = result["status"]
-    chosen = result["groups"][0][0] if status == "ok" else None
-    render_plot(paths["png"], info, chosen)
+    events = vertical_events(info["lines"], info["sr"])
+    audios = [event for event in events if is_audio(event)]
+    others = [event for event in events if not is_audio(event)]
+    render_plot(paths["png"], info, audios)
     rows = header_lines(path, info)
-    rows.extend(line_summary(info["lines"], info["sr"]))
+    rows.extend(line_summary(info["lines"]))
+    width = pulse_width_s(info["lines"], info["sr"])
+    if width is not None:
+        rows.append(f"median pulse width: {width * 1000:.2f} ms")
     rows.append("")
-    if status == "ok":
-        rows.append(f"[OK] 25 audio onsets on the time axis of {Path(path).name}")
+    rows.append(f"vertical events: {len(events)}")
+    rows.append(f"audio codes {AUDIO_CODE_MIN}..{AUDIO_CODE_MAX}: {len(audios)}")
+    present = {event["code"] for event in audios}
+    missing = [code for code in range(AUDIO_CODE_MIN, AUDIO_CODE_MAX + 1) if code not in present]
+    if audios and missing:
+        shown = ", ".join(str(code) for code in missing)
+        rows.append(f"codes in that range with no pulse: {shown}")
+    rows.append("")
+    if audios:
+        rows.append("audio onsets, in the order the pulses arrived:")
+        rows.extend(event_table(audios, info["sr"], "audio"))
         rows.append("")
-        rows.extend(format_match(chosen, info["sr"]))
-        others = result["groups"][0][1:]
-        if others:
-            rows.append("")
-            rows.append("The same 25 times also come from:")
-            for other in others:
-                rows.append(f"  {other['detail']}")
+    if others:
+        rows.append("other port codes:")
+        rows.extend(event_table(others, info["sr"], "event"))
         rows.append("")
-        rows.append(f"[WROTE] {paths['png']}")
+    rows.append(f"[WROTE] {paths['png']}")
+    if audios:
+        rows.append(f"[OK] {len(audios)} audio onsets on the time axis of {Path(path).name}")
         rows.append(f"[WROTE] {paths['csv']}")
-        rows.append(f"[WROTE] {paths['txt']}")
-        write_csv(paths["csv"], chosen["intervals"], info["sr"])
-        if paths["candidates"].exists():
-            paths["candidates"].unlink()
-    elif status == "ambiguous":
-        rows.append(
-            "[STOP] more than one set of 25 audios matches the first three "
-            "lengths, and the onset times disagree. No onset table was written."
-        )
-        rows.append("")
-        for index, group in enumerate(result["groups"], start=1):
-            rows.append(f"candidate {index}")
-            rows.extend(format_match(group[0], info["sr"]))
-            rows.append("")
-        rows.append(f"[WROTE] {paths['png']}")
-        rows.append(f"[WROTE] {paths['candidates']}")
-        paths["candidates"].write_text("\n".join(rows) + "\n", encoding="utf-8")
-        if paths["csv"].exists():
-            paths["csv"].unlink()
-    else:
-        rows.append(
-            "[STOP] no run of 25 trigger intervals has first lengths in "
-            f"{WINDOWS[0][0]:.2f}-{WINDOWS[0][1]:.2f} s, "
-            f"{WINDOWS[1][0]:.2f}-{WINDOWS[1][1]:.2f} s, and "
-            f"{WINDOWS[2][0]:.2f}-{WINDOWS[2][1]:.2f} s."
-        )
-        rows.append("The trigger plot was still written.")
-        rows.append(f"[WROTE] {paths['png']}")
-        if paths["csv"].exists():
-            paths["csv"].unlink()
-        if paths["candidates"].exists():
-            paths["candidates"].unlink()
+        write_event_csv(paths["csv"], audios, info["sr"], "audio")
+    elif paths["csv"].exists():
+        paths["csv"].unlink()
+    if events:
+        rows.append(f"[WROTE] {paths['events']}")
+        write_event_csv(paths["events"], events, info["sr"], "event")
+    elif paths["events"].exists():
+        paths["events"].unlink()
+    rows.append(f"[WROTE] {paths['txt']}")
+    if paths["candidates"].exists():
+        paths["candidates"].unlink()
+    if not audios:
+        rows.append("[STOP] no rising-edge code in 1..25. The event list above is the full port record.")
     text = "\n".join(rows) + "\n"
     paths["txt"].write_text(text, encoding="utf-8")
     print(text, end="")
-    if status == "ok":
-        return 0
-    if status == "ambiguous":
-        return 2
-    return 1
+    return 0 if audios else 1
 
 
 def main(argv=None):
