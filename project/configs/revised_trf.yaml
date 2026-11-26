@@ -1,0 +1,52 @@
+schema_version: 1
+random_seed: 17
+analysis_rate_hz: 50
+expected_recording_count: 12
+manifest: outputs/manifest.csv
+outer_group_column: story_id
+model_root: outputs
+revised_features: outputs/stage4_revision/revised_predictors
+output_root: outputs/stage4_revision/revised_trf
+
+models:
+  - hubert_base
+  - hubert_large_refactor_rerun
+  - wav2vec2_base
+  - wav2vec2_large
+  - wavlm_base_plus
+  - wavlm_large
+  - data2vec_audio_base
+  - xls_r_300m
+  - whisper_medium_encoder
+
+encoding:
+  outer_folds: 5
+  inner_folds: 4
+  alphas: [0.1, 1.0, 10.0, 100.0]
+  lags_seconds: [-0.2, -0.1, 0.0, 0.1, 0.2]
+  target_pca_components: 30
+  lexical_pca_components: 32
+
+controls:
+  selected_depths: [input, middle, final]
+  equal_rank_cap: 3
+
+nulls:
+  shifts: 20
+  minimum_zero_seconds: 2.0
+
+statistics:
+  bootstrap_samples: 10000
+  confidence: 0.95
+  test_families:
+    primary: [acoustic, prosodic, phonetic, word, lexical]
+    rich: [acoustic, prosodic, phonetic, word, lexical]
+    equal_rank: [acoustic, prosodic, phonetic, word]
+    zero_lag: [acoustic, prosodic, phonetic, word, lexical]
+    null: [word]
+
+slurm:
+  max_concurrent_jobs: 3
+  cpus_per_task: 16
+  memory: 64G
+  time: "24:00:00"
