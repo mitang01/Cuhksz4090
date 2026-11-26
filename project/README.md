@@ -212,6 +212,122 @@ fold can reduce lexical dimensionality before additive onset rasterization and
 lag expansion. Existing feature, activation, and lexical files are read-only;
 reruns refuse to overwrite outputs unless `--overwrite` is explicit.
 
+### Revised TRF fits and controls
+
+`configs/revised_trf.yaml` fixes the nine checkpoint identities, five grouped
+outer folds, four grouped inner folds, ridge grid, five lags, target/lexical
+PCA limits, control scopes, null count, and inference families. Resolve the
+actual HDF5 layers before submission:
+
+```bash
+python3 scripts/fit_revised_trf.py manifest
+python3 scripts/fit_revised_trf.py local-smoke
+```
+
+First run and inspect the three required real-data benchmarks. The null uses
+the completed middle-layer primary unit's folds, target coordinates, and
+penalties:
+
+```bash
+MIDDLE=$(python3 - <<'PY'
+import json
+data = json.load(open(
+    "outputs/stage4_revision/revised_trf/manifests/resolved_layers.json",
+    encoding="utf-8",
+))
+print(data["hubert_base"]["selected_depths"]["middle"])
+PY
+)
+
+/usr/bin/time -v python3 scripts/fit_revised_trf.py \
+  fit hubert_base "$MIDDLE" 2>&1 | tee revised-primary-smoke.log
+/usr/bin/time -v python3 scripts/run_revised_controls.py \
+  fit rich hubert_base "$MIDDLE" 2>&1 | tee revised-rich-smoke.log
+/usr/bin/time -v python3 scripts/run_revised_controls.py \
+  null hubert_base 0 --layer "$MIDDLE" 2>&1 | tee revised-null-smoke.log
+```
+
+Review each unit's `status.json` for `wall_seconds` and `peak_rss_bytes`.
+After those pass, submit the resumable arrays. Resource and site selection stay
+on the `sbatch` command line:
+
+```bash
+mkdir -p outputs/stage4_revision/revised_trf/logs
+PRIMARY_N=$(($(wc -l < outputs/stage4_revision/revised_trf/manifests/primary_units.tsv)-1))
+CONTROL_N=$(($(wc -l < outputs/stage4_revision/revised_trf/manifests/control_units.tsv)-1))
+NULL_N=$(($(wc -l < outputs/stage4_revision/revised_trf/manifests/null_units.tsv)-1))
+
+PRIMARY_JOB=$(sbatch --parsable --partition=cpu \
+  --array="0-$((PRIMARY_N-1))%3" --cpus-per-task=16 --mem=64G --time=24:00:00 \
+  --output="outputs/stage4_revision/revised_trf/logs/primary-%A_%a.out" \
+  --error="outputs/stage4_revision/revised_trf/logs/primary-%A_%a.err" \
+  slurm/revised_primary_fits.sbatch)
+
+CONTROL_JOB=$(sbatch --parsable --partition=cpu \
+  --array="0-$((CONTROL_N-1))%3" --cpus-per-task=16 --mem=64G --time=24:00:00 \
+  --output="outputs/stage4_revision/revised_trf/logs/control-%A_%a.out" \
+  --error="outputs/stage4_revision/revised_trf/logs/control-%A_%a.err" \
+  slurm/revised_selected_depth_controls.sbatch)
+
+NULL_JOB=$(sbatch --parsable --partition=cpu \
+  --dependency="afterok:${PRIMARY_JOB}" \
+  --array="0-$((NULL_N-1))%3" --cpus-per-task=16 --mem=64G --time=24:00:00 \
+  --output="outputs/stage4_revision/revised_trf/logs/null-%A_%a.out" \
+  --error="outputs/stage4_revision/revised_trf/logs/null-%A_%a.err" \
+  slurm/revised_word_shift_nulls.sbatch)
+```
+
+The control array may run concurrently with the primary array. The null array
+must wait for primary completion because every null unit validates and reuses
+its matched observed fit. Summarize only after all arrays finish:
+
+```bash
+python3 scripts/run_revised_controls.py summarize
+```
+
+### Revised result figures
+
+Plotting-schema fit units include fold-specific predictions, target-PCA signs,
+ridge coefficients, predictor scaling, and lag mappings. This schema change
+invalidates earlier revised fit units safely; rerunning the primary array
+preserves old directories with an `.invalid.<timestamp>` suffix and publishes
+complete replacements.
+
+Generate layer profiles after all grouped primary units complete:
+
+```bash
+python3 scripts/plot_layer_profiles.py
+```
+
+Generate a held-out PC1 trajectory for a prespecified recording and excerpt.
+`best-lexical` uses inner-validation lexical conditional effect in that
+recording's outer fold and never inspects its held-out trajectory:
+
+```bash
+python3 scripts/plot_predicted_activations.py \
+  --model hubert_base \
+  --recording-id story01 \
+  --start-seconds 10 \
+  --end-seconds 30 \
+  --selection best-lexical
+```
+
+Generate the benchmark five-point kernel for the same displayed target
+component and held-out fold:
+
+```bash
+python3 scripts/plot_trf_kernels.py \
+  --model hubert_base \
+  --layer layer_06_transformer \
+  --recording-id story01 \
+  --predictor broadband_envelope
+```
+
+Every command writes PDF and PNG figures, exact plotted-series CSV files, and
+JSON metadata containing selection rules, score definitions, source hashes,
+PCA sign conventions, and reconstruction details. The kernel command does not
+silently interpolate or refit a denser lag grid.
+
 ## Method choices
 
 Paper-compatible choices explicitly represented in configuration are the 50 Hz
