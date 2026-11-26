@@ -185,6 +185,33 @@ when the interval label is empty. Original TextGrid times remain unchanged.
 Labeled intervals, larger overruns, missing files, and malformed timing remain
 errors that block extraction.
 
+## Revised lexical predictors
+
+Extract contextual Mandarin word vectors once, then attach the same sparse
+lexical events to both existing predictor designs:
+
+```bash
+python3 scripts/extract_lexical_embeddings.py \
+  --manifest outputs/manifest.csv \
+  --output outputs/stage4_revision/lexical_embeddings
+
+python3 scripts/build_revised_predictors.py \
+  --manifest outputs/manifest.csv \
+  --original-features outputs/features \
+  --rich-features outputs/stage4_revision/features_rich \
+  --lexical-root outputs/stage4_revision/lexical_embeddings \
+  --activation-store outputs/hubert_base/activations.h5 \
+  --output outputs/stage4_revision/revised_predictors
+```
+
+The extractor resolves `hfl/chinese-roberta-wwm-ext` to an immutable Hugging
+Face commit and records that commit in every archive. Revised archives remove
+`recording_onset` by name. They keep the three word-timing columns dense and
+store lexical vectors plus onset frame indexes separately, so each training
+fold can reduce lexical dimensionality before additive onset rasterization and
+lag expansion. Existing feature, activation, and lexical files are read-only;
+reruns refuse to overwrite outputs unless `--overwrite` is explicit.
+
 ## Method choices
 
 Paper-compatible choices explicitly represented in configuration are the 50 Hz
@@ -198,10 +225,11 @@ training-fold-only normalization and PCA, per-unit or PCA targets, and
 independently tuned full-versus-reduced ridge models. `ΔR²` is named
 **conditional unique contribution** and is not interpreted causally.
 
-Optional phoneme-sequence statistics, word frequency, lexical surprisal, and
-contextual embeddings are disabled and unavailable until suitable Mandarin
-transcripts/resources are supplied. Default temporal lags and ridge
-hyperparameters are project choices, not claims about the paper.
+Optional phoneme-sequence statistics, word frequency, and lexical surprisal
+remain disabled. Contextual lexical embeddings are available from the
+forced-aligned Mandarin word intervals through the separate revised-predictor
+namespace. Default temporal lags and ridge hyperparameters are project choices,
+not claims about the paper.
 
 The retained initial pool contains 12 recordings. `story17` and `story18` are
 explicitly excluded in `configs/data.yaml` because they are nonsemantic control
