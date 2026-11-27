@@ -205,7 +205,21 @@ python3 scripts/build_revised_predictors.py \
 ```
 
 The extractor resolves `hfl/chinese-roberta-wwm-ext` to an immutable Hugging
-Face commit and records that commit in every archive. Revised archives remove
+Face commit and records that commit in every archive. For a server that cannot
+reach Hugging Face, pass the uploaded snapshot and its commit:
+
+```bash
+python3 scripts/extract_lexical_embeddings.py \
+  --model /share/home/mitan/models/chinese-roberta-wwm-ext \
+  --local-files-only \
+  --revision 5c58d0b8ec1d9014354d691c538661bf00bfdb44
+```
+
+The current `main` snapshot of this checkpoint is commit
+`5c58d0b8ec1d9014354d691c538661bf00bfdb44`. A directory created by
+`hf download --local-dir` also works without `--revision` when its
+`.cache/huggingface/download` metadata is uploaded with the model files.
+Revised archives remove
 `recording_onset` by name. They keep the three word-timing columns dense and
 store lexical vectors plus onset frame indexes separately, so each training
 fold can reduce lexical dimensionality before additive onset rasterization and

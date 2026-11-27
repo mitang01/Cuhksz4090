@@ -12,6 +12,7 @@ from speech_strf.lexical_predictors import (
     extract_recording_embeddings,
     plan_context_windows,
     rasterize_lexical_events,
+    resolve_checkpoint_revision,
     save_lexical_recording,
 )
 
@@ -240,3 +241,59 @@ def test_revised_archive_removes_onset_and_matches_activation_grid(tmp_path):
     assert arrays["lexical_collision_counts"].tolist() == [2]
     np.testing.assert_array_equal(arrays["times"], times)
     assert report["grid_status"] == "PASS"
+
+
+def test_local_snapshot_commit_and_explicit_revision_are_immutable(tmp_path):
+    commit = "5c58d0b8ec1d9014354d691c538661bf00bfdb44"
+    metadata = tmp_path / ".cache" / "huggingface" / "download"
+    metadata.mkdir(parents=True)
+    (metadata / "config.json.metadata").write_text(
+        f"{commit}\netag\n1\n", encoding="utf-8"
+    )
+    (metadata / "tokenizer.json.metadata").write_text(
+        f"{commit.upper()}\netag\n1\n", encoding="utf-8"
+    )
+
+    resolved, source = resolve_checkpoint_revision(
+        object_revisions=[None, None],
+        local_directory=tmp_path,
+    )
+    assert (resolved, source) == (commit, "local_snapshot_metadata")
+
+    explicit, explicit_source = resolve_checkpoint_revision(
+        object_revisions=[None],
+        requested_revision=commit,
+    )
+    assert (explicit, explicit_source) == (commit, "explicit_revision")
+
+    try:
+        resolve_checkpoint_revision(
+            object_revisions=[None],
+            requested_revision="main",
+        )
+    except ValueError as error:
+        assert "not an immutable" in str(error)
+    else:
+        raise AssertionError("branch revision was accepted")
+
+
+def test_disagreeing_snapshot_metadata_is_rejected(tmp_path):
+    metadata = tmp_path / ".cache" / "huggingface" / "download"
+    metadata.mkdir(parents=True)
+    (metadata / "config.json.metadata").write_text(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\netag\n1\n",
+        encoding="utf-8",
+    )
+    (metadata / "model.safetensors.metadata").write_text(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\netag\n1\n",
+        encoding="utf-8",
+    )
+    try:
+        resolve_checkpoint_revision(
+            object_revisions=[None],
+            local_directory=tmp_path,
+        )
+    except ValueError as error:
+        assert "disagree" in str(error)
+    else:
+        raise AssertionError("disagreeing snapshot commits were accepted")
