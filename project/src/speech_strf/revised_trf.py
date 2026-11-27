@@ -38,6 +38,7 @@ from .stage4_statistics import (
 PRIMARY_REDUCTIONS = ("acoustic", "prosodic", "phonetic", "word", "lexical")
 FAMILY_REDUCTIONS = PRIMARY_REDUCTIONS[:-1]
 CONTROL_VARIANTS = ("rich", "equal_rank", "zero_lag")
+FIT_SCHEMA_VERSION = 2
 PAPER_MODELS = (
     "hubert_base",
     "hubert_large_refactor_rerun",
@@ -57,6 +58,7 @@ FIT_FILES = (
     "fold_assets.npz",
     "status.json",
 )
+PLOTTING_FIT_FILES = ("predictions.npz", "model_assets.npz")
 
 
 @dataclass(frozen=True)
@@ -376,7 +378,13 @@ def _fit_equal_rank(
     *,
     cap: int,
     seed: int,
-) -> tuple[dict[str, np.ndarray], list[str], list[str], dict[str, Any]]:
+) -> tuple[
+    dict[str, np.ndarray],
+    list[str],
+    list[str],
+    list[str],
+    dict[str, Any],
+]:
     family_array = np.asarray(families)
     stacked = {
         family: np.vstack(
@@ -417,7 +425,12 @@ def _fit_equal_rank(
     output_families = [
         family for family in TOP_LEVEL_FAMILIES for _ in range(rank)
     ]
-    return output, output_families, list(output_families), {
+    output_names = [
+        f"{family}_equal_rank_{component + 1:02d}"
+        for family in TOP_LEVEL_FAMILIES
+        for component in range(rank)
+    ]
+    return output, output_families, list(output_families), output_names, {
         "enabled": True,
         "achieved_common_rank": int(rank),
         "rank_cap": int(cap),
@@ -454,6 +467,7 @@ def _prepare_predictors(
     dict[str, np.ndarray],
     list[str],
     list[str],
+    list[str],
     dict[str, Any],
     dict[str, Any],
 ]:
@@ -463,9 +477,18 @@ def _prepare_predictors(
     )
     dense_families = list(next(iter(records.values()))["families"])
     dense_blocks = list(next(iter(records.values()))["blocks"])
+    dense_names = list(
+        next(iter(records.values())).get(
+            "names", [f"dense_{index:03d}" for index in range(len(dense_families))]
+        )
+    )
     lexical_width = next(iter(lexical_grids.values())).shape[1]
     families = [*dense_families, *(["word"] * lexical_width)]
     blocks = [*dense_blocks, *(["lexical"] * lexical_width)]
+    names = [
+        *dense_names,
+        *[f"lexical_pc_{index + 1:02d}" for index in range(lexical_width)],
+    ]
     matrices = {
         key: np.column_stack([records[key]["dense"], lexical_grids[key]])
         for key in all_ids
@@ -491,7 +514,7 @@ def _prepare_predictors(
 
     capacity_report: dict[str, Any] = {"enabled": False}
     if equal_rank_cap is not None:
-        matrices, families, blocks, capacity_report = _fit_equal_rank(
+        matrices, families, blocks, names, capacity_report = _fit_equal_rank(
             matrices,
             families,
             train_ids,
@@ -503,6 +526,7 @@ def _prepare_predictors(
     designs: dict[str, np.ndarray] = {}
     lagged_families: list[str] | None = None
     lagged_blocks: list[str] | None = None
+    lagged_names: list[str] | None = None
     for recording_id in all_ids:
         design, current = lagged_design(
             matrices[recording_id],
@@ -512,15 +536,22 @@ def _prepare_predictors(
             rate_hz,
         )
         current_blocks = list(blocks) * len(lags_seconds)
+        current_names = [
+            f"{name}__lag_{int(round(lag * 1000)):+d}ms"
+            for lag in lags_seconds
+            for name in names
+        ]
         if lagged_families is not None and current != lagged_families:
             raise RuntimeError("Lagged family schema changed between recordings")
         designs[recording_id] = design
         lagged_families = current
         lagged_blocks = current_blocks
+        lagged_names = current_names
     return (
         designs,
         lagged_families or [],
         lagged_blocks or [],
+        lagged_names or [],
         lexical_report,
         {
             "capacity": capacity_report,
@@ -538,6 +569,7 @@ def _fit_target_projection(
     *,
     fixed_mean: np.ndarray | None = None,
     fixed_components: np.ndarray | None = None,
+    fixed_signs: np.ndarray | None = None,
 ) -> tuple[
     dict[str, np.ndarray],
     dict[str, np.ndarray],
@@ -551,14 +583,27 @@ def _fit_target_projection(
             n_components=achieved, svd_solver="full", random_state=seed
         ).fit(training)
         mean = projector.mean_
-        components = projector.components_
+        components = np.asarray(projector.components_, dtype=np.float64)
+        anchor_indexes = np.argmax(np.abs(components), axis=1)
+        signs = np.sign(
+            components[np.arange(len(components)), anchor_indexes]
+        )
+        signs[signs == 0] = 1.0
+        components = components * signs[:, None]
         coverage_curve = np.cumsum(projector.explained_variance_ratio_)
         coverage = float(coverage_curve[-1])
     else:
         mean = np.asarray(fixed_mean, dtype=np.float64)
         components = np.asarray(fixed_components, dtype=np.float64)
+        signs = (
+            np.asarray(fixed_signs, dtype=np.float64)
+            if fixed_signs is not None
+            else np.ones(components.shape[0], dtype=np.float64)
+        )
         if mean.shape != (training.shape[1],) or components.shape[1] != training.shape[1]:
             raise ValueError("Fixed target PCA assets have incompatible dimensions")
+        if signs.shape != (components.shape[0],):
+            raise ValueError("Fixed target PCA signs have incompatible dimensions")
         achieved = components.shape[0]
         centered = training - mean
         total_variance = np.var(centered, axis=0, ddof=1).sum()
@@ -577,10 +622,13 @@ def _fit_target_projection(
         "train_recording_ids": list(train_ids),
         "test_recording_ids": list(eval_ids),
         "fixed_observed_coordinates": fixed_mean is not None,
+        "component_sign_rule": "largest_absolute_training_loading_positive",
+        "component_signs": signs.tolist(),
     }
     assets = {
         "target_mean": np.asarray(mean, dtype=np.float64),
         "target_components": np.asarray(components, dtype=np.float64),
+        "target_component_signs": np.asarray(signs, dtype=np.float64),
     }
     return train_values, eval_values, report, assets
 
@@ -622,6 +670,24 @@ def _fit_scaled_ridge(
         recording_id: model.predict(scaler.transform(values[:, mask]))
         for recording_id, values in x_eval.items()
     }
+
+
+def _fit_scaled_ridge_with_assets(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_eval: Mapping[str, np.ndarray],
+    mask: np.ndarray,
+    alpha: float,
+) -> tuple[dict[str, np.ndarray], StandardScaler, Ridge]:
+    scaler = StandardScaler().fit(x_train[:, mask])
+    model = Ridge(alpha=float(alpha)).fit(
+        scaler.transform(x_train[:, mask]), y_train
+    )
+    predictions = {
+        recording_id: model.predict(scaler.transform(values[:, mask]))
+        for recording_id, values in x_eval.items()
+    }
+    return predictions, scaler, model
 
 
 def _scaled_designs(
@@ -717,7 +783,7 @@ def _select_alphas(
     for inner_train, inner_test in _inner_splits(
         outer_train, groups, inner_folds
     ):
-        designs, families, blocks, _, _ = _prepare_predictors(
+        designs, families, blocks, _, _, _ = _prepare_predictors(
             records,
             inner_train,
             inner_test,
@@ -780,6 +846,7 @@ def fit_revised_encoding(
     fixed_target_assets: Mapping[str, np.ndarray] | None = None,
     minimum_zero_seconds: float = 2.0,
     max_abs_lag_seconds: float = 0.2,
+    capture_plot_assets: bool = True,
 ) -> dict[str, Any]:
     """Fit nested revised encoding models and score held recordings separately."""
     recording_ids = sorted(records)
@@ -796,6 +863,8 @@ def fit_revised_encoding(
     target_reports: list[dict[str, Any]] = []
     predictor_reports: list[dict[str, Any]] = []
     asset_arrays: dict[str, np.ndarray] = {}
+    prediction_arrays: dict[str, np.ndarray] = {}
+    model_arrays: dict[str, np.ndarray] = {}
     shift_manifest: dict[str, Any] = {}
 
     for fold, train_ids, test_ids in splits:
@@ -833,7 +902,7 @@ def fit_revised_encoding(
                 max_abs_lag_seconds=max_abs_lag_seconds,
             )
 
-        designs, families, blocks, lexical_report, preparation_report = (
+        designs, families, blocks, column_names, lexical_report, preparation_report = (
             _prepare_predictors(
                 records,
                 train_ids,
@@ -859,6 +928,11 @@ def fit_revised_encoding(
             if fixed_target_assets is not None
             else None
         )
+        fixed_signs = (
+            fixed_target_assets.get(f"{prefix}_target_component_signs")
+            if fixed_target_assets is not None
+            else None
+        )
         y_train, y_test, target_report, target_assets = _fit_target_projection(
             records,
             train_ids,
@@ -867,6 +941,7 @@ def fit_revised_encoding(
             seed,
             fixed_mean=fixed_mean,
             fixed_components=fixed_components,
+            fixed_signs=fixed_signs,
         )
         for name, values in target_assets.items():
             asset_arrays[f"{prefix}_{name}"] = values
@@ -893,13 +968,124 @@ def fit_revised_encoding(
         target_train = np.vstack([y_train[key] for key in train_ids])
         eval_designs = {key: designs[key] for key in test_ids}
         masks = _model_masks(families, blocks, reductions)
-        predictions = {
-            name: _fit_scaled_ridge(
+        fitted = {
+            name: _fit_scaled_ridge_with_assets(
                 x_train, target_train, eval_designs, mask, selected[name]
             )
             for name, mask in masks.items()
         }
+        predictions = {name: value[0] for name, value in fitted.items()}
         full_predictions = predictions["full"]
+        full_scaler = fitted["full"][1]
+        full_model = fitted["full"][2]
+        base_column_count = len(column_names) // len(lags_seconds)
+        column_lags_ms = np.repeat(
+            np.asarray(
+                [int(round(value * 1000)) for value in lags_seconds],
+                dtype=np.int32,
+            ),
+            base_column_count,
+        )
+        if capture_plot_assets:
+            if "lexical" in fitted:
+                lexical_mask = masks["lexical"]
+                lexical_scaler = fitted["lexical"][1]
+                if not (
+                    np.array_equal(
+                        full_scaler.mean_[lexical_mask],
+                        lexical_scaler.mean_,
+                    )
+                    and np.array_equal(
+                        full_scaler.scale_[lexical_mask],
+                        lexical_scaler.scale_,
+                    )
+                ):
+                    raise RuntimeError(
+                        "Full and lexical-omitted retained-column scaling differs"
+                    )
+            model_arrays.update(
+                {
+                    f"{prefix}::feature_names": np.asarray(column_names),
+                    f"{prefix}::predictor_names": np.asarray(
+                        [
+                            name.rsplit("__lag_", 1)[0]
+                            for name in column_names
+                        ]
+                    ),
+                    f"{prefix}::feature_families": np.asarray(families),
+                    f"{prefix}::feature_blocks": np.asarray(blocks),
+                    f"{prefix}::lag_ms": column_lags_ms,
+                    f"{prefix}::scaler_mean": np.asarray(
+                        full_scaler.mean_, dtype=np.float64
+                    ),
+                    f"{prefix}::scaler_scale": np.asarray(
+                        full_scaler.scale_, dtype=np.float64
+                    ),
+                    f"{prefix}::full_coef_standardized": np.asarray(
+                        full_model.coef_, dtype=np.float64
+                    ),
+                    f"{prefix}::full_coef_original_predictor_units": np.asarray(
+                        full_model.coef_ / full_scaler.scale_[None, :],
+                        dtype=np.float64,
+                    ),
+                    f"{prefix}::full_intercept_standardized": np.asarray(
+                        full_model.intercept_, dtype=np.float64
+                    ),
+                    f"{prefix}::full_alpha": np.asarray(
+                        [selected["full"]], dtype=np.float64
+                    ),
+                    f"{prefix}::train_recording_ids": np.asarray(train_ids),
+                    f"{prefix}::test_recording_ids": np.asarray(test_ids),
+                    f"{prefix}::target_component_signs": np.asarray(
+                        target_assets["target_component_signs"],
+                        dtype=np.float64,
+                    ),
+                    **(
+                        {
+                            f"{prefix}::lexical_omitted_retained_mask": np.asarray(
+                                lexical_mask, dtype=bool
+                            ),
+                            f"{prefix}::lexical_omitted_scaler_mean": np.asarray(
+                                lexical_scaler.mean_, dtype=np.float64
+                            ),
+                            f"{prefix}::lexical_omitted_scaler_scale": np.asarray(
+                                lexical_scaler.scale_, dtype=np.float64
+                            ),
+                        }
+                        if "lexical" in fitted
+                        else {}
+                    ),
+                }
+            )
+        if len(column_names) != len(families) or len(column_names) != len(blocks):
+            raise RuntimeError("Prepared predictor column metadata disagree")
+        if capture_plot_assets:
+            for recording_id in test_ids:
+                prediction_prefix = f"{prefix}::{recording_id}"
+                prediction_arrays.update(
+                    {
+                        f"{prediction_prefix}::times": np.asarray(
+                            records[recording_id].get(
+                                "times",
+                                np.arange(len(y_test[recording_id])) / rate_hz,
+                            ),
+                            dtype=np.float64,
+                        ),
+                        f"{prediction_prefix}::target": np.asarray(
+                            y_test[recording_id], dtype=np.float32
+                        ),
+                        f"{prediction_prefix}::full": np.asarray(
+                            full_predictions[recording_id], dtype=np.float32
+                        ),
+                    }
+                )
+                if "lexical" in predictions:
+                    prediction_arrays[
+                        f"{prediction_prefix}::lexical_omitted"
+                    ] = np.asarray(
+                        predictions["lexical"][recording_id],
+                        dtype=np.float32,
+                    )
         for reduction in reductions:
             for recording_id in test_ids:
                 full_r2 = _score(
@@ -942,6 +1128,8 @@ def fit_revised_encoding(
         "target_pca_reports": target_reports,
         "predictor_reports": predictor_reports,
         "fold_assets": asset_arrays,
+        "predictions": prediction_arrays,
+        "model_assets": model_arrays,
         "shift_manifest": shift_manifest,
     }
 
@@ -1021,6 +1209,8 @@ class RevisedTRFRunner:
         stat = store.stat()
         manifest = self.revised_root / "archive_manifest.csv"
         return {
+            "fit_schema_version": FIT_SCHEMA_VERSION,
+            "fit_implementation_sha256": _sha256(Path(__file__)),
             "config_sha256": self.config_hash,
             "revised_archive_manifest_sha256": _sha256(manifest),
             "activation_store": str(store),
@@ -1032,14 +1222,23 @@ class RevisedTRFRunner:
     def _valid_unit(self, path: Path, expected: Mapping[str, Any]) -> bool:
         try:
             status = json.loads((path / "status.json").read_text(encoding="utf-8"))
+            plot_files = (
+                list(PLOTTING_FIT_FILES)
+                if expected.get("variant") == "primary"
+                and expected.get("outer_mode") == "grouped"
+                and expected.get("shift") is None
+                else []
+            )
             required = [
                 *[name for name in FIT_FILES if name != "status.json"],
+                *plot_files,
                 *(["shift_manifest.json"] if expected.get("shift") is not None else []),
             ]
             return (
                 status.get("state") == "complete"
                 and status.get("expected") == dict(expected)
-                and all((path / name).is_file() for name in FIT_FILES)
+                and (path / "status.json").is_file()
+                and all((path / name).is_file() for name in required)
                 and status.get("file_sha256")
                 == {
                     name: _sha256(path / name)
@@ -1161,6 +1360,11 @@ class RevisedTRFRunner:
                 self._load_observed_null_contract(spec.model, spec.layer)
             )
             reductions = ("word",)
+        capture_plot_assets = (
+            spec.variant == "primary"
+            and spec.outer_mode == "grouped"
+            and spec.shift is None
+        )
 
         result = fit_revised_encoding(
             records,
@@ -1183,6 +1387,7 @@ class RevisedTRFRunner:
                 self.config["nulls"]["minimum_zero_seconds"]
             ),
             max_abs_lag_seconds=max(abs(value) for value in lags),
+            capture_plot_assets=capture_plot_assets,
         )
         result["scores"].insert(0, "model", spec.model)
         result["scores"].insert(1, "layer", spec.layer)
@@ -1211,6 +1416,13 @@ class RevisedTRFRunner:
                 temporary / "predictor_coverage.csv", index=False
             )
             np.savez(temporary / "fold_assets.npz", **result["fold_assets"])
+            if capture_plot_assets:
+                np.savez_compressed(
+                    temporary / "predictions.npz", **result["predictions"]
+                )
+                np.savez(
+                    temporary / "model_assets.npz", **result["model_assets"]
+                )
             if spec.shift is not None:
                 _write_json(temporary / "shift_manifest.json", result["shift_manifest"])
             elapsed = time.perf_counter() - started
@@ -1221,6 +1433,7 @@ class RevisedTRFRunner:
                 peak_bytes = int(peak * 1024)
             hashed_files = [
                 *[name for name in FIT_FILES if name != "status.json"],
+                *(list(PLOTTING_FIT_FILES) if capture_plot_assets else []),
                 *(["shift_manifest.json"] if spec.shift is not None else []),
             ]
             file_hashes = {
@@ -1228,6 +1441,7 @@ class RevisedTRFRunner:
             }
             status = {
                 "state": "complete",
+                "fit_schema_version": FIT_SCHEMA_VERSION,
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "expected": expected,
                 "recording_count": len(ids),

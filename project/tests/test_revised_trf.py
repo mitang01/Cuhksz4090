@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import h5py
@@ -19,6 +21,7 @@ from speech_strf.revised_trf import (
     fit_revised_encoding,
     load_revised_config,
 )
+from speech_strf.revised_plots import load_kernel_series, load_trajectory
 
 
 MODELS = [
@@ -32,6 +35,7 @@ MODELS = [
     "xls_r_300m",
     "whisper_medium_encoder",
 ]
+ROOT = Path(__file__).parents[1]
 
 
 def _records(count=6, frames=48):
@@ -127,7 +131,7 @@ def test_nested_fit_refits_lexical_projection_and_reports_recording_scores(
 
 def test_lexical_ablation_keeps_all_word_timing_columns():
     records = _records()
-    designs, families, blocks, _, _ = _prepare_predictors(
+    designs, families, blocks, names, _, _ = _prepare_predictors(
         records,
         ["r0", "r1", "r2", "r3"],
         ["r4", "r5"],
@@ -146,6 +150,7 @@ def test_lexical_ablation_keeps_all_word_timing_columns():
     assert not np.any(masks["lexical"][block_array == "lexical"])
     assert not np.any(masks["word"][np.asarray(families) == "word"])
     assert all(value.shape[1] == len(families) for value in designs.values())
+    assert len(names) == len(families)
 
 
 def test_equal_rank_jointly_projects_timing_and_lexical_word_inputs():
@@ -158,13 +163,15 @@ def test_equal_rank_jointly_projects_timing_and_lexical_word_inputs():
         for key, value in records.items()
     }
     families = [*records["r0"]["families"], "word", "word"]
-    transformed, output_families, output_blocks, report = _fit_equal_rank(
-        matrices,
-        families,
-        ["r0", "r1", "r2", "r3"],
-        list(records),
-        cap=3,
-        seed=17,
+    transformed, output_families, output_blocks, output_names, report = (
+        _fit_equal_rank(
+            matrices,
+            families,
+            ["r0", "r1", "r2", "r3"],
+            list(records),
+            cap=3,
+            seed=17,
+        )
     )
     assert report["joint_word_projection"] is True
     assert 1 <= report["achieved_common_rank"] <= 3
@@ -175,6 +182,7 @@ def test_equal_rank_jointly_projects_timing_and_lexical_word_inputs():
         "word",
     }
     assert output_families == output_blocks
+    assert len(output_names) == len(output_families)
     assert all(
         value.shape[1] == 4 * report["achieved_common_rank"]
         for value in transformed.values()
@@ -349,10 +357,14 @@ def test_runner_publishes_and_resumes_an_atomic_primary_unit(tmp_path):
             times = np.arange(len(record["dense"])) / 50
             group = store.require_group(recording_id)
             group.attrs["complete"] = True
-            group.attrs["layer_names_json"] = json.dumps(["layer_00_input"])
+            group.attrs["layer_names_json"] = json.dumps(
+                ["layer_00_input", "layer_01_transformer"]
+            )
             group.create_dataset("canonical_timestamps", data=times)
-            group.create_group("canonical").create_dataset(
-                "layer_00_input", data=record["targets"]
+            canonical = group.create_group("canonical")
+            canonical.create_dataset("layer_00_input", data=record["targets"])
+            canonical.create_dataset(
+                "layer_01_transformer", data=record["targets"] * 0.9
             )
             for design in ("original", "rich"):
                 destination = revised_root / design / f"{recording_id}.npz"
@@ -362,7 +374,7 @@ def test_runner_publishes_and_resumes_an_atomic_primary_unit(tmp_path):
                     times=times,
                     names=np.asarray(
                         [
-                            "acoustic_0",
+                            "broadband_envelope",
                             "acoustic_1",
                             "prosody",
                             "phone",
@@ -411,8 +423,83 @@ def test_runner_publishes_and_resumes_an_atomic_primary_unit(tmp_path):
     assert first["state"] == "complete"
     destination = Path(first["path"])
     assert (destination / "scores.csv").is_file()
+    assert (destination / "predictions.npz").is_file()
+    assert (destination / "model_assets.npz").is_file()
     scores = pd.read_csv(destination / "scores.csv")
     assert set(scores["feature_family"]) == set(PRIMARY_REDUCTIONS)
     assert set(scores["recording_id"]) == set(records)
+    trajectory, trajectory_metadata, _ = load_trajectory(
+        destination, "r0", 0
+    )
+    assert len(trajectory) == len(records["r0"]["dense"])
+    assert trajectory_metadata["display_target"] == "PC1"
+    kernel, kernel_metadata, _ = load_kernel_series(
+        destination, "r0", "broadband_envelope", 0
+    )
+    assert kernel["lag_ms"].tolist() == [-200, -100, 0, 100, 200]
+    assert "per one outer-training standard deviation" in kernel_metadata[
+        "coefficient_units_plotted"
+    ]
     second = runner.fit(spec)
     assert second == {"state": "resumed", "path": str(destination)}
+
+    runner.fit(
+        FitSpec(
+            model="hubert_base",
+            layer="layer_01_transformer",
+            variant="primary",
+        )
+    )
+    plot_root = tmp_path / "plot_outputs"
+    commands = [
+        [
+            sys.executable,
+            "scripts/plot_layer_profiles.py",
+            "--config",
+            str(config_path),
+            "--model",
+            "hubert_base",
+            "--output",
+            str(plot_root / "profiles"),
+        ],
+        [
+            sys.executable,
+            "scripts/plot_predicted_activations.py",
+            "--config",
+            str(config_path),
+            "--model",
+            "hubert_base",
+            "--recording-id",
+            "r0",
+            "--start-seconds",
+            "0",
+            "--end-seconds",
+            "0.2",
+            "--selection",
+            "best-lexical",
+            "--output",
+            str(plot_root / "trajectories"),
+        ],
+        [
+            sys.executable,
+            "scripts/plot_trf_kernels.py",
+            "--config",
+            str(config_path),
+            "--model",
+            "hubert_base",
+            "--layer",
+            "layer_00_input",
+            "--recording-id",
+            "r0",
+            "--predictor",
+            "broadband_envelope",
+            "--output",
+            str(plot_root / "kernels"),
+        ],
+    ]
+    for command in commands:
+        subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
+    assert len(list(plot_root.rglob("*.pdf"))) == 4
+    assert len(list(plot_root.rglob("*.png"))) == 4
+    assert list(plot_root.rglob("*.series.csv"))
+    assert len(list(plot_root.rglob("*.metadata.json"))) == 4
