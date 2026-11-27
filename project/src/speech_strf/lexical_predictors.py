@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -20,6 +21,7 @@ from .timebase import nearest_frame
 WORD_TIERS = ("word", "words")
 WORD_TIMING_COLUMNS = ("word_onset", "word_boundary", "word_duration")
 TOP_LEVEL_FAMILIES = ("acoustic", "prosodic", "phonetic", "word")
+_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -273,20 +275,87 @@ def extract_recording_embeddings(
     }
 
 
-def resolved_huggingface_revision(tokenizer: Any, model: Any) -> str:
-    values = [
-        getattr(getattr(model, "config", None), "_commit_hash", None),
-        getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
-    ]
-    revisions = {str(value) for value in values if value}
-    if not revisions:
+def commit_sha(value: str | None) -> str | None:
+    """Return a lowercase 40-character commit, rejecting branches and tags."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text if _COMMIT_SHA.fullmatch(text) else None
+
+
+def local_snapshot_commit(model_dir: str | Path) -> str | None:
+    """Read the commit recorded by ``hf download --local-dir`` metadata."""
+    metadata_root = Path(model_dir) / ".cache" / "huggingface" / "download"
+    if not metadata_root.is_dir():
+        return None
+    commits: set[str] = set()
+    for path in sorted(metadata_root.rglob("*.metadata")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        commit = commit_sha(lines[0] if lines else None)
+        if commit is None:
+            raise ValueError(
+                f"Local snapshot metadata is not an immutable commit: {path}"
+            )
+        commits.add(commit)
+    if not commits:
+        return None
+    if len(commits) != 1:
         raise ValueError(
-            "Hugging Face did not expose a resolved immutable revision; "
-            "refusing to write unpinned embeddings"
+            f"Local snapshot metadata commits disagree: {sorted(commits)}"
         )
-    if len(revisions) != 1:
-        raise ValueError(f"Tokenizer/model resolved revisions disagree: {sorted(revisions)}")
-    return revisions.pop()
+    return commits.pop()
+
+
+def resolve_checkpoint_revision(
+    *,
+    object_revisions: Sequence[str | None],
+    requested_revision: str | None = None,
+    local_directory: str | Path | None = None,
+) -> tuple[str, str]:
+    """Resolve one immutable commit from objects, snapshot metadata, or CLI."""
+    discovered: dict[str, str] = {}
+    for value in object_revisions:
+        commit = commit_sha(value)
+        if commit is not None:
+            discovered[commit] = "huggingface_object"
+    if local_directory is not None:
+        snapshot_commit = local_snapshot_commit(local_directory)
+        if snapshot_commit is not None:
+            discovered.setdefault(snapshot_commit, "local_snapshot_metadata")
+    requested_commit = commit_sha(requested_revision)
+    if requested_commit is not None:
+        discovered.setdefault(requested_commit, "explicit_revision")
+    if len(discovered) > 1:
+        raise ValueError(
+            "Checkpoint revisions disagree: "
+            f"{sorted(discovered)}"
+        )
+    if not discovered:
+        if requested_revision:
+            raise ValueError(
+                f"Revision {requested_revision!r} is not an immutable "
+                "40-character commit"
+            )
+        raise ValueError(
+            "Checkpoint did not expose an immutable Hugging Face commit. "
+            "Pass --revision with the 40-character commit SHA."
+        )
+    commit, source = next(iter(discovered.items()))
+    if "huggingface_object" in discovered.values():
+        source = "huggingface_object"
+    elif "local_snapshot_metadata" in discovered.values():
+        source = "local_snapshot_metadata"
+    return commit, source
+
+
+def resolved_huggingface_revision(tokenizer: Any, model: Any) -> str:
+    commit, _source = resolve_checkpoint_revision(
+        object_revisions=[
+            getattr(getattr(model, "config", None), "_commit_hash", None),
+            getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
+        ]
+    )
+    return commit
 
 
 @lru_cache(maxsize=None)

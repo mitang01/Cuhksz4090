@@ -14,7 +14,7 @@ from speech_strf.alignments import parse_textgrid
 from speech_strf.lexical_predictors import (
     extract_recording_embeddings,
     ordered_word_intervals,
-    resolved_huggingface_revision,
+    resolve_checkpoint_revision,
     save_lexical_recording,
     sha256_file,
     write_csv,
@@ -36,31 +36,41 @@ def _git_commit() -> str | None:
 def _load_checkpoint(args: argparse.Namespace):
     from transformers import AutoConfig, AutoModel, AutoTokenizer
 
+    model_path = Path(args.model)
+    local_directory = model_path if model_path.is_dir() else None
+    # A flat uploaded snapshot has no Hub revision lookup. Passing the commit
+    # back into from_pretrained would send that lookup to the network.
+    load_revision = None if local_directory is not None else args.revision
     config = AutoConfig.from_pretrained(
         args.model,
-        revision=args.revision,
+        revision=load_revision,
         local_files_only=args.local_files_only,
     )
-    pinned_revision = getattr(config, "_commit_hash", None)
-    if not pinned_revision:
-        raise RuntimeError(
-            "Checkpoint config did not expose an immutable resolved "
-            "Hugging Face revision"
-        )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
-        revision=pinned_revision,
+        revision=load_revision,
         use_fast=True,
         local_files_only=args.local_files_only,
     )
     model = AutoModel.from_pretrained(
         args.model,
-        revision=pinned_revision,
+        revision=load_revision,
         config=config,
         local_files_only=args.local_files_only,
     )
-    resolved = resolved_huggingface_revision(tokenizer, model)
-    return tokenizer, model, resolved
+    try:
+        resolved, source = resolve_checkpoint_revision(
+            object_revisions=[
+                getattr(config, "_commit_hash", None),
+                getattr(getattr(model, "config", None), "_commit_hash", None),
+                getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
+            ],
+            requested_revision=args.revision,
+            local_directory=local_directory,
+        )
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    return tokenizer, model, resolved, source
 
 
 def main() -> None:
@@ -73,7 +83,10 @@ def main() -> None:
     parser.add_argument(
         "--revision",
         default=None,
-        help="Requested Hugging Face revision. The immutable resolved commit is always recorded.",
+        help=(
+            "Immutable 40-character commit SHA. Required for an uploaded local "
+            "directory that has no Hugging Face snapshot metadata."
+        ),
     )
     parser.add_argument("--overlap-words", type=int, default=32)
     parser.add_argument("--max-tokens", type=int)
@@ -97,7 +110,7 @@ def main() -> None:
     if rows.empty:
         raise SystemExit("No recordings selected")
 
-    tokenizer, model, resolved_revision = _load_checkpoint(args)
+    tokenizer, model, resolved_revision, revision_source = _load_checkpoint(args)
     output = Path(args.output)
     recordings_dir = output / "recordings"
     recordings_dir.mkdir(parents=True, exist_ok=True)
@@ -191,6 +204,7 @@ def main() -> None:
         "model_id": args.model,
         "requested_revision": args.revision,
         "resolved_revision": resolved_revision,
+        "revision_source": revision_source,
         "frozen_eval_inference_mode": True,
         "tokenizer_is_fast": bool(tokenizer.is_fast),
         "overlap_words": args.overlap_words,
@@ -206,7 +220,8 @@ def main() -> None:
         encoding="utf-8",
     )
     print(
-        f"Resolved immutable checkpoint revision: {resolved_revision}\n"
+        f"Resolved immutable checkpoint revision: {resolved_revision} "
+        f"({revision_source})\n"
         f"Wrote {len(summary_rows)} recordings to {output}"
     )
 
