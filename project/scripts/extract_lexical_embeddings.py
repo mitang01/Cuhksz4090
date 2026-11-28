@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import subprocess
@@ -33,8 +34,31 @@ def _git_commit() -> str | None:
         return None
 
 
+def _local_checkpoint_revision(checkpoint: Path) -> str:
+    """Fingerprint the model directory's visible files by name and content."""
+    files = sorted(
+        path for path in checkpoint.iterdir()
+        if path.is_file() and not path.name.startswith(".")
+    )
+    inventory = [(path.name, sha256_file(path)) for path in files]
+    digest = hashlib.sha256(
+        json.dumps(inventory, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"local-sha256:{digest}"
+
+
 def _load_checkpoint(args: argparse.Namespace):
     from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+    checkpoint = Path(args.model).expanduser()
+    if checkpoint.is_dir():
+        checkpoint = checkpoint.resolve()
+        local_path = str(checkpoint)
+        tokenizer = AutoTokenizer.from_pretrained(
+            local_path, use_fast=True, local_files_only=True
+        )
+        model = AutoModel.from_pretrained(local_path, local_files_only=True)
+        return tokenizer, model, _local_checkpoint_revision(checkpoint)
 
     config = AutoConfig.from_pretrained(
         args.model,
@@ -73,7 +97,10 @@ def main() -> None:
     parser.add_argument(
         "--revision",
         default=None,
-        help="Requested Hugging Face revision. The immutable resolved commit is always recorded.",
+        help=(
+            "Requested revision for a Hugging Face Hub model ID. Local "
+            "checkpoint directories are identified by a SHA-256 fingerprint."
+        ),
     )
     parser.add_argument("--overlap-words", type=int, default=32)
     parser.add_argument("--max-tokens", type=int)
@@ -206,7 +233,7 @@ def main() -> None:
         encoding="utf-8",
     )
     print(
-        f"Resolved immutable checkpoint revision: {resolved_revision}\n"
+        f"Resolved checkpoint identity: {resolved_revision}\n"
         f"Wrote {len(summary_rows)} recordings to {output}"
     )
 
