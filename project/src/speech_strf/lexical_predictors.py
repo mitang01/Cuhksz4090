@@ -165,7 +165,10 @@ def extract_recording_embeddings(
     model.eval()
     model.requires_grad_(False)
     model.to(device)
-    limit = int(max_tokens or infer_context_limit(tokenizer, model))
+    checkpoint_limit = infer_context_limit(tokenizer, model)
+    limit = checkpoint_limit if max_tokens is None else int(max_tokens)
+    if not 1 <= limit <= checkpoint_limit:
+        raise ValueError(f"max_tokens must be between 1 and {checkpoint_limit}")
     special_tokens = int(tokenizer.num_special_tokens_to_add(pair=False))
 
     full = tokenizer(
@@ -177,10 +180,10 @@ def extract_recording_embeddings(
         return_token_type_ids=False,
     )
     full_word_ids = _word_ids(full)
-    piece_counts = [
-        sum(value == word_index for value in full_word_ids)
-        for word_index in range(len(labels))
-    ]
+    piece_counts = np.bincount(
+        [value for value in full_word_ids if value is not None],
+        minlength=len(labels),
+    ).tolist() if any(value is not None for value in full_word_ids) else [0] * len(labels)
     windows = plan_context_windows(
         piece_counts,
         max_tokens=limit,
@@ -219,14 +222,16 @@ def extract_recording_embeddings(
             }
             hidden = model(**inputs).last_hidden_state[0].detach().cpu()
             input_ids = encoded["input_ids"][0].detach().cpu().numpy()
+            positions_by_word: list[list[int]] = [[] for _ in window_labels]
+            for position, word_id in enumerate(ids):
+                if word_id is not None:
+                    positions_by_word[word_id].append(position)
 
             for global_index in range(
                 window.emit_start_word, window.emit_end_word
             ):
                 local_index = global_index - window.start_word
-                positions = [
-                    index for index, value in enumerate(ids) if value == local_index
-                ]
+                positions = positions_by_word[local_index]
                 owner_window[global_index] = window.window_index
                 mapped_piece_counts[global_index] = len(positions)
                 if not positions:
@@ -289,8 +294,8 @@ def resolved_huggingface_revision(tokenizer: Any, model: Any) -> str:
     return revisions.pop()
 
 
-@lru_cache(maxsize=None)
-def _sha256_file_cached(path: str) -> str:
+@lru_cache(maxsize=256)
+def _sha256_file_cached(path: str, file_identity: tuple[int, ...]) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -299,7 +304,10 @@ def _sha256_file_cached(path: str) -> str:
 
 
 def sha256_file(path: str | Path) -> str:
-    return _sha256_file_cached(str(Path(path).resolve()))
+    resolved = Path(path).resolve()
+    stat = resolved.stat()
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    return _sha256_file_cached(str(resolved), identity)
 
 
 def write_npz_atomic(
@@ -390,6 +398,10 @@ def save_lexical_recording(
 
 
 def load_lexical_recording(path: str | Path) -> dict[str, Any]:
+    path = Path(path)
+    sidecar = path.with_name(f"{path.name}.sha256")
+    if sidecar.read_text(encoding="ascii").split() != [sha256_file(path), path.name]:
+        raise ValueError(f"Lexical archive integrity check failed: {path}")
     with np.load(path, allow_pickle=False) as stored:
         result = {key: stored[key] for key in stored.files if key != "metadata_json"}
         result["metadata"] = json.loads(stored["metadata_json"].item())
@@ -497,6 +509,8 @@ def build_revised_recording(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     source = _load_feature_archive(feature_archive)
     lexical = load_lexical_recording(lexical_archive)
+    if lexical["metadata"]["recording_id"] != recording_id:
+        raise ValueError(f"Lexical archive belongs to a different recording: {lexical_archive}")
     matrix = np.asarray(source["matrix"], dtype=np.float32)
     times = np.asarray(source["times"], dtype=np.float64)
     names = [str(value) for value in source["names"].tolist()]
@@ -523,6 +537,8 @@ def build_revised_recording(
     }
     if vectors.ndim != 2 or lexical_lengths != {len(vectors)}:
         raise ValueError(f"Malformed lexical archive {lexical_archive}")
+    if not np.isfinite(vectors).all() or not np.isfinite(matrix).all():
+        raise ValueError(f"Nonfinite lexical or dense predictors for {recording_id}")
     if not np.array_equal(
         lexical["word_index"], np.arange(len(vectors), dtype=np.int32)
     ):
@@ -540,10 +556,10 @@ def build_revised_recording(
     revised_matrix = matrix[:, keep]
     if "recording_onset" in revised_names:
         raise AssertionError("recording_onset survived name-based removal")
-    if set(revised_families) - set(TOP_LEVEL_FAMILIES):
+    if set(revised_families) != set(TOP_LEVEL_FAMILIES):
         raise ValueError(
-            f"Unexpected top-level families after removal: "
-            f"{sorted(set(revised_families) - set(TOP_LEVEL_FAMILIES))}"
+            f"Expected {TOP_LEVEL_FAMILIES} after onset removal; found "
+            f"{sorted(set(revised_families))}"
         )
     word_names = [
         name for name, family in zip(revised_names, revised_families) if family == "word"
@@ -630,6 +646,7 @@ def build_revised_recording(
             ]
         ),
         "lexical_vectors": np.asarray(vectors, dtype=np.float32),
+        "lexical_mapped": np.asarray(lexical["piece_counts"]) > 0,
         "lexical_onset_indices": onset_indices,
         "lexical_word_indices": np.asarray(lexical["word_index"], dtype=np.int32),
         "lexical_words": np.asarray(lexical["words"]),
