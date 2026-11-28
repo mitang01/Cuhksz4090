@@ -75,12 +75,19 @@ def _synthetic_smoke() -> dict:
         reductions=("word", "lexical"),
         seed=17,
     )
+    splits = result["split_reports"]
+    scores = result["scores"]
+    if len(splits) != 5 or len(scores) != 2 * len(records):
+        raise RuntimeError("Synthetic fit did not return all expected folds and scores")
+    reductions = sorted(scores["feature_family"].unique())
+    if reductions != ["lexical", "word"]:
+        raise RuntimeError(f"Unexpected synthetic ablations: {reductions}")
     return {
         "state": "PASS",
         "recordings": len(records),
-        "outer_folds": len(result["split_reports"]),
-        "score_rows": len(result["scores"]),
-        "families": sorted(result["scores"]["feature_family"].unique()),
+        "outer_folds": len(splits),
+        "score_rows": len(scores),
+        "families": reductions,
     }
 
 
@@ -110,7 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> dict:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "fit" and args.outer_mode == "loro" and args.model != "hubert_base":
+        parser.error("--outer-mode loro is available only for hubert_base")
     if args.command == "local-smoke":
         result = _synthetic_smoke()
     else:
