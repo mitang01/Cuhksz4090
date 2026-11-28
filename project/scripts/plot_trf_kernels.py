@@ -11,6 +11,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 from speech_strf.revised_plots import (
     load_kernel_series,
@@ -50,12 +51,17 @@ def main(argv: list[str] | None = None) -> dict:
         args.predictor,
         args.target_component - 1,
     )
-    expected_lags = [-200, -100, 0, 100, 200]
-    if series["lag_ms"].tolist() != expected_lags:
+    expected_lags = [1000 * float(lag) for lag in runner.config["encoding"]["lags_seconds"]]
+    series = series.sort_values("lag_ms").reset_index(drop=True)
+    observed_lags = series["lag_ms"].to_numpy()
+    if len(observed_lags) != len(expected_lags) or not np.allclose(
+        observed_lags, expected_lags, rtol=0, atol=1e-7
+    ):
         raise SystemExit(
-            f"Benchmark kernel requires exact lags {expected_lags}; found "
-            f"{series['lag_ms'].tolist()}"
+            f"Configured and saved lags differ: {expected_lags} vs {observed_lags.tolist()}"
         )
+    if not np.isfinite(series["coefficient_standardized_predictor"].to_numpy()).all():
+        raise SystemExit("Saved TRF kernel coefficients contain nonfinite values")
 
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -99,17 +105,9 @@ def main(argv: list[str] | None = None) -> dict:
             "predictor": args.predictor,
             "target_component_one_based": args.target_component,
             "lags_ms": expected_lags,
-            "lag_fit": "published benchmark five-lag fit",
+            "lag_fit": "revised primary fit using the configured lag grid",
         },
         "kernel_contract": kernel_metadata,
-        "dense_visualization_fit": {
-            "implemented": False,
-            "reason": (
-                "No 20 ms visualization refit was requested; benchmark "
-                "statistics and coefficients remain separate from any future "
-                "dense visualization fit."
-            ),
-        },
         "series": {
             "file": str(series_path),
             "sha256": sha256_file(series_path),
