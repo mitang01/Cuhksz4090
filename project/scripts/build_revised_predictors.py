@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from speech_strf.alignments import parse_textgrid
@@ -17,6 +18,30 @@ from speech_strf.lexical_predictors import (
     write_csv,
     write_npz_atomic,
 )
+
+
+def check_acoustic_control(original: Path, rich: Path) -> None:
+    """Verify that richer acoustics extends the existing dense feature design."""
+    with np.load(original, allow_pickle=False) as base, np.load(rich, allow_pickle=False) as extended:
+        if not np.array_equal(base["times"], extended["times"]):
+            raise ValueError(f"Original/rich time grids differ for {original.stem}")
+        original_names = base["names"].tolist()
+        rich_names = extended["names"].tolist()
+        rich_indices = {name: index for index, name in enumerate(rich_names)}
+        if len(rich_indices) != len(rich_names) or len(set(original_names)) != len(original_names):
+            raise ValueError(f"Duplicate feature names for {original.stem}")
+        if not set(original_names).issubset(rich_indices):
+            raise ValueError(f"Richer acoustics is missing original columns for {original.stem}")
+        original_indices = [rich_indices[name] for name in original_names]
+        if not np.array_equal(base["families"], extended["families"][original_indices]):
+            raise ValueError(f"Shared feature families differ for {original.stem}")
+        added = sorted(set(rich_names) - set(original_names))
+        if not added or any(extended["families"][rich_indices[name]] != "acoustic" for name in added):
+            raise ValueError(f"Richer acoustics must add only acoustic columns for {original.stem}")
+        if not np.allclose(
+            base["matrix"], extended["matrix"][:, original_indices], rtol=1e-6, atol=1e-8
+        ):
+            raise ValueError(f"Original predictor values differ between designs for {original.stem}")
 
 
 def main() -> None:
@@ -63,6 +88,9 @@ def main() -> None:
     required = {"recording_id", "alignment_path"}
     if not required.issubset(manifest.columns):
         raise SystemExit(f"Manifest must contain columns {sorted(required)}")
+    ids = manifest["recording_id"].astype(str)
+    if manifest["recording_id"].isna().any() or ids.str.strip().eq("").any() or ids.duplicated().any():
+        raise SystemExit("Manifest recording IDs must be nonempty and unique")
     if args.recording_ids:
         requested = set(args.recording_ids)
         unknown = requested - set(manifest["recording_id"].astype(str))
@@ -80,6 +108,16 @@ def main() -> None:
     }
     output = Path(args.output)
     lexical_recordings = Path(args.lexical_root) / "recordings"
+    lexical_manifest = Path(args.lexical_root) / "run_manifest.json"
+    lexical_manifest_sha256 = sha256_file(lexical_manifest)
+    lexical_run = json.loads(lexical_manifest.read_text(encoding="utf-8"))
+    selected_ids = set(manifest["recording_id"].astype(str))
+    if args.recording_ids:
+        existing_ids = {
+            path.stem for design in designs for path in (output / design).glob("*.npz")
+        }
+        if existing_ids - selected_ids:
+            parser.error("Use a separate --output for a recording subset")
     report_rows: list[dict] = []
     output_rows: list[dict] = []
 
@@ -97,15 +135,23 @@ def main() -> None:
                 f"{lexical_archive}"
             )
         lexical = load_lexical_recording(lexical_archive)
+        for key in ("model_id", "resolved_revision"):
+            if lexical["metadata"].get(key) != lexical_run[key]:
+                raise ValueError(f"{lexical_archive} disagrees with the lexical run on {key}")
         verify_words_against_alignment(lexical, parse_textgrid(alignment_path))
 
-        for design_name, feature_root in designs.items():
-            feature_archive = feature_root / f"{recording_id}.npz"
+        sources = {
+            name: root / f"{recording_id}.npz" for name, root in designs.items()
+        }
+        for design_name, feature_archive in sources.items():
             if not feature_archive.is_file():
                 raise FileNotFoundError(
                     f"{design_name} features for {recording_id} do not exist: "
                     f"{feature_archive}"
                 )
+        check_acoustic_control(sources["original"], sources["rich"])
+
+        for design_name, feature_archive in sources.items():
             arrays, report = build_revised_recording(
                 feature_archive,
                 lexical_archive,
@@ -153,9 +199,7 @@ def main() -> None:
         "manifest": str(manifest_path),
         "manifest_sha256": sha256_file(manifest_path),
         "lexical_root": args.lexical_root,
-        "lexical_run_manifest_sha256": sha256_file(
-            Path(args.lexical_root) / "run_manifest.json"
-        ),
+        "lexical_run_manifest_sha256": lexical_manifest_sha256,
         "design_feature_roots": {
             key: str(value) for key, value in designs.items()
         },
