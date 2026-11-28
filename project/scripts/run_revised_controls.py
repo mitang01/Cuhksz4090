@@ -42,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> dict:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     runner = RevisedTRFRunner(args.config)
     if args.command == "manifest":
         result = runner.build_manifests()
@@ -61,6 +62,9 @@ def main(argv: list[str] | None = None) -> dict:
             )
         )
     elif args.command == "null":
+        count = int(runner.config["nulls"]["shifts"])
+        if not 0 <= args.shift < count:
+            parser.error(f"shift must be a zero-based index from 0 to {count - 1}")
         middle = runner.resolved_depths(args.model)["middle"]
         if args.layer is not None and args.layer != middle:
             raise SystemExit(
