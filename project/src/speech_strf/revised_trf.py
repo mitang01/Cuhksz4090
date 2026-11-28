@@ -38,7 +38,7 @@ from .stage4_statistics import (
 PRIMARY_REDUCTIONS = ("acoustic", "prosodic", "phonetic", "word", "lexical")
 FAMILY_REDUCTIONS = PRIMARY_REDUCTIONS[:-1]
 CONTROL_VARIANTS = ("rich", "equal_rank", "zero_lag")
-FIT_SCHEMA_VERSION = 2
+FIT_SCHEMA_VERSION = 3
 PAPER_MODELS = (
     "hubert_base",
     "hubert_large_refactor_rerun",
@@ -123,8 +123,8 @@ def load_revised_config(
     alphas = [float(value) for value in encoding.get("alphas", [])]
     if not alphas or any(value < 0 or not np.isfinite(value) for value in alphas):
         raise ValueError("Ridge alpha grid must contain finite nonnegative values")
-    if int(encoding.get("target_pca_components", 0)) > 30:
-        raise ValueError("Target PCA may retain at most 30 components")
+    if not 1 <= int(encoding.get("target_pca_components", 0)) <= 30:
+        raise ValueError("Target PCA requires 1 to 30 components")
     if int(encoding.get("lexical_pca_components", 0)) < 1:
         raise ValueError("Lexical PCA component count must be positive")
     controls = config.get("controls", {})
@@ -175,6 +175,7 @@ def _load_recordings(
     recording_ids: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
+    reference_schema = None
     with h5py.File(activation_store, "r") as store:
         for recording_id in recording_ids:
             feature_path = feature_root / f"{recording_id}.npz"
@@ -210,6 +211,12 @@ def _load_recordings(
                 families = archive["families"].astype(str).tolist()
                 blocks = archive["blocks"].astype(str).tolist()
                 lexical = np.asarray(archive["lexical_vectors"], dtype=np.float64)
+                # Old archives encode missing token mappings as all-zero vectors.
+                mapped = (
+                    archive["lexical_mapped"]
+                    if "lexical_mapped" in archive.files
+                    else np.any(lexical != 0, axis=1)
+                )
                 onset_indices = np.asarray(
                     archive["lexical_onset_indices"], dtype=np.int64
                 )
@@ -237,16 +244,26 @@ def _load_recordings(
                 or lexical.ndim != 2
                 or len(lexical) != len(onset_indices)
                 or len(lexical) != len(word_indices)
+                or mapped.shape != (len(lexical),)
+                or mapped.dtype.kind != "b"
             ):
                 raise ValueError(f"{recording_id}: revised archive dimensions disagree")
             if set(families) != set(TOP_LEVEL_FAMILIES):
                 raise ValueError(
                     f"{recording_id}: expected four top-level predictor families"
                 )
+            expected_blocks = ["word_timing" if family == "word" else family for family in families]
+            if blocks != expected_blocks or len(set(names)) != len(names) or "recording_onset" in names:
+                raise ValueError(f"{recording_id}: invalid dense predictor schema")
+            schema = (names, families, blocks)
+            if reference_schema is None:
+                reference_schema = schema
+            elif schema != reference_schema:
+                raise ValueError(f"{recording_id}: predictor column order differs across recordings")
             if not np.array_equal(word_indices, np.arange(len(lexical))):
                 raise ValueError(f"{recording_id}: lexical word indexes are invalid")
-            if not np.isfinite(dense).all() or not np.isfinite(lexical).all():
-                raise ValueError(f"{recording_id}: predictors contain nonfinite values")
+            if any(not np.isfinite(values).all() for values in (dense, lexical, targets)):
+                raise ValueError(f"{recording_id}: predictors or activations contain nonfinite values")
             records[recording_id] = {
                 "dense": dense,
                 "times": times,
@@ -254,6 +271,7 @@ def _load_recordings(
                 "families": families,
                 "blocks": blocks,
                 "lexical_vectors": lexical,
+                "lexical_mapped": mapped,
                 "lexical_onset_indices": onset_indices,
                 "targets": targets,
                 "duration_seconds": _duration(times),
@@ -295,6 +313,13 @@ def _validate_shared_lexical_events(
                         f"{recording_id}: rich and original lexical events differ "
                         f"for {field}"
                     )
+            if "lexical_mapped" in original.files or "lexical_mapped" in rich.files:
+                if (
+                    "lexical_mapped" not in original.files
+                    or "lexical_mapped" not in rich.files
+                    or not np.array_equal(original["lexical_mapped"], rich["lexical_mapped"])
+                ):
+                    raise ValueError(f"{recording_id}: original and rich lexical masks differ")
 
 
 def _fit_lexical_projection(
@@ -304,25 +329,38 @@ def _fit_lexical_projection(
     requested: int,
     seed: int,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    training = np.vstack([records[key]["lexical_vectors"] for key in train_ids])
-    maximum = min(training.shape[0], training.shape[1])
+    mapped = {
+        key: records[key].get(
+            "lexical_mapped", np.ones(len(records[key]["lexical_vectors"]), dtype=bool)
+        )
+        for key in [*train_ids, *eval_ids]
+    }
+    training = np.vstack([records[key]["lexical_vectors"][mapped[key]] for key in train_ids])
+    maximum = min(training.shape[0] - 1, training.shape[1])
     achieved = min(int(requested), maximum)
     if achieved < 1:
-        raise ValueError("No training word occurrences are available for lexical PCA")
+        raise ValueError("Lexical PCA requires at least two mapped training words")
     projector = PCA(n_components=achieved, svd_solver="full", random_state=seed)
     projector.fit(training)
+    if not np.isfinite(projector.explained_variance_ratio_).all():
+        raise ValueError("Mapped training word embeddings have no usable variance")
     transformed: dict[str, np.ndarray] = {}
     for recording_id in [*train_ids, *eval_ids]:
-        events = projector.transform(records[recording_id]["lexical_vectors"])
+        valid = mapped[recording_id]
+        events = (
+            projector.transform(records[recording_id]["lexical_vectors"][valid])
+            if valid.any() else np.empty((0, achieved))
+        )
         transformed[recording_id] = rasterize_lexical_events(
             events,
-            records[recording_id]["lexical_onset_indices"],
+            records[recording_id]["lexical_onset_indices"][valid],
             len(records[recording_id]["dense"]),
         )
     return transformed, {
         "requested_components": int(requested),
         "achieved_components": int(achieved),
         "training_word_occurrences": int(len(training)),
+        "excluded_unmapped_training_words": int(sum((~mapped[key]).sum() for key in train_ids)),
         "input_dimensions": int(training.shape[1]),
         "explained_variance_coverage": float(
             projector.explained_variance_ratio_.sum()
@@ -655,23 +693,6 @@ def _model_masks(
     return masks
 
 
-def _fit_scaled_ridge(
-    x_train: np.ndarray,
-    y_train: np.ndarray,
-    x_eval: Mapping[str, np.ndarray],
-    mask: np.ndarray,
-    alpha: float,
-) -> dict[str, np.ndarray]:
-    scaler = StandardScaler().fit(x_train[:, mask])
-    model = Ridge(alpha=float(alpha)).fit(
-        scaler.transform(x_train[:, mask]), y_train
-    )
-    return {
-        recording_id: model.predict(scaler.transform(values[:, mask]))
-        for recording_id, values in x_eval.items()
-    }
-
-
 def _fit_scaled_ridge_with_assets(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -858,6 +879,21 @@ def fit_revised_encoding(
     fixed_reports = {
         int(value["outer_fold"]): value for value in (fixed_split_reports or [])
     }
+    if shift is not None:
+        expected_folds = {fold for fold, _, _ in splits}
+        if (
+            set(fixed_reports) != expected_folds
+            or len(fixed_split_reports or []) != len(expected_folds)
+            or fixed_target_assets is None
+        ):
+            raise ValueError("Shifted fits require fixed observed splits and PCA for every fold")
+        required = {
+            f"fold_{fold:02d}_{name}"
+            for fold in expected_folds
+            for name in ("target_mean", "target_components", "target_component_signs")
+        }
+        if missing := required - fixed_target_assets.keys():
+            raise ValueError(f"Observed target PCA assets are missing {sorted(missing)}")
     rows: list[dict[str, Any]] = []
     split_reports: list[dict[str, Any]] = []
     target_reports: list[dict[str, Any]] = []
@@ -1086,11 +1122,12 @@ def fit_revised_encoding(
                         predictions["lexical"][recording_id],
                         dtype=np.float32,
                     )
+        full_scores = {
+            key: _score(y_test[key], full_predictions[key]) for key in test_ids
+        }
         for reduction in reductions:
             for recording_id in test_ids:
-                full_r2 = _score(
-                    y_test[recording_id], full_predictions[recording_id]
-                )
+                full_r2 = full_scores[recording_id]
                 reduced_r2 = _score(
                     y_test[recording_id], predictions[reduction][recording_id]
                 )
@@ -1155,6 +1192,12 @@ class RevisedTRFRunner:
             raise ValueError(f"Stimulus manifest lacks columns {sorted(required)}")
         if len(frame) != int(self.config["expected_recording_count"]):
             raise ValueError("Stimulus manifest has an unexpected recording count")
+        if (
+            frame[list(required)].isna().any().any()
+            or frame["recording_id"].astype(str).duplicated().any()
+            or any(frame[column].astype(str).str.strip().eq("").any() for column in required)
+        ):
+            raise ValueError("Manifest requires unique recording IDs and nonempty group IDs")
         return frame
 
     def _recording_ids_groups(self) -> tuple[list[str], dict[str, str]]:
@@ -1212,6 +1255,7 @@ class RevisedTRFRunner:
             "fit_schema_version": FIT_SCHEMA_VERSION,
             "fit_implementation_sha256": _sha256(Path(__file__)),
             "config_sha256": self.config_hash,
+            "stimulus_manifest_sha256": _sha256(_resolve(self.root, self.config["manifest"])),
             "revised_archive_manifest_sha256": _sha256(manifest),
             "activation_store": str(store),
             "activation_bytes": stat.st_size,
@@ -1305,6 +1349,13 @@ class RevisedTRFRunner:
             )
         if spec.variant not in ("primary", *CONTROL_VARIANTS, "null"):
             raise ValueError(f"Unknown fit variant {spec.variant!r}")
+        if spec.outer_mode not in {"grouped", "loro"}:
+            raise ValueError(f"Unknown outer mode {spec.outer_mode!r}")
+        if spec.variant != "primary":
+            depths = resolve_depth_layers(available)
+            permitted = [depths["middle"]] if spec.variant == "null" else depths.values()
+            if spec.layer not in permitted:
+                raise ValueError(f"{spec.variant} requires one of these layers: {list(permitted)}")
         if spec.outer_mode == "loro" and (
             spec.model != "hubert_base" or spec.variant != "primary"
         ):
@@ -1342,11 +1393,7 @@ class RevisedTRFRunner:
             if spec.variant == "zero_lag"
             else [float(value) for value in encoding["lags_seconds"]]
         )
-        reductions: Sequence[str] = (
-            FAMILY_REDUCTIONS
-            if spec.variant in {"equal_rank", "null"}
-            else PRIMARY_REDUCTIONS
-        )
+        reductions = self.config["statistics"]["test_families"][spec.variant]
         equal_rank_cap = (
             int(self.config["controls"]["equal_rank_cap"])
             if spec.variant == "equal_rank"
@@ -1359,7 +1406,6 @@ class RevisedTRFRunner:
             fixed_reports, fixed_assets, observed_status_sha256 = (
                 self._load_observed_null_contract(spec.model, spec.layer)
             )
-            reductions = ("word",)
         capture_plot_assets = (
             spec.variant == "primary"
             and spec.outer_mode == "grouped"
@@ -1723,12 +1769,29 @@ class RevisedTRFRunner:
     def _inference_rows(
         self, frame: pd.DataFrame, panel: str
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        recording = (
-            frame.groupby(["recording_id", "feature_family"], as_index=False)
+        keys = ["model", "layer", "recording_id", "feature_family"]
+        if frame.duplicated(keys).any():
+            raise ValueError(f"{panel}: duplicate model/layer/recording/family scores")
+        expected_ids = set(self._recording_ids_groups()[0])
+        for cell, scores in frame.groupby(["model", "layer", "feature_family"]):
+            if set(scores["recording_id"]) != expected_ids:
+                raise ValueError(f"{panel}: incomplete recording scores for {cell}")
+        per_checkpoint = (
+            frame.groupby(["model", "recording_id", "feature_family"], as_index=False)
             .agg(
                 effect=("delta_r2", "mean"),
                 duration_seconds=("duration_seconds", "first"),
                 model_layer_cells=("delta_r2", "size"),
+            )
+        )
+        # Give each checkpoint equal weight when their layer counts differ.
+        recording = (
+            per_checkpoint.groupby(["recording_id", "feature_family"], as_index=False)
+            .agg(
+                effect=("effect", "mean"),
+                duration_seconds=("duration_seconds", "first"),
+                model_layer_cells=("model_layer_cells", "sum"),
+                checkpoint_count=("model", "nunique"),
             )
         )
         rows = []
@@ -1776,6 +1839,7 @@ class RevisedTRFRunner:
         self, scores: pd.DataFrame, panels: Mapping[str, Any], root: Path
     ) -> None:
         inference_tables = []
+        checkpoint_tables = []
         for (variant, outer_mode), frame in scores.loc[
             scores["variant"] != "null"
         ].groupby(["variant", "outer_mode"], sort=True):
@@ -1796,6 +1860,9 @@ class RevisedTRFRunner:
                 root / f"{variant}_{outer_mode}_recording_effects.csv", index=False
             )
             inference_tables.append(inference)
+            for model, model_scores in frame.groupby("model", sort=True):
+                _, model_inference = self._inference_rows(model_scores, panel)
+                checkpoint_tables.append(model_inference.assign(model=model))
 
         primary = scores.query("variant == 'primary' and outer_mode == 'grouped'")
         for variant in CONTROL_VARIANTS:
@@ -1810,6 +1877,10 @@ class RevisedTRFRunner:
                 suffixes=("_control", "_primary"),
                 validate="one_to_one",
             )
+            if len(paired) != len(control):
+                raise ValueError(f"{variant}: some control scores have no matched primary score")
+            if not paired["outer_fold_control"].eq(paired["outer_fold_primary"]).all():
+                raise ValueError(f"{variant}: matched control/primary folds differ")
             paired["delta_difference"] = (
                 paired["delta_r2_control"] - paired["delta_r2_primary"]
             )
@@ -1835,9 +1906,18 @@ class RevisedTRFRunner:
                 index=False,
             )
             inference_tables.append(inference)
+            for model, model_scores in contrast.groupby("model", sort=True):
+                _, model_inference = self._inference_rows(
+                    model_scores, f"{variant}_versus_primary"
+                )
+                checkpoint_tables.append(model_inference.assign(model=model))
         if inference_tables:
             pd.concat(inference_tables, ignore_index=True).to_csv(
                 root / "inference_summary.csv", index=False
+            )
+        if checkpoint_tables:
+            pd.concat(checkpoint_tables, ignore_index=True).to_csv(
+                root / "inference_by_checkpoint.csv", index=False
             )
 
     def _write_null_summary(
@@ -1855,18 +1935,45 @@ class RevisedTRFRunner:
             & (scores["feature_family"] == "word")
         ]
         keys = ["model", "layer", "recording_id"]
+        fold_keys = [*keys, "outer_fold"]
+        shifts = set(range(int(self.config["nulls"]["shifts"])))
+        if null.duplicated([*fold_keys, "shift"]).any() or any(
+            set(group["shift"]) != shifts for _, group in null.groupby(fold_keys)
+        ):
+            raise ValueError("Null scores require exactly one result per configured shift")
         mean_null = (
-            null.groupby(keys, as_index=False)
+            null.groupby(fold_keys, as_index=False)
             .agg(
                 mean_shifted_delta_r2=("delta_r2", "mean"),
                 completed_shifts=("shift", "nunique"),
             )
         )
-        paired = observed.merge(mean_null, on=keys, validate="one_to_one")
+        paired = observed.merge(mean_null, on=fold_keys, validate="one_to_one")
+        expected_ids = set(self._recording_ids_groups()[0])
+        expected_pairs = {
+            (model, self.resolved_depths(model)["middle"], recording)
+            for model in self.models for recording in expected_ids
+        }
+        if (
+            set(paired[keys].itertuples(index=False, name=None)) != expected_pairs
+            or len(paired) != len(mean_null)
+        ):
+            raise ValueError("Null inference requires all matched recordings at all nine middle layers")
         paired["observed_minus_mean_shifted"] = (
             paired["delta_r2"] - paired["mean_shifted_delta_r2"]
         )
         paired.to_csv(root / "null_observed_minus_shifted.csv", index=False)
+        checkpoint_rows = []
+        for model, group in paired.groupby("model", sort=True):
+            _, inference = self._inference_rows(
+                group.assign(delta_r2=group["observed_minus_mean_shifted"]),
+                "null_observed_minus_shifted",
+            )
+            checkpoint_rows.append(inference.assign(model=model))
+        by_checkpoint = pd.concat(checkpoint_rows, ignore_index=True)
+        by_checkpoint["q_value"] = benjamini_hochberg(by_checkpoint["p_value"])
+        by_checkpoint["survives_bh_0_05"] = by_checkpoint["q_value"] <= 0.05
+        by_checkpoint.to_csv(root / "null_inference_by_checkpoint.csv", index=False)
         recording = (
             paired.groupby("recording_id", as_index=False)
             .agg(
