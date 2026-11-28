@@ -11,6 +11,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 from speech_strf.revised_plots import (
     FAMILY_COLORS,
@@ -110,7 +111,7 @@ def _overview_figure(series, models: list[str], stem: Path) -> None:
         bbox_to_anchor=(0.5, 1.55)
     )
     axes[-1].set_xlabel("Relative depth (input = 0, final encoder layer = 1)")
-    fig.suptitle("Nine-checkpoint revised conditional-effect profiles", y=1.01)
+    fig.suptitle(f"Revised conditional-effect profiles ({len(models)} checkpoints)", y=1.01)
     _save(fig, stem)
 
 
@@ -133,12 +134,20 @@ def main(argv: list[str] | None = None) -> dict:
     args = parser.parse_args(argv)
     if args.bootstrap_samples < 10000:
         raise SystemExit("--bootstrap-samples must be at least 10000")
+    if not 0 < args.confidence < 1:
+        parser.error("--confidence must be strictly between 0 and 1")
 
     runner = RevisedTRFRunner(args.config)
-    models = args.models or runner.models
+    models = list(dict.fromkeys(args.models or runner.models))
     unknown = sorted(set(models) - set(runner.models))
     if unknown:
         raise SystemExit(f"Unknown models: {unknown}")
+    individual_models = list(dict.fromkeys(args.individual_model or [
+        "hubert_base" if "hubert_base" in models else models[0]
+    ]))
+    unknown_individual = sorted(set(individual_models) - set(models))
+    if unknown_individual:
+        parser.error(f"Individual models must be included in --model: {unknown_individual}")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     series, sources = collect_layer_profile_series(
@@ -148,12 +157,23 @@ def main(argv: list[str] | None = None) -> dict:
         confidence=args.confidence,
         seed=int(runner.config["random_seed"]),
     )
+    metrics = ["equal_recording_mean_delta_r2", "bootstrap_ci_low", "bootstrap_ci_high"]
+    if series.empty or not np.isfinite(series[metrics].to_numpy()).all():
+        raise SystemExit("Layer profiles contain missing or nonfinite estimates")
+    if series.duplicated(["model", "native_layer_index", "feature_family"]).any():
+        raise SystemExit("Duplicate model/layer/family estimates in layer profiles")
+    for model in models:
+        layers = series.loc[series["model"].eq(model)].groupby("native_layer_index")
+        layer_indices = sorted(layers.groups)
+        if (
+            not layer_indices
+            or layer_indices != list(range(len(layer_indices)))
+            or any(set(rows["feature_family"]) != set(PRIMARY_REDUCTIONS) for _, rows in layers)
+        ):
+            raise SystemExit(f"Incomplete layer profile for {model}")
+
     series_path = output / "layer_profile_series.csv"
     series.to_csv(series_path, index=False)
-
-    individual_models = args.individual_model or [
-        "hubert_base" if "hubert_base" in models else models[0]
-    ]
     metadata_paths = []
     common_metadata = {
         "reported_score": (
@@ -170,8 +190,6 @@ def main(argv: list[str] | None = None) -> dict:
         "source_sha256": sources,
     }
     for model in individual_models:
-        if model not in models:
-            raise SystemExit(f"Unknown individual model {model!r}")
         stem = output / f"layer_profiles_{model}"
         _individual_figure(series, model, stem)
         individual_series = series.loc[series["model"] == model]
@@ -197,7 +215,11 @@ def main(argv: list[str] | None = None) -> dict:
             },
         )
         metadata_paths.append(str(metadata_path))
-    overview_stem = output / "layer_profiles_nine_checkpoints"
+    overview_stem = output / (
+        "layer_profiles_nine_checkpoints"
+        if set(models) == set(runner.models) and len(models) == 9
+        else "layer_profiles_selected_checkpoints"
+    )
     _overview_figure(
         series, models, overview_stem
     )
