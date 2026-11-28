@@ -49,16 +49,27 @@ def main(argv: list[str] | None = None) -> dict:
         default="outputs/stage4_revision/revised_trf/figures/predicted_activations",
     )
     args = parser.parse_args(argv)
-    if args.end_seconds <= args.start_seconds:
-        raise SystemExit("--end-seconds must exceed --start-seconds")
+    if (
+        not np.isfinite([args.start_seconds, args.end_seconds]).all()
+        or not 0 <= args.start_seconds < args.end_seconds
+    ):
+        parser.error("Excerpt bounds must be finite, nonnegative, and increasing")
     if args.target_component < 1:
-        raise SystemExit("--target-component is one-based and must be positive")
+        parser.error("--target-component is one-based and must be positive")
+    if args.selection == "named" and args.layer is None:
+        parser.error("--layer is required when --selection=named")
+    if args.selection == "best-lexical" and args.layer is not None:
+        parser.error("Use --layer with --selection=named")
 
     runner = RevisedTRFRunner(args.config)
-    selection, selection_sources = layer_selection_table(
-        runner, args.model, args.recording_id
-    )
     if args.selection == "best-lexical":
+        selection, selection_sources = layer_selection_table(
+            runner, args.model, args.recording_id
+        )
+        if selection.empty or not np.isfinite(
+            selection["inner_validation_lexical_delta_r2"].to_numpy()
+        ).all():
+            raise SystemExit("Best-layer selection requires finite inner-validation scores")
         selected = selection.sort_values(
             ["inner_validation_lexical_delta_r2", "native_layer_index"],
             ascending=[False, True],
@@ -70,13 +81,9 @@ def main(argv: list[str] | None = None) -> dict:
             "within the outer fold; native-layer-index tie break"
         )
     else:
-        if not args.layer:
-            raise SystemExit("--layer is required when --selection=named")
-        if args.layer not in set(selection["layer"]):
-            raise SystemExit(
-                f"Layer {args.layer!r} is unavailable for {args.model}"
-            )
         layer = args.layer
+        selection = pd.DataFrame([{"layer": layer}])
+        selection_sources = {}
         selection_criterion = "prespecified named layer"
 
     unit = primary_unit(runner, args.model, layer)
@@ -84,6 +91,15 @@ def main(argv: list[str] | None = None) -> dict:
     trajectory, trajectory_metadata, trajectory_sources = load_trajectory(
         unit, args.recording_id, target_index
     )
+    times = trajectory["time_seconds"].to_numpy()
+    if not np.isfinite(times).all() or not np.all(np.diff(times) > 0):
+        raise SystemExit("Saved trajectory timestamps must be finite and strictly increasing")
+    components = ["observed_target_pc", "full_prediction", "lexical_omitted_prediction"]
+    if not np.isfinite(trajectory[components].to_numpy()).all():
+        raise SystemExit("Saved activation traces contain nonfinite values")
+    if args.selection == "best-lexical" and "outer_fold" in selected.index:
+        if int(selected["outer_fold"]) != int(trajectory_metadata["outer_fold"]):
+            raise SystemExit("Layer selection and held-out trajectory came from different folds")
     excerpt_mask = (
         (trajectory["time_seconds"] >= args.start_seconds)
         & (trajectory["time_seconds"] <= args.end_seconds)
@@ -103,14 +119,13 @@ def main(argv: list[str] | None = None) -> dict:
     trajectory.to_csv(series_path, index=False)
     selection_path = stem.with_name(f"{stem.name}.layer_selection.csv")
     selection.to_csv(selection_path, index=False)
-    scores = pd.DataFrame(
-        [
-            trajectory_scores(
-                trajectory, np.ones(len(trajectory), dtype=bool), "whole_recording"
-            ),
-            trajectory_scores(trajectory, excerpt_mask, "configured_excerpt"),
-        ]
-    )
+    score_rows = [
+        trajectory_scores(
+            trajectory, np.ones(len(trajectory), dtype=bool), "whole_recording"
+        ),
+        trajectory_scores(trajectory, excerpt_mask, "configured_excerpt"),
+    ]
+    scores = pd.DataFrame(score_rows)
     scores_path = stem.with_name(f"{stem.name}.scores.csv")
     scores.to_csv(scores_path, index=False)
 
@@ -170,7 +185,7 @@ def main(argv: list[str] | None = None) -> dict:
             ),
             "file": str(scores_path),
             "sha256": sha256_file(scores_path),
-            "values": scores.to_dict("records"),
+            "values": score_rows,
         },
         "series": {
             "file": str(series_path),
