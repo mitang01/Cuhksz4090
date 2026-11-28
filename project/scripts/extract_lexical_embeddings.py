@@ -115,6 +115,9 @@ def main() -> None:
     required = {"recording_id", "alignment_path"}
     if not required.issubset(rows.columns):
         raise SystemExit(f"Manifest must contain columns {sorted(required)}")
+    ids = rows["recording_id"].astype(str)
+    if rows["recording_id"].isna().any() or ids.str.strip().eq("").any() or ids.duplicated().any():
+        raise SystemExit("Manifest recording IDs must be nonempty and unique")
     if args.recording_ids:
         requested = set(args.recording_ids)
         unknown = requested - set(rows["recording_id"].astype(str))
@@ -124,9 +127,14 @@ def main() -> None:
     if rows.empty:
         raise SystemExit("No recordings selected")
 
-    tokenizer, model, resolved_revision = _load_checkpoint(args)
     output = Path(args.output)
     recordings_dir = output / "recordings"
+    if args.recording_ids:
+        existing_ids = {path.stem for path in recordings_dir.glob("*.npz")}
+        if existing_ids - set(rows["recording_id"].astype(str)):
+            parser.error("Use a separate --output for a recording subset")
+
+    tokenizer, model, resolved_revision = _load_checkpoint(args)
     recordings_dir.mkdir(parents=True, exist_ok=True)
     summary_rows: list[dict] = []
     word_rows: list[dict] = []
