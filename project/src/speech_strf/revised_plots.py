@@ -98,6 +98,7 @@ def collect_layer_profile_series(
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     rows: list[dict[str, Any]] = []
     sources: dict[str, str] = {}
+    expected_ids = set(runner._recording_ids_groups()[0])
     for model in models:
         layers = runner.layers(model)
         if len(layers) < 2:
@@ -120,7 +121,7 @@ def collect_layer_profile_series(
                         f"{model}/{layer}/{family}: duplicate recording scores"
                     )
                 values = family_rows["delta_r2"].to_numpy(dtype=float)
-                if len(values) != int(runner.config["expected_recording_count"]):
+                if set(family_rows["recording_id"]) != expected_ids:
                     raise ValueError(
                         f"{model}/{layer}/{family}: incomplete recording vector"
                     )
@@ -159,6 +160,8 @@ def held_out_fold(unit: Path, recording_id: str) -> tuple[int, dict[str, Any]]:
         raise ValueError(
             f"{recording_id}: expected one held-out fold in {unit}, found {len(matches)}"
         )
+    if recording_id in matches[0]["train_recording_ids"]:
+        raise ValueError(f"{recording_id} appears in both training and held-out sets")
     return int(matches[0]["outer_fold"]), matches[0]
 
 
@@ -186,11 +189,17 @@ def layer_selection_table(
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     rows = []
     sources: dict[str, str] = {}
+    reference_split = None
     for layer_index, layer in enumerate(runner.layers(model)):
         unit = primary_unit(runner, model, layer)
         report_path = unit / "split_reports.json"
         sources[str(report_path)] = sha256_file(report_path)
         fold, report = held_out_fold(unit, recording_id)
+        split = (fold, report["train_recording_ids"], report["test_recording_ids"])
+        if reference_split is None:
+            reference_split = split
+        elif split != reference_split:
+            raise ValueError(f"{model}/{layer}: layer selection requires matched recording splits")
         full = selected_inner_score(report, "full")
         lexical_omitted = selected_inner_score(report, "lexical")
         rows.append(
@@ -237,8 +246,10 @@ def load_trajectory(
         target = predictions[f"{prefix}::target"]
         full = predictions[f"{prefix}::full"]
         reduced = predictions[f"{prefix}::lexical_omitted"]
-    if not (target.shape == full.shape == reduced.shape):
+    if not (target.ndim == 2 and target.shape == full.shape == reduced.shape):
         raise ValueError("Observed/full/lexical-omitted target coordinates differ")
+    if times.shape != (len(target),) or not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
+        raise ValueError("Prediction timestamps must match the target rows and increase strictly")
     if not 0 <= target_component < target.shape[1]:
         raise ValueError(
             f"Target component {target_component} is outside 0..{target.shape[1] - 1}"
@@ -299,7 +310,7 @@ def load_trajectory(
     }
     sources = {
         str(path): sha256_file(path)
-        for path in (predictions_path, model_assets_path, fold_assets_path)
+        for path in (predictions_path, model_assets_path, fold_assets_path, unit / "split_reports.json")
     }
     return frame, metadata, sources
 
@@ -310,11 +321,13 @@ def trajectory_scores(
     selected = frame.loc[mask]
     if len(selected) < 2:
         raise ValueError(f"{scope}: at least two timestamps are required")
-    observed = selected["observed_target_pc"].to_numpy()
-    full_r2 = float(r2_score(observed, selected["full_prediction"]))
-    reduced_r2 = float(
-        r2_score(observed, selected["lexical_omitted_prediction"])
-    )
+    observed = selected["observed_target_pc"].to_numpy(dtype=np.float64)
+    constant_target = bool(np.all(observed == observed[0]))
+    full_r2 = reduced_r2 = delta = None
+    if not constant_target:
+        full_r2 = float(r2_score(observed, selected["full_prediction"]))
+        reduced_r2 = float(r2_score(observed, selected["lexical_omitted_prediction"]))
+        delta = full_r2 - reduced_r2
     return {
         "scope": scope,
         "frames": len(selected),
@@ -322,7 +335,8 @@ def trajectory_scores(
         "end_seconds": float(selected["time_seconds"].iloc[-1]),
         "full_r2": full_r2,
         "lexical_omitted_r2": reduced_r2,
-        "lexical_delta_r2": full_r2 - reduced_r2,
+        "lexical_delta_r2": delta,
+        "r2_status": "undefined_constant_target" if constant_target else "defined",
     }
 
 
@@ -341,7 +355,7 @@ def load_kernel_series(
         feature_names = assets[f"{prefix}::feature_names"].astype(str)
         families = assets[f"{prefix}::feature_families"].astype(str)
         blocks = assets[f"{prefix}::feature_blocks"].astype(str)
-        lags = assets[f"{prefix}::lag_ms"].astype(int)
+        lags = assets[f"{prefix}::lag_ms"]
         means = assets[f"{prefix}::scaler_mean"]
         scales = assets[f"{prefix}::scaler_scale"]
         standardized = assets[f"{prefix}::full_coef_standardized"]
@@ -387,6 +401,8 @@ def load_kernel_series(
     with np.load(fold_assets_path, allow_pickle=False) as assets:
         components = assets[f"{prefix}_target_components"]
     anchor = int(np.argmax(np.abs(components[target_component])))
+    if components[target_component, anchor] < 0:
+        raise ValueError("Saved kernel target component does not satisfy the sign rule")
     metadata = {
         "outer_fold": fold,
         "display_target": f"PC{target_component + 1}",
@@ -403,10 +419,10 @@ def load_kernel_series(
         "coefficient_units_exported_original": (
             "outer-training target PCA score units per original predictor unit"
         ),
-        "visualization_fit": "benchmark_five_lag_fit; no dense refit",
+        "visualization_fit": "revised_primary_fit",
     }
     sources = {
         str(path): sha256_file(path)
-        for path in (assets_path, fold_assets_path)
+        for path in (assets_path, fold_assets_path, unit / "split_reports.json")
     }
     return series, metadata, sources
